@@ -20,7 +20,9 @@ Data may be *lost*, databases may become *outdated* and things generally are not
 | Area | What you get |
 |------|----------------|
 | **Knowledge library** | Folders, tags, versions, uploads, semantic + keyword search, citations, live processing status |
-| **Agents** | Chat, research, and coding-style flows; **Agent Factory** (playbooks, skills, connectors); **agent lines** (scheduled / heartbeat automations) |
+| **Agent Factory (visual)** | **Browser-first** authoring: build **custom agents** and **multi-step playbooks** from simple linear flows to complex graphs—wire **skills**, **tool packs**, and **connectors** with the **graphical** composer (start without hand-editing stack config). |
+| **Chat & automation** | Natural-language **chat** and **research**; invoke custom agents by **`@handle`**; **agent lines** for scheduled / heartbeat runs, continuity context, and delivery hooks. |
+| **Skills (smart retrieval)** | Every **skill** is indexed for search (name, description, tools, example queries). With **`HYBRID_SEARCH_ENABLED`**, lookup uses **dense vectors + BM25** (RRF-style fusion) so playbook steps can **auto-discover** the right skills—**lightweight agents** stay small and still **pull new capability at runtime** when a step’s prompt matches the catalog. |
 | **Data** | **Data workspaces** with SQL, imports, external DB links, charts, NL→query |
 | **People** | **User messaging** (direct & group rooms, presence, reactions), **Teams** (roles, invitations, feeds, team chat, shared document trees) |
 | **Productivity** | **Org-mode** files, todos / agenda / refile / archive flows, **RSS**, optional **Google Reader–style** API |
@@ -48,12 +50,53 @@ The library accepts many **document**, **media**, and **archive** types. **Vecto
 
 ---
 
+## Agent Factory
+
+**Agent Factory** is how you turn Bastion from “a smart chat UI” into **your** automation surface: a **visual** composer where domain experts—not only developers—wire **tools**, **LLM steps**, **data connectors**, **skills**, and **human approvals** into reusable **agents** and **playbooks**. Each published agent gets a unique **`@handle`** (for example `@legal-brief`) so you invoke it deliberately from chat—no mystery routing.
+
+### Building blocks
+
+| Block | Role |
+|--------|------|
+| **Agent profile** | Name, model preferences, default tool packs, journal / sharing settings |
+| **Playbook** | The graph: ordered or branching **steps**—each step is a **tool call** (deterministic), an **LLM task** (your instructions + optional structured output), an **approval gate**, or control flow you compose in the UI |
+| **Skills** | Reusable mini-playbooks or prompt+tool bundles; **vector-indexed** (and optionally **BM25 + dense hybrid**) so steps can **auto-discover** relevant skills from natural language |
+| **Connectors** | REST/OAuth **data sources** you define once; steps call connector endpoints with mapped fields |
+| **Tool packs** | Curated access to Bastion capabilities—**documents**, **search**, **web/crawl**, **Org/todos**, **RSS**, **messaging**, **data workspace**, **M365 / GitHub / DevOps** (where configured), and more |
+| **Outputs** | Stream to **chat**, save **artifacts** (reports, tables, drafts), write to **Data Workspace** tables, enrich **Neo4j**, etc. |
+| **Agent lines** | Operational wrapper: **templates**, **schedules** (interval or cron + timezone), **heartbeats**, delivery—same playbooks, different run context |
+
+### Prompting: what “good” looks like
+
+You are not sprinkling magic strings—you are **contracting** each LLM step: role, inputs from prior steps (`{variable}` wiring), output shape (markdown vs JSON vs tool-friendly), and **when** to escalate to a human. Tool steps stay predictable; LLM steps handle judgment. **Skills** encode repeatable prompt+tool combos so playbooks stay short and you iterate in one place.
+
+### Examples that show what is possible
+
+1. **One-shot research brief** — User: `@climate-brief carbon tariffs EU 2025`. Playbook: **web search** → **crawl selected results** → **LLM synthesize** with “executive summary + controversies + citations” → emit a **Markdown artifact** you pin to the home dashboard. No code—only composed steps and your prompt text.
+
+2. **Zero-LLM ETL** — `@fec-pull` runs **connector** (public campaign finance API) → **transform** (sort / filter) → **save_to_workspace** table. Deterministic, auditable, runs the same every time—ideal when you do not want model drift on numeric data.
+
+3. **Fiction “room”** — `@chapter-polish` gets **read active editor** + **load referenced character sheet** → LLM step with *your* house style rubric → **structured manuscript edit** operations (or plain markdown patch) you apply in the editor. The “voice” is your prompt; the **machinery** is shared.
+
+4. **Inbox triage with a spine** — **list unread RSS** or **fetch connector inbox** → LLM classifies “urgent / FYI / ignore” → **approval** step before **post to team feed** or **send channel message**. Humans stay in the loop only when value is highest.
+
+5. **Standing competitive monitor** — **Agent line** on a cron: **crawl** a pricing or policy URL → **LLM** compares the new text to the **last run** (excerpt from the agent journal or a stored artifact) and decides if the change matters against criteria *you* wrote → **notify** via messaging when it does. Same playbook, **scheduled** context—wakes you when the model believes something moved.
+
+6. **Lightweight “skills find me” agent** — A minimal playbook with **skill auto-discovery** on: the step prompt says “user asked about deadlines in org files”; hybrid **skill search** pulls in the **Org todos** skill pack automatically so the agent gains **refile / agenda** tools without you enumerating ten tool names.
+
+7. **Cross-stack analyst** — Connector hits your **internal REST catalog** → results land in **Data Workspace** → second LLM step writes SQL against that table → chart artifact for stand-up. One profile ties external API + internal SQL + narrative.
+
+These are **patterns**, not shipped products—you assemble what your organization needs. Deeper YAML patterns and field-level docs live in **[docs/AGENT_FACTORY.md](docs/AGENT_FACTORY.md)**, **[docs/AGENT_FACTORY_EXAMPLES.md](docs/AGENT_FACTORY_EXAMPLES.md)**, and **[docs/AGENT_FACTORY_TOOLS.md](docs/AGENT_FACTORY_TOOLS.md)**.
+
+---
+
 ## Capabilities in depth
 
 ### Intelligence & automation
 
 - **LangGraph orchestration** — Checkpointer-backed workflows, resumable threads, structured tool I/O.
-- **Agent Factory** — **Playbooks**, **skills**, tool packs, optional **M365 / GitHub / DevOps**-style actions when configured; **artifacts** you can reopen, pin, and share.
+- **Agent Factory** — Described above: visual agents, playbooks, skills, connectors, artifacts, and lines. Tool packs cover documents, web, messaging, data workspace, and integrations such as **M365 / GitHub / DevOps** where you enable them. (**Code-workspace tooling is not production-ready yet**—do not plan rollouts around it.)
+- **Skill catalog & auto-discovery** — Skills live in a dedicated **Qdrant** collection with rich embedding text (category, required/optional tools, example queries). Set **`HYBRID_SEARCH_ENABLED=true`** (see `docker-compose.yml` / `.env`) so skill search adds a **BM25 sparse signal** fused with dense vectors: better lexical matches (exact tool names, jargon) alongside semantics. The orchestrator can **auto-inject** discovered skills into playbook steps so agents **grow capability on demand** without listing every skill up front.
 - **Agent lines** — **Templates**, **heartbeat schedules** (interval or cron with timezone), continuity and delivery hooks for recurring autonomous runs.
 - **Tool service (gRPC)** — Document, search, org, RSS, messaging, crawl, data workspace, and domain tools for agents—centralized and typed.
 - **Human-in-the-loop** — Permission gates for sensitive tools (e.g. web, outbound messaging).
@@ -61,17 +104,18 @@ The library accepts many **document**, **media**, and **archive** types. **Vecto
 
 ### Library, search, and graph
 
-- **Hybrid retrieval** — Dense vectors (**Qdrant**), optional **BM25** / lexical paths where enabled, reranking where configured.
+- **Hybrid retrieval** — Dense vectors (**Qdrant**), optional **BM25** / lexical paths where enabled (`HYBRID_SEARCH_ENABLED`), reranking where configured—the same hybrid switch also upgrades **skill** search used by Agent Factory auto-discovery (see above).
 - **Knowledge graph** — **Neo4j** entities and relationships for exploration and entertainment catalogs.
 - **Unified search** — One mental model for “find it” across documents, tools, and agents; answers with **citations** and previews.
 - **Operator-grade UI** — Folder tree, tabs, batch folder hydration for large libraries, WebSockets for pipeline status.
 
-### Writing, editing, and long-form
+### Long-form writing & editing (you define the agent)
 
-- Flows for **fiction**, **outline**, **character**, **proofreading**, and **rules** editing grounded in your manuscript and project context.
-- **Collaborative editing** — Real-time shared editing on supported documents (Yjs-backed collab in the editor when a room is active; per-document encryption disables collaboration—see in-app help).
+There is no fixed catalog of “fiction agent vs proofreading agent” in code anymore—you **build** those behaviors in **Agent Factory**: grant **document** and **editor** tools, add **LLM steps** with *your* style guide or rubric, branch on **approval** if you want human sign-off, and publish as `@my-line-editor`. The same blocks power **newsletters**, **policy redlines**, **lore bibles**, or **grant narrative** checks—whatever prompts and tool packs you choose.
+
+- **Collaborative editing** — Real-time shared editing on supported documents (Yjs-backed collab when a room is active; per-document encryption disables collaboration—see in-app help).
 - **Document versioning** for editable text types (e.g. Markdown, Org, plain text).
-- **Org-mode** as a first-class citizen: structure preserved, **WebDAV** for mobile clients (e.g. beorg / Orgzly-class apps), capture and agenda surfaces in the app.
+- **Org-mode** — Structure preserved, **WebDAV** for mobile clients, capture and agenda in the app—**and** automatable via Org/todo tools inside your custom agents.
 
 ### Data workspaces & SQL
 
@@ -152,10 +196,7 @@ The library accepts many **document**, **media**, and **archive** types. **Vecto
 - **External Services**: Qdrant and Neo4j
 - **Networking**: Bridge network for inter-service communication
 - **Volumes**: Persistent storage for uploads, processed files, operational database, and data workspaces
-
-## Deployment
-
-For **compose files**, **`.env` layout**, **minimal stacks**, **GHCR images**, security and operations (hobby through production operators), see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+- **Operations**: Full install / env / GHCR / security guidance in **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**
 
 ## Quick Start
 
