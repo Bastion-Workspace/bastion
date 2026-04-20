@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version label (leave empty to use VERSION file from the selected branch)'
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -56,9 +62,17 @@ jobs:
 
       - name: Extract version and metadata
         id: metadata
+        env:
+          VERSION_INPUT: ${{ inputs.version || '' }}
         run: |
-          # Extract version from tag (remove 'v' prefix)
-          VERSION=${GITHUB_REF#refs/tags/v}
+          # Version: explicit workflow input, else git tag (v*), else VERSION file (manual runs)
+          if [[ -n "${VERSION_INPUT// }" ]]; then
+            VERSION="${VERSION_INPUT// }"
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/v}
+          else
+            VERSION=$(tr -d '[:space:]' < VERSION)
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           
           # Detect if dev or production

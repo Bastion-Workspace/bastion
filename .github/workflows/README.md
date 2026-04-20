@@ -6,7 +6,7 @@ This repository uses GitHub Actions to automatically build and push Docker image
 
 ## Workflow Trigger
 
-The workflow (`build-and-push.yml`) triggers automatically when you push a git tag matching the pattern `v*` (e.g., `v0.10.1-dev` or `v0.10.1`).
+The workflow (`build-and-push.yml`) triggers automatically when you push a git tag matching the pattern `v*` (e.g., `v0.10.1-dev` or `v0.10.1`). You can also run it manually from **Actions → Build and Push Docker Images → Run workflow** (optional **version** input; if omitted, the `VERSION` file on the selected branch is used).
 
 ## Version Management
 
