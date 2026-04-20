@@ -109,7 +109,7 @@ impl CapabilityRegistry {
         );
         capabilities.insert(
             "create_directory".to_string(),
-            Box::new(CreateDirectoryCapability) as Box<dyn Capability>,
+            Box::new(filesystem::CreateDirectoryCapability) as Box<dyn Capability>,
         );
         capabilities.insert(
             "file_tree".to_string(),
