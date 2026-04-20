@@ -4,7 +4,7 @@
  * **BULLY!** Configure your org-mode experience!
  * 
  * Provides UI for:
- * - TODO state sequences
+ * - Org TODO-keyword state sequences
  * - Tag definitions
  * - Agenda preferences
  * - Display preferences
@@ -141,7 +141,7 @@ const OrgModeSettingsTab = () => {
     }
   };
 
-  // TODO Sequence Handlers
+  // TODO-keyword sequence handlers
   const handleAddTodoSequence = () => {
     setEditingTodoSequence({
       name: '',
@@ -521,7 +521,7 @@ const OrgModeSettingsTab = () => {
           </motion.div>
         </Grid>
 
-        {/* TODO State Sequences */}
+        {/* TODO-keyword state sequences (workflow definitions) */}
         <Grid item xs={12}>
           <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -865,7 +865,7 @@ const OrgModeSettingsTab = () => {
         </Grid>
       </Grid>
 
-      {/* TODO Sequence Dialog - Simplified for now */}
+      {/* Sequence editor dialog (simplified) */}
       <Dialog open={todoDialogOpen} onClose={() => setTodoDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>
           {editingTodoSequence?.name ? 'Edit' : 'Add'} TODO Sequence

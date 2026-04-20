@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -24,24 +24,51 @@ import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
+import rehypeHighlightChatSearch from '../../utils/rehypeHighlightChatSearch';
+import { highlightPlainTextSearch } from '../../utils/highlightPlainTextSearch';
 import { renderCitations } from '../../utils/chatUtils';
+import { alpha } from '@mui/material/styles';
 import ExportButton from './ExportButton';
 import ReadAloudButton from './ReadAloudButton';
 import LessonPreviewCard from '../LessonPreviewCard';
-import ChartRenderer from './ChartRenderer';
+import ArtifactCard from './ArtifactCard';
+
+/** Parse artifact payload from message metadata (object or JSON string). */
+export const parseArtifactFromMessageMetadata = (metadata) => {
+  if (!metadata?.artifact) return null;
+  let a = metadata.artifact;
+  if (typeof a === 'string') {
+    try {
+      a = JSON.parse(a);
+    } catch {
+      return null;
+    }
+  }
+  if (!a || typeof a !== 'object' || !a.artifact_type) return null;
+  return a;
+};
+
+/** All artifact payloads from message metadata (plural array or singular). */
+export const parseArtifactsFromMessageMetadata = (metadata) => {
+  if (!metadata) return [];
+  let list = metadata.artifacts;
+  if (typeof list === 'string') {
+    try {
+      list = JSON.parse(list);
+    } catch {
+      list = null;
+    }
+  }
+  if (Array.isArray(list) && list.length > 0) {
+    return list.filter((a) => a && typeof a === 'object' && a.artifact_type);
+  }
+  const single = parseArtifactFromMessageMetadata(metadata);
+  return single ? [single] : [];
+};
 
 /** True if URL is an in-system document file (research result); needs auth and no Import. */
 const isDocumentFileUrl = (url) =>
   typeof url === 'string' && url.includes('/api/documents/') && url.includes('/file');
-
-/** Strip html:chart code blocks and preceding ## Chart: heading so markdown does not show raw HTML. */
-const stripChartCodeBlocks = (content) => {
-  if (!content || typeof content !== 'string') return content || '';
-  return content
-    .replace(/\n*## Chart: [^\n]+\n+\s*```html:chart\n[\s\S]*?```/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-};
 
 const parseJsonStringArray = (value) => {
   if (!value) return [];
@@ -168,6 +195,90 @@ const AuthDocumentImage = React.memo(({ url, alt, onClick, sx, ...rest }) => {
   );
 });
 
+const CHAT_MESSAGE_REHYPE_SANITIZE_OPTIONS = {
+  tagNames: [
+    'details', 'summary', 'div', 'span',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+    'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
+    'ul', 'ol', 'li',
+    'blockquote', 'pre', 'code',
+    'table', 'thead', 'tbody', 'tr', 'th', 'td',
+    'a', 'img',
+    'hr',
+    'mark',
+  ],
+  attributes: {
+    '*': ['class', 'id', 'align'],
+    'a': ['href', 'title'],
+    'img': ['src', 'alt', 'title', 'width', 'height'],
+    'div': ['style'],
+    'span': ['style'],
+    'details': ['open'],
+    'summary': [],
+    mark: ['className', 'dataChatScrollTarget'],
+  },
+  protocols: {
+    href: ['http', 'https', 'mailto'],
+  },
+};
+
+/** Stable reference for ReactMarkdown (plugins are stateless). */
+const CHAT_MESSAGE_REMARK_PLUGINS = [remarkBreaks, remarkGfm];
+
+function chatMessageCitationsEqual(prevCitations, nextCitations) {
+  if (prevCitations === nextCitations) return true;
+  if (prevCitations == null && nextCitations == null) return true;
+  if (!Array.isArray(prevCitations) || !Array.isArray(nextCitations)) return false;
+  if (prevCitations.length !== nextCitations.length) return false;
+  for (let i = 0; i < prevCitations.length; i += 1) {
+    if (prevCitations[i] !== nextCitations[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Fingerprint for memo equality; false negative = extra re-render only.
+ * @param {unknown} artifact
+ * @returns {string}
+ */
+function artifactMemoFingerprint(artifact) {
+  if (artifact == null || artifact === '') return String(artifact);
+  if (typeof artifact === 'string') {
+    try {
+      const parsed = JSON.parse(artifact);
+      if (parsed && typeof parsed === 'object') {
+        return artifactMemoFingerprint(parsed);
+      }
+    } catch {
+      return `rawstr:${artifact.length}`;
+    }
+    return `str:${artifact.length}`;
+  }
+  if (typeof artifact !== 'object') return String(artifact);
+  const code = artifact.code;
+  const codeLen =
+    typeof code === 'string' ? code.length : code != null ? String(code).length : 0;
+  return `${artifact.artifact_type ?? ''}:${artifact.id ?? artifact.message_id ?? ''}:${(artifact.title || '').slice(0, 120)}:${codeLen}`;
+}
+
+function artifactPayloadsMemoEqual(prevMeta, nextMeta) {
+  if (artifactMemoFingerprint(prevMeta?.artifact ?? null) !== artifactMemoFingerprint(nextMeta?.artifact ?? null)) {
+    return false;
+  }
+  const pas = prevMeta?.artifacts ?? null;
+  const nas = nextMeta?.artifacts ?? null;
+  if (pas === nas) return true;
+  if (pas == null && nas == null) return true;
+  if (Array.isArray(pas) && Array.isArray(nas)) {
+    if (pas.length !== nas.length) return false;
+    for (let i = 0; i < pas.length; i += 1) {
+      if (artifactMemoFingerprint(pas[i]) !== artifactMemoFingerprint(nas[i])) return false;
+    }
+    return true;
+  }
+  return artifactMemoFingerprint(pas) === artifactMemoFingerprint(nas);
+}
+
 /**
  * ChatMessage - Memoized individual message component
  * Extracted from ChatMessagesArea to prevent unnecessary re-renders
@@ -175,13 +286,15 @@ const AuthDocumentImage = React.memo(({ url, alt, onClick, sx, ...rest }) => {
 const ChatMessage = React.memo(({
   message,
   index,
+  messageListIndex,
+  inThreadSearchQuery = '',
+  inThreadSearchActive = false,
   isLoading,
   theme,
   aiName,
   markdownComponents,
   handleContextMenu,
   handleImportImage,
-  setFullScreenChart,
   formatTimestamp,
   handleCopyMessage,
   handleSaveAsMarkdown,
@@ -201,10 +314,26 @@ const ChatMessage = React.memo(({
   onSwitchBranch,
   siblingInfo,
   anyMessageStreaming,
+  setActiveArtifact,
+  openArtifact,
+  activeArtifact = null,
+  artifactCollapsed = false,
 }) => {
   const [imageDetailIndex, setImageDetailIndex] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editDraft, setEditDraft] = useState('');
+
+  const rehypePluginsForMessage = useMemo(() => {
+    const plugins = [rehypeRaw];
+    if (inThreadSearchActive && inThreadSearchQuery.trim()) {
+      plugins.push([
+        rehypeHighlightChatSearch,
+        { query: inThreadSearchQuery.trim(), markScrollTarget: true },
+      ]);
+    }
+    plugins.push([rehypeSanitize, CHAT_MESSAGE_REHYPE_SANITIZE_OPTIONS]);
+    return plugins;
+  }, [inThreadSearchActive, inThreadSearchQuery]);
 
   // Signal Corps: Render notifications as centered, borderless pills
   if (message.type === 'notification') {
@@ -232,6 +361,7 @@ const ChatMessage = React.memo(({
     return (
       <Box
         key={message.id || index}
+        data-chat-message-index={messageListIndex ?? index}
         sx={{
           width: '100%',
           display: 'flex',
@@ -283,6 +413,7 @@ const ChatMessage = React.memo(({
   return (
     <Box
       key={message.id || index}
+      data-chat-message-index={messageListIndex ?? index}
       sx={{
         display: 'flex',
         flexDirection: 'column',
@@ -343,7 +474,7 @@ const ChatMessage = React.memo(({
             }
             return message.role === 'user'
               ? theme.palette.mode === 'dark'
-                ? 'rgba(25, 118, 210, 0.4)'
+                ? alpha(theme.palette.primary.main, 0.4)
                 : 'primary.light'
               : message.isError
                 ? 'error.light'
@@ -381,7 +512,7 @@ const ChatMessage = React.memo(({
                 color="text.secondary"
                 sx={{ fontSize: '0.75rem', fontWeight: 600 }}
               >
-                {aiName}
+                {message.metadata?.persona_ai_name || aiName}
               </Typography>
               {(message.metadata?.agent_display_name || message.metadata?.agent_type || message.agent_type) && (
                 <Chip 
@@ -436,6 +567,29 @@ const ChatMessage = React.memo(({
             <LessonPreviewCard lesson={message.metadata.lesson_data} />
           </Box>
         )}
+
+        {(() => {
+          const arts = parseArtifactsFromMessageMetadata(message.metadata);
+          const open = openArtifact || setActiveArtifact;
+          if (!arts.length || message.role === 'user' || !open) return null;
+          return (
+            <Box sx={{ mb: 2 }}>
+              {arts.map((art, i) => (
+                <Box
+                  key={`${art.title || 'artifact'}-${art.artifact_type}-${i}-${String(art.code || '').slice(0, 40)}`}
+                  sx={{ mb: 1 }}
+                >
+                  <ArtifactCard
+                    artifact={art}
+                    onOpen={(payload) => open(payload)}
+                    activeArtifact={activeArtifact}
+                    artifactCollapsed={artifactCollapsed}
+                  />
+                </Box>
+              ))}
+            </Box>
+          );
+        })()}
 
         {/* Message Content */}
         <Box 
@@ -514,9 +668,20 @@ const ChatMessage = React.memo(({
                         textUnderlineOffset: '0.2em',
                       },
                     }),
+                    '& mark.chat-in-thread-search-mark': {
+                      backgroundColor:
+                        theme.palette.mode === 'dark'
+                          ? 'rgba(255, 213, 79, 0.35)'
+                          : 'rgba(255, 213, 79, 0.55)',
+                      color: 'inherit',
+                      padding: '0 2px',
+                      borderRadius: '2px',
+                    },
                   }}
                 >
-                  {message.content}
+                  {inThreadSearchActive && inThreadSearchQuery.trim()
+                    ? highlightPlainTextSearch(message.content, inThreadSearchQuery)
+                    : message.content}
                 </Typography>
               )}
             </>
@@ -566,146 +731,32 @@ const ChatMessage = React.memo(({
               '& blockquote': {
                 margin: '16px 0',
                 padding: '8px 16px'
-              }
+              },
+              '& mark.chat-in-thread-search-mark': {
+                backgroundColor:
+                  theme.palette.mode === 'dark'
+                    ? 'rgba(255, 213, 79, 0.35)'
+                    : 'rgba(255, 213, 79, 0.55)',
+                color: 'inherit',
+                padding: '0 2px',
+                borderRadius: '2px',
+              },
             }}>
-              {(() => {
-                const displayContent = stripChartCodeBlocks(message.content || '');
-                
-                const handleChartImport = (data, format) => {
-                  // For SVG, we convert to a Data URI
-                  let dataUri = data;
-                  if (format === 'svg' && !data.startsWith('data:')) {
-                    dataUri = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(data)))}`;
-                  } else if (format === 'base64_png' && !data.startsWith('data:')) {
-                    dataUri = `data:image/png;base64,${data}`;
-                  }
-                  handleImportImage(dataUri);
-                };
-
-                return (
-                  <ReactMarkdown 
-                    className="markdown-content"
-                    components={{
-                      ...markdownComponents,
-                      code: (props) => markdownComponents.code({
-                        ...props,
-                        staticData: message.metadata?.static_visualization_data,
-                        staticFormat: message.metadata?.static_format,
-                        onImport: handleChartImport,
-                        onFullScreen: (html) => setFullScreenChart(html)
-                      })
-                    }}
-                    remarkPlugins={[remarkBreaks, remarkGfm]}
-                    rehypePlugins={[
-                      rehypeRaw,
-                      [
-                        rehypeSanitize,
-                        {
-                          tagNames: [
-                            'details', 'summary', 'div', 'span',
-                            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-                            'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
-                            'ul', 'ol', 'li',
-                            'blockquote', 'pre', 'code',
-                            'table', 'thead', 'tbody', 'tr', 'th', 'td',
-                            'a', 'img',
-                            'hr'
-                          ],
-                          attributes: {
-                            '*': ['class', 'id'],
-                            'a': ['href', 'title'],
-                            'img': ['src', 'alt', 'title', 'width', 'height'],
-                            'div': ['style'],
-                            'span': ['style'],
-                            'details': ['open'],
-                            'summary': []
-                          },
-                          protocols: {
-                            href: ['http', 'https', 'mailto']
-                            // NOTE: Not restricting 'src' protocols - allow data URIs, absolute URLs, and relative paths
-                          }
-                        }
-                      ]
-                    ]}
-                  >
-                    {displayContent}
-                  </ReactMarkdown>
-                );
-              })()}
+              <ReactMarkdown
+                className="markdown-content"
+                components={markdownComponents}
+                remarkPlugins={CHAT_MESSAGE_REMARK_PLUGINS}
+                rehypePlugins={rehypePluginsForMessage}
+              >
+                {message.content || ''}
+              </ReactMarkdown>
             </Box>
           )}
-
-          {/* Chart from metadata (primary path; avoids raw HTML in markdown) */}
-          {message.role === 'assistant' && (() => {
-            let chartResult = message.metadata?.chart_result;
-            if (typeof chartResult === 'string') {
-              try {
-                chartResult = JSON.parse(chartResult);
-              } catch {
-                chartResult = null;
-              }
-            }
-            if (!chartResult?.success || !chartResult?.chart_data) return null;
-            const staticData = message.metadata?.static_visualization_data;
-            const staticFormat = message.metadata?.static_format;
-            const handleChartImport = (data, format) => {
-              let dataUri = data;
-              if (format === 'svg' && !data.startsWith('data:')) {
-                dataUri = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(data)))}`;
-              } else if (format === 'base64_png' && !data.startsWith('data:')) {
-                dataUri = `data:image/png;base64,${data}`;
-              }
-              handleImportImage(dataUri);
-            };
-            return (
-              <ChartRenderer
-                html={chartResult.chart_data}
-                staticData={staticData}
-                staticFormat={staticFormat}
-                onImport={handleChartImport}
-                onFullScreen={(html) => setFullScreenChart(html)}
-              />
-            );
-          })()}
 
           {/* ROOSEVELT'S ENHANCED CITATION DISPLAY: Support new numbered format */}
           {(message.metadata?.citations || message.citations) && renderCitations(message.metadata?.citations || message.citations)}
 
           {/* Editor proposals are shown as inline diffs in DocumentViewer (DB-only path) */}
-          {/* News results rendering */}
-          {message.role === 'assistant' && (isAdmin || has('feature.news.view')) && Array.isArray(message.news_results) && message.news_results.length > 0 && (
-            <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 1 }}>
-              {message.news_results.map((h, idx) => (
-                <Paper key={`${h.id}-${idx}`} variant="outlined" sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>{h.title}</Typography>
-                    <Chip size="small" label={h.severity?.toUpperCase() || 'NEWS'} color={h.severity === 'breaking' ? 'error' : h.severity === 'urgent' ? 'warning' : 'default'} />
-                  </Box>
-                  <Typography variant="body2" color="text.secondary">{h.summary}</Typography>
-                  <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
-                    <Chip size="small" label={`${h.sources_count || 0} sources`} />
-                    {typeof h.diversity_score === 'number' && <Chip size="small" label={`diversity ${Math.round((h.diversity_score||0)*100)}%`} />}
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                    <Button size="small" variant="contained" onClick={() => {
-                      try {
-                        // Prefer client-side navigation to preserve app state
-                        if (window?.history && typeof window.history.pushState === 'function') {
-                          window.history.pushState({}, '', `/news/${h.id}`);
-                          // Dispatch a popstate event so routers listening can react
-                          window.dispatchEvent(new PopStateEvent('popstate'));
-                        } else {
-                          window.location.href = `/news/${h.id}`;
-                        }
-                      } catch {
-                        window.location.href = `/news/${h.id}`;
-                      }
-                    }}>Open</Button>
-                  </Box>
-                </Paper>
-              ))}
-            </Box>
-          )}
 
           {/* Message Attachments */}
           {message.metadata?.attachments && Array.isArray(message.metadata.attachments) && message.metadata.attachments.length > 0 && (
@@ -1114,14 +1165,28 @@ const ChatMessage = React.memo(({
     prevProps.message.isError === nextProps.message.isError &&
     prevProps.message.isStreaming === nextProps.message.isStreaming &&
     prevProps.message.isToolStatus === nextProps.message.isToolStatus &&
-    JSON.stringify(prevProps.message.metadata?.citations || prevProps.message.citations) === 
-    JSON.stringify(nextProps.message.metadata?.citations || nextProps.message.citations) &&
+    chatMessageCitationsEqual(
+      prevProps.message.metadata?.citations || prevProps.message.citations,
+      nextProps.message.metadata?.citations || nextProps.message.citations,
+    ) &&
     (prevProps.message.metadata?.duration_ms || null) === (nextProps.message.metadata?.duration_ms || null) &&
     (prevProps.message.metadata?.skills_used || null) === (nextProps.message.metadata?.skills_used || null) &&
     (prevProps.message.metadata?.tools_used_categories || null) === (nextProps.message.metadata?.tools_used_categories || null) &&
     (prevProps.message.metadata?.line_id || null) === (nextProps.message.metadata?.line_id || null) &&
     (prevProps.message.metadata?.line_role || null) === (nextProps.message.metadata?.line_role || null) &&
     (prevProps.message.metadata?.agent_display_name || null) === (nextProps.message.metadata?.agent_display_name || null) &&
+    (prevProps.message.metadata?.persona_ai_name || null) === (nextProps.message.metadata?.persona_ai_name || null) &&
+    artifactPayloadsMemoEqual(prevProps.message.metadata, nextProps.message.metadata) &&
+    (prevProps.message.jobId || prevProps.message.metadata?.job_id || null) ===
+      (nextProps.message.jobId || nextProps.message.metadata?.job_id || null) &&
+    prevProps.message.isPermissionRequest === nextProps.message.isPermissionRequest &&
+    prevProps.message.requiresApproval === nextProps.message.requiresApproval &&
+    prevProps.message.planApproved === nextProps.message.planApproved &&
+    prevProps.message.research_plan === nextProps.message.research_plan &&
+    prevProps.setActiveArtifact === nextProps.setActiveArtifact &&
+    prevProps.openArtifact === nextProps.openArtifact &&
+    prevProps.artifactCollapsed === nextProps.artifactCollapsed &&
+    prevProps.activeArtifact?.code === nextProps.activeArtifact?.code &&
     prevProps.isLoading === nextProps.isLoading &&
     prevProps.copiedMessageId === nextProps.copiedMessageId &&
     prevProps.savingNoteFor === nextProps.savingNoteFor &&
@@ -1129,7 +1194,29 @@ const ChatMessage = React.memo(({
     prevProps.onEditAndResend === nextProps.onEditAndResend &&
     prevProps.onSwitchBranch === nextProps.onSwitchBranch &&
     prevProps.siblingInfo?.index === nextProps.siblingInfo?.index &&
-    prevProps.siblingInfo?.total === nextProps.siblingInfo?.total
+    prevProps.siblingInfo?.total === nextProps.siblingInfo?.total &&
+    prevProps.inThreadSearchQuery === nextProps.inThreadSearchQuery &&
+    prevProps.inThreadSearchActive === nextProps.inThreadSearchActive &&
+    prevProps.index === nextProps.index &&
+    prevProps.messageListIndex === nextProps.messageListIndex &&
+    prevProps.theme?.palette?.mode === nextProps.theme?.palette?.mode &&
+    prevProps.aiName === nextProps.aiName &&
+    prevProps.markdownComponents === nextProps.markdownComponents &&
+    prevProps.handleContextMenu === nextProps.handleContextMenu &&
+    prevProps.handleImportImage === nextProps.handleImportImage &&
+    prevProps.formatTimestamp === nextProps.formatTimestamp &&
+    prevProps.handleCopyMessage === nextProps.handleCopyMessage &&
+    prevProps.handleSaveAsMarkdown === nextProps.handleSaveAsMarkdown &&
+    prevProps.isHITLPermissionRequest === nextProps.isHITLPermissionRequest &&
+    prevProps.handleHITLResponse === nextProps.handleHITLResponse &&
+    prevProps.hasResearchPlan === nextProps.hasResearchPlan &&
+    prevProps.extractImageUrls === nextProps.extractImageUrls &&
+    prevProps.getImageApiUrl === nextProps.getImageApiUrl &&
+    prevProps.openLightbox === nextProps.openLightbox &&
+    prevProps.currentConversationId === nextProps.currentConversationId &&
+    prevProps.isAdmin === nextProps.isAdmin &&
+    prevProps.has === nextProps.has &&
+    prevProps.executingPlans === nextProps.executingPlans
   );
 });
 

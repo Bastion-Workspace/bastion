@@ -170,6 +170,18 @@ class DirectSearchService:
         query_embeddings = await self.embedding_manager.generate_embeddings([query])
         if not query_embeddings:
             return []
+        shared_scopes = []
+        if user_id:
+            try:
+                from services.service_container import get_service_container
+
+                container = await get_service_container()
+                if container.document_sharing_service:
+                    shared_scopes = await container.document_sharing_service.get_vector_share_scopes(
+                        user_id
+                    )
+            except Exception as e:
+                logger.warning("Shared collection scope lookup failed: %s", e)
         search_results = await self.embedding_manager.search_similar(
             query_embedding=query_embeddings[0],
             limit=limit * 2 if exclude_document_ids else limit,
@@ -178,6 +190,8 @@ class DirectSearchService:
             team_ids=team_ids,
             filter_category=categories[0] if categories else None,
             filter_tags=tags,
+            shared_collection_scopes=shared_scopes or None,
+            query_text=query,
         )
         if exclude_document_ids:
             exclude_set = set(exclude_document_ids)
@@ -227,6 +241,7 @@ class DirectSearchService:
                     FROM document_chunks c
                     JOIN document_metadata d ON d.document_id = c.document_id
                     WHERE {where_match}
+                      AND (d.is_encrypted IS NOT TRUE)
                 """
                 pos = len(args) + 1
                 if folder_id:
@@ -260,6 +275,7 @@ class DirectSearchService:
                     FROM document_chunks c
                     JOIN document_metadata d ON d.document_id = c.document_id
                     WHERE {where_match}
+                      AND (d.is_encrypted IS NOT TRUE)
                     ORDER BY rank DESC
                     LIMIT $2
                 """
@@ -322,6 +338,45 @@ class DirectSearchService:
         merged.sort(key=lambda x: -x[0])
         return [r for _, r in merged]
 
+    async def _resolve_image_document_id_for_sidecar(
+        self,
+        sidecar_doc: Dict[str, Any],
+    ) -> Optional[str]:
+        """
+        Image sidecars are indexed as separate documents (e.g. photo.jpg.metadata.json).
+        Resolve the sibling image file's document_id in the same folder/collection.
+        """
+        try:
+            filename = (sidecar_doc.get("filename") or "").strip()
+            if len(filename) < 15 or not filename.lower().endswith(".metadata.json"):
+                return None
+            image_filename = filename[:-14]
+            if not image_filename:
+                return None
+            collection_type = sidecar_doc.get("collection_type") or "user"
+            folder_id = sidecar_doc.get("folder_id")
+            uid = sidecar_doc.get("user_id")
+            image_doc = await self.document_repository.find_by_filename_and_context(
+                filename=image_filename,
+                user_id=uid,
+                collection_type=collection_type,
+                folder_id=folder_id,
+                case_insensitive=True,
+            )
+            if image_doc:
+                return str(image_doc.document_id)
+            if uid:
+                image_doc = await self.document_repository.find_by_filename_in_user_collection(
+                    filename=image_filename,
+                    user_id=uid,
+                    collection_type=collection_type,
+                )
+                if image_doc:
+                    return str(image_doc.document_id)
+        except Exception as e:
+            logger.warning("Sidecar to image resolution failed: %s", e)
+        return None
+
     async def _hybrid_search(
         self,
         query: str,
@@ -335,8 +390,14 @@ class DirectSearchService:
         file_types: Optional[List[str]],
         exclude_document_ids: Optional[List[str]],
     ) -> List[Dict]:
-        """Run vector and full-text in parallel, merge with RRF."""
-        request_limit = limit * 2
+        """Run vector and full-text in parallel, merge with RRF, then optionally rerank."""
+        from config import settings
+
+        # When reranking is enabled, fetch a larger candidate pool so the
+        # cross-encoder has more material to work with before trimming to limit.
+        multiplier = settings.RERANK_CANDIDATE_MULTIPLIER if settings.RERANK_ENABLED else 2
+        request_limit = limit * multiplier
+
         vec_task = self._vector_search(
             query=query,
             limit=request_limit,
@@ -358,7 +419,35 @@ class DirectSearchService:
         )
         vector_results, fts_results = await asyncio.gather(vec_task, fts_task)
         merged = self._merge_rrf(vector_results, fts_results, k=RRF_K)
-        return merged[:limit]
+        candidates = merged[:limit * multiplier]
+
+        if settings.RERANK_ENABLED and len(candidates) > 1:
+            try:
+                from utils.rerank_client import call_rerank_api
+                docs = [r.get("text", "") for r in candidates]
+                # Skip chunks with no text content
+                indexed_docs = [(i, t) for i, t in enumerate(docs) if t.strip()]
+                if indexed_docs:
+                    indices, texts = zip(*indexed_docs)
+                    rerank_results = await call_rerank_api(
+                        query=query,
+                        documents=list(texts),
+                        top_n=limit,
+                        model=settings.RERANK_MODEL,
+                    )
+                    # Map reranker's relative indices back to original candidate indices
+                    reranked_chunks = [candidates[indices[r["index"]]] for r in rerank_results]
+                    logger.info(
+                        "Reranked %d candidates -> %d results for query: '%s'",
+                        len(candidates),
+                        len(reranked_chunks),
+                        query[:80],
+                    )
+                    return reranked_chunks[:limit]
+            except Exception as e:
+                logger.warning("Reranking failed, falling back to RRF order: %s", e)
+
+        return candidates[:limit]
     
     async def _format_search_result(
         self,
@@ -389,10 +478,12 @@ class DirectSearchService:
             if not chunk_id or not document_id:
                 return None
 
+            doc_info = await self.document_repository.get_document_by_id(document_id, user_id)
+            if doc_info and doc_info.get("is_encrypted"):
+                return None
+
             document_metadata = {}
-            doc_info = None
             if include_metadata or folder_id_filter or file_types_filter:
-                doc_info = await self.document_repository.get_document_by_id(document_id, user_id)
                 if doc_info:
                     document_metadata = {
                         "document_id": document_id,
@@ -440,14 +531,33 @@ class DirectSearchService:
                     "word_count": len(chunk_text.split())
                 }
             }
+            display_document_meta = document_metadata
             if is_image_sidecar and doc_info:
                 filename = doc_info.get("filename") or ""
                 if filename:
                     formatted_result["image_filename"] = filename
-                if include_metadata:
-                    formatted_result["document"] = document_metadata
-            elif include_metadata:
-                formatted_result["document"] = document_metadata
+                open_image_id = await self._resolve_image_document_id_for_sidecar(doc_info)
+                if open_image_id:
+                    formatted_result["open_document_id"] = open_image_id
+                    img_row = await self.document_repository.get_document_by_id(
+                        open_image_id, user_id
+                    )
+                    if img_row and include_metadata:
+                        display_document_meta = {
+                            "document_id": open_image_id,
+                            "filename": img_row.get("filename", ""),
+                            "title": img_row.get("title", ""),
+                            "doc_type": img_row.get("doc_type", ""),
+                            "category": img_row.get("category", ""),
+                            "tags": img_row.get("tags", []),
+                            "upload_date": img_row.get("upload_date", ""),
+                            "file_size": img_row.get("file_size", 0),
+                            "page_count": img_row.get("page_count", 0),
+                            "author": img_row.get("author", ""),
+                            "description": img_row.get("description", ""),
+                        }
+            if include_metadata:
+                formatted_result["document"] = display_document_meta
             return formatted_result
         except Exception as e:
             logger.error(f"Failed to format search result: {e}")

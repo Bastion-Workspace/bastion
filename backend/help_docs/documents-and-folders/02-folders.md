@@ -63,6 +63,24 @@ So you can turn off indexing for a whole folder, or override for specific subfol
 
 ---
 
+## File and folder sharing
+
+For user-owned content, use **Sharing…** from the right-click menu:
+
+- **Share folder** — Grants access to that folder and everything inside it.
+- **Share document** — Grants access to a single file.
+- **Permission levels** — Choose **Read** or **Write** per person.
+- **Manage access** — Change permission or revoke access later from the same dialog.
+
+People you share with see the item under **Shared with me** in their sidebar. Shared folders can be expanded so they can open files inside without moving or duplicating content.
+
+Notes:
+
+- Sharing applies to user-owned items. Team and global areas are already shared by their scope and permissions.
+- If you have **Write** access to a shared item, you can edit according to document-type and lock/collaboration rules.
+
+---
+
 ## Deleting folders and files
 
 - **Delete (folder)** — Right‑click a folder and choose **Delete**. You can’t delete the “My Documents” or “Global Documents” roots, or a team’s root folder (delete the team instead). Deleting a folder can remove its contents depending on instance policy — confirm when prompted.
@@ -75,6 +93,7 @@ So you can turn off indexing for a whole folder, or override for specific subfol
 - **My Documents** — Only you create, edit, move, and delete (unless you’ve shared in some way).
 - **Teams** — Team members (and admins) can create and edit according to team settings; only the folder creator or team admins can delete team folders; team root can’t be deleted.
 - **Global Documents** — Typically only admins create folders and upload or edit files; others may have read-only access. Metadata and delete for global files are usually admin-only.
+- **Shared with me** — Access is controlled by the owner: **Read** allows viewing/opening; **Write** allows editing where supported.
 
 For exact behavior on your instance, check with your administrator or try the options in the UI — disabled or missing items indicate permission limits.
 

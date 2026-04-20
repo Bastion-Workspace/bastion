@@ -1,7 +1,5 @@
 """
-Org-Mode Time Tracking Service - Roosevelt's "Productivity Meter"
-
-**BULLY!** Track every minute of your productive cavalry charge!
+Org-mode time tracking (clocking) service.
 
 This service handles:
 - Clock in/out on tasks
@@ -47,7 +45,7 @@ class OrgClockingService:
         """
         Clock in to a task
         
-        **ROOSEVELT TIME TRACKING!** Start the clock!
+        Start the org clock on a heading
         
         Args:
             user_id: User ID
@@ -127,15 +125,16 @@ class OrgClockingService:
             start_time = clock_data['start_time']
             duration = end_time - start_time
             
-            # Resolve file path
-            full_path = await self._resolve_file_path(user_id, clock_data['file_path'])
-            
-            if not full_path.exists():
+            full_path = await self._resolve_file_path(user_id, clock_data["file_path"])
+            from services import ds_upload_library_fs as dsf
+
+            if not await dsf.exists(user_id, full_path):
                 raise FileNotFoundError(f"File not found: {clock_data['file_path']}")
-            
-            # Read file
-            with open(full_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+
+            body = await dsf.read_text(user_id, full_path)
+            lines = body.splitlines(keepends=True)
+            if not lines:
+                lines = [""]
             
             # Find task heading
             task_line_idx = clock_data['line_number'] - 1
@@ -149,9 +148,7 @@ class OrgClockingService:
             # Add to LOGBOOK drawer
             new_lines = self._add_to_logbook(lines, task_line_idx, clock_entry)
             
-            # Write updated file
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
+            await dsf.write_text(user_id, full_path, "".join(new_lines))
             
             # Remove active clock
             del self._active_clocks[user_id]
@@ -218,7 +215,7 @@ class OrgClockingService:
         try:
             logger.info(f"📊 TIME REPORT: User {user_id}, days: {days}")
             
-            # TODO: Implement LOGBOOK parsing and statistics
+            # Future: LOGBOOK-based statistics (not implemented).
             # For now, return placeholder
             return {
                 "success": True,
@@ -233,20 +230,16 @@ class OrgClockingService:
             raise
     
     async def _resolve_file_path(self, user_id: str, relative_path: str) -> Path:
-        """Resolve relative org file path to absolute path"""
-        from backend.config import settings
+        """Resolve relative org file path to logical library path (UPLOAD_DIR prefix)."""
+        from config import settings
         from services.database_manager.database_helpers import fetch_one
-        
-        # Get username
+
         row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
-        username = row['username'] if row else user_id
-        
-        # Construct file path
+        username = row["username"] if row else user_id
+
         upload_dir = Path(settings.UPLOAD_DIR)
         user_base_dir = upload_dir / "Users" / username
-        file_path = user_base_dir / relative_path
-        
-        return file_path
+        return user_base_dir / relative_path
     
     def _format_clock_entry(self, start: datetime, end: datetime, duration: timedelta) -> str:
         """Format CLOCK entry for LOGBOOK"""

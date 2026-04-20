@@ -24,7 +24,7 @@ def _arrow_type_to_sql(pa_type: pa.DataType) -> str:
     if pat.is_integer(pa_type):
         return "INTEGER"
     if pat.is_floating(pa_type):
-        return "FLOAT"
+        return "REAL"
     if pat.is_boolean(pa_type):
         return "BOOLEAN"
     if pat.is_timestamp(pa_type):
@@ -127,6 +127,7 @@ class DataImportService:
         file_type: str,
         user_id: str,
         field_mapping: Optional[Dict[str, str]] = None,
+        type_overrides: Optional[Dict[str, str]] = None,
     ) -> str:
         """Execute data import job"""
         job_id: Optional[str] = None
@@ -156,6 +157,17 @@ class DataImportService:
             sample_n = min(1000, table.num_rows)
             sample_rows = table.slice(0, sample_n).to_pylist()
             schema = await self.table_service.infer_schema_from_data(sample_rows)
+
+            if type_overrides and isinstance(schema, dict) and isinstance(schema.get("columns"), list):
+                for col in schema["columns"]:
+                    if not isinstance(col, dict):
+                        continue
+                    n = col.get("name")
+                    if not n:
+                        continue
+                    override = type_overrides.get(str(n))
+                    if override:
+                        col["type"] = str(override).upper()
 
             tbl = await self.table_service.create_table(
                 database_id=database_id,

@@ -225,11 +225,19 @@ async def search_conversation_cache_tool(
         
         entries = result.get("entries", [])
         entries_count = len(entries) if isinstance(entries, list) else 0
-        if result.get("cache_hit"):
-            logger.info(f"Cache hit! Found {entries_count} cached entries")
+        if result.get("cache_hit") and entries_count:
+            logger.info("Cache hit: %d cached entries", entries_count)
             formatted = f"Found {entries_count} cached entr(y/ies) for this query."
+        elif entries_count:
+            parts = [
+                (e.get("content") or "").strip()
+                for e in entries
+                if isinstance(e, dict) and (e.get("content") or "").strip()
+            ]
+            formatted = "\n\n".join(parts) if parts else "No cached research found for this query."
+            logger.info("Conversation cache returned %d informational entries", entries_count)
         else:
-            logger.info("Cache miss - no previous research found")
+            logger.info("Cache miss - no entries")
             formatted = "No cached research found for this query."
         return {
             **result,

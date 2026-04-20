@@ -1,5 +1,5 @@
 /**
- * Team analytics: task throughput, cost trend, goal progress, agent breakdown, message volume.
+ * Line analytics: task throughput, cost trend, goal progress, agent breakdown, message volume.
  */
 
 import React, { useState } from 'react';
@@ -57,7 +57,7 @@ export default function LineAnalyticsPanel({ lineId }) {
   if (!team) {
     return (
       <Box sx={{ p: 2 }}>
-        <Typography color="text.secondary">Team not found.</Typography>
+        <Typography color="text.secondary">Line not found.</Typography>
       </Box>
     );
   }

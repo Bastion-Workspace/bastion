@@ -16,6 +16,7 @@ from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain_core.messages import AIMessage, HumanMessage
 
+from config.settings import settings
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.engines.playbook_graph_builder import build_playbook_graph
@@ -23,8 +24,43 @@ from orchestrator.utils.line_context import line_id_from_metadata
 from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.middleware.summarization_node import SummarizationNode
 from orchestrator.utils.message_sanitizer import strip_tool_actions_prefix
+from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
 
 logger = logging.getLogger(__name__)
+
+
+async def _await_cancelable_ainvoke(
+    coro,
+    cancellation_token: Optional[asyncio.Event],
+    timeout_sec: Optional[float] = None,
+):
+    """Wait for a coroutine unless cancellation_token is set (gRPC Stop / client disconnect)."""
+
+    async def _work():
+        return await invoke_with_optional_timeout(coro, timeout_sec)
+
+    if cancellation_token is None:
+        return await _work()
+    main_task = asyncio.create_task(_work())
+    wait_task = asyncio.create_task(cancellation_token.wait())
+    done, _ = await asyncio.wait(
+        {main_task, wait_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if wait_task in done and cancellation_token.is_set():
+        if not main_task.done():
+            main_task.cancel()
+        try:
+            await main_task
+        except asyncio.CancelledError:
+            pass
+        raise asyncio.CancelledError()
+    wait_task.cancel()
+    try:
+        await wait_task
+    except asyncio.CancelledError:
+        pass
+    return main_task.result()
 
 
 def _format_user_context(profile: Dict[str, Any]) -> str:
@@ -75,6 +111,26 @@ def _resolve_heading_level(steps: List[Dict[str, Any]]) -> int:
         except (TypeError, ValueError):
             continue
     return 2
+
+
+def _aggregate_acquired_tool_log(execution_trace: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten mid-loop skill acquisition entries from all llm_agent steps in the trace."""
+    out: List[Dict[str, Any]] = []
+    for entry in execution_trace or []:
+        chunk = entry.get("acquired_tool_log")
+        if isinstance(chunk, list):
+            out.extend(c for c in chunk if isinstance(c, dict))
+    return out
+
+
+def _aggregate_skill_execution_events(execution_trace: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten _skill_execution_events from all steps in the trace."""
+    out: List[Dict[str, Any]] = []
+    for entry in execution_trace or []:
+        chunk = entry.get("skill_execution_events")
+        if isinstance(chunk, list):
+            out.extend(c for c in chunk if isinstance(c, dict))
+    return out
 
 
 def _build_tool_call_summary(execution_trace: List[Dict[str, Any]]) -> str:
@@ -146,6 +202,7 @@ class CustomAgentRunner(BaseAgent):
 
     def __init__(self) -> None:
         super().__init__("custom_agent")
+        self._stream_cancellation_token: Optional[asyncio.Event] = None
 
     def _build_workflow(self, checkpointer: AsyncPostgresSaver) -> StateGraph:
         workflow = StateGraph(CustomAgentState)
@@ -270,44 +327,151 @@ class CustomAgentRunner(BaseAgent):
             chat_history_lookback = profile.get("chat_history_lookback", 10)
             persona_mode = profile.get("persona_mode") or "none"
             apply_persona = persona_mode in ("default", "specific")
-            if persona_mode == "specific" and profile.get("persona"):
-                resolved_persona = profile["persona"]
-            elif persona_mode == "default":
-                resolved_persona = (
+            profile_persona_id = profile.get("persona_id")
+            logger.info(
+                "Custom agent profile %s: persona_mode=%s persona_id=%s embedded_persona=%s",
+                profile_id,
+                persona_mode,
+                profile_persona_id,
+                bool(profile.get("persona")),
+            )
+
+            def _user_default_persona() -> Optional[Dict[str, Any]]:
+                return (
                     metadata.get("persona")
                     or (state.get("shared_memory", {}) or {}).get("persona")
                 )
-                if not resolved_persona:
-                    fallback_timezone = (
-                        metadata.get("user_timezone")
-                        or (state.get("shared_memory", {}) or {}).get("user_timezone")
-                        or "UTC"
+
+            def _alex_fallback_persona() -> Dict[str, Any]:
+                fallback_timezone = (
+                    metadata.get("user_timezone")
+                    or (state.get("shared_memory", {}) or {}).get("user_timezone")
+                    or "UTC"
+                )
+                return {
+                    "ai_name": "Alex",
+                    "persona_style": "professional",
+                    "political_bias": "neutral",
+                    "timezone": fallback_timezone,
+                }
+
+            resolved_persona: Optional[Dict[str, Any]] = None
+            if persona_mode == "specific":
+                if profile.get("persona"):
+                    resolved_persona = profile["persona"]
+                    logger.info(
+                        "Custom agent profile %s: using specific persona name=%s ai_name=%s",
+                        profile_id,
+                        resolved_persona.get("name"),
+                        resolved_persona.get("ai_name"),
                     )
-                    resolved_persona = {
-                        "ai_name": "Alex",
-                        "persona_style": "professional",
-                        "political_bias": "neutral",
-                        "timezone": fallback_timezone,
-                    }
+                else:
+                    logger.warning(
+                        "Custom agent profile %s: persona_mode=specific but persona not embedded "
+                        "(persona_id=%s); falling back to user default persona from request metadata",
+                        profile_id,
+                        profile_persona_id,
+                    )
+                    resolved_persona = _user_default_persona()
+                    if not resolved_persona:
+                        resolved_persona = _alex_fallback_persona()
+                        logger.warning(
+                            "Custom agent profile %s: specific persona fallback had no user default; "
+                            "using professional fallback persona",
+                            profile_id,
+                        )
+            elif persona_mode == "default":
+                resolved_persona = _user_default_persona()
+                if not resolved_persona:
+                    resolved_persona = _alex_fallback_persona()
                     logger.warning(
                         "Default persona metadata missing for profile %s; using professional fallback persona",
                         profile_id,
                     )
             else:
                 resolved_persona = None
+            allowed_conns = profile.get("allowed_connections") or []
+            filtered_connections_map = metadata.get("active_connections_map", "")
+            if isinstance(allowed_conns, list) and len(allowed_conns) > 0:
+                try:
+                    from orchestrator.engines.tool_resolution import connection_allow_ids_from_entries
+
+                    allowed_ids = connection_allow_ids_from_entries(
+                        [e for e in allowed_conns if isinstance(e, dict)]
+                    )
+                    if not allowed_ids:
+                        logger.warning(
+                            "allowed_connections has %d entries but none parsed to valid "
+                            "connection IDs (profile_id=%s); treating as unrestricted (all accounts)",
+                            len(allowed_conns),
+                            profile_id,
+                        )
+                    else:
+                        raw_cmap_str = metadata.get("active_connections_map", "")
+                        full_cmap: Dict[str, Any] = {}
+                        if isinstance(raw_cmap_str, str) and raw_cmap_str.strip():
+                            parsed = json.loads(raw_cmap_str)
+                            if isinstance(parsed, dict):
+                                full_cmap = parsed
+                        filtered: Dict[str, Any] = {}
+                        for ctype, entries in full_cmap.items():
+                            if not isinstance(entries, list):
+                                continue
+                            kept = [
+                                e
+                                for e in entries
+                                if isinstance(e, dict)
+                                and e.get("id") is not None
+                                and int(e["id"]) in allowed_ids
+                            ]
+                            if kept:
+                                filtered[str(ctype)] = kept
+                        filtered_connections_map = json.dumps(filtered)
+                        if full_cmap and not filtered:
+                            logger.warning(
+                                "allowed_connections filter removed all connections "
+                                "(profile_id=%s incoming_types=%s raw_allow_entries=%s "
+                                "parsed_allow_ids=%s)",
+                                profile_id,
+                                sorted(full_cmap.keys()),
+                                len(allowed_conns),
+                                sorted(allowed_ids),
+                            )
+                        elif filtered:
+                            logger.info(
+                                "Custom agent profile %s: active_connections_map after "
+                                "allowed_connections filter types=%s",
+                                profile_id,
+                                sorted(filtered.keys()),
+                            )
+                        elif not full_cmap and allowed_conns:
+                            logger.info(
+                                "Custom agent profile %s: allowed_connections set but "
+                                "incoming active_connections_map was empty",
+                                profile_id,
+                            )
+                except (TypeError, ValueError, json.JSONDecodeError) as _e:
+                    logger.warning(
+                        "allowed_connections filter skipped (invalid data): profile_id=%s error=%s",
+                        profile_id,
+                        _e,
+                    )
+
             metadata_with_name = {
                 **metadata,
+                "active_connections_map": filtered_connections_map,
                 "agent_profile_name": profile.get("name", ""),
                 "prompt_history_enabled": prompt_history_enabled,
                 "chat_history_lookback": chat_history_lookback,
                 "persona_enabled": apply_persona,
                 "persona_mode": persona_mode,
-                "persona": resolved_persona if resolved_persona else metadata.get("persona"),
+                "persona": resolved_persona if apply_persona else None,
                 "system_prompt_additions": profile.get("system_prompt_additions") or "",
                 "include_user_context": profile.get("include_user_context", False),
                 "include_datetime_context": profile.get("include_datetime_context", True),
                 "include_user_facts": profile.get("include_user_facts", False),
                 "include_facts_categories": profile.get("include_facts_categories") or [],
+                "use_themed_memory": profile.get("use_themed_memory", True),
                 "include_agent_memory": profile.get("include_agent_memory", False),
             }
 
@@ -543,7 +707,13 @@ class CustomAgentRunner(BaseAgent):
         if pipeline_metadata.get("include_user_facts"):
             try:
                 client = await get_backend_tool_client()
-                result = await client.get_user_facts(user_id=user_id)
+                use_themed = pipeline_metadata.get("use_themed_memory", True)
+                q = (state.get("query") or "").strip()
+                result = await client.get_user_facts(
+                    user_id=user_id,
+                    query=q if use_themed else "",
+                    use_themed_memory=use_themed,
+                )
                 if result.get("success") and result.get("facts"):
                     facts = result["facts"]
                     categories = pipeline_metadata.get("include_facts_categories") or []
@@ -742,7 +912,7 @@ class CustomAgentRunner(BaseAgent):
                 inputs["editor_selection"] = ""
             cursor_offset = active_editor.get("cursor_offset", -1)
             if cursor_offset >= 0 and content:
-                from orchestrator.utils.section_scoping import extract_scoped_context
+                from orchestrator.utils.section_scoping import extract_scoped_context, find_heading_sections
                 scoped = extract_scoped_context(content, cursor_offset, max_level=heading_level, adjacent=1)
                 inputs["editor_current_section"] = scoped["current_section"]
                 inputs["editor_current_heading"] = scoped["current_heading"]
@@ -755,6 +925,8 @@ class CustomAgentRunner(BaseAgent):
                 idx = scoped["current_section_index"]
                 inputs["editor_is_first_section"] = "true" if idx == 0 else ""
                 inputs["editor_is_last_section"] = "true" if total_sections <= 1 or idx >= total_sections - 1 else ""
+                toc_sections = find_heading_sections(content, max_level=heading_level)
+                inputs["editor_toc"] = "\n".join(s.heading_text for s in toc_sections) if toc_sections else ""
             else:
                 inputs["editor_current_section"] = ""
                 inputs["editor_current_heading"] = ""
@@ -765,6 +937,12 @@ class CustomAgentRunner(BaseAgent):
                 inputs["editor_total_sections"] = ""
                 inputs["editor_is_first_section"] = ""
                 inputs["editor_is_last_section"] = ""
+                if content:
+                    from orchestrator.utils.section_scoping import find_heading_sections
+                    toc_sections = find_heading_sections(content, max_level=heading_level)
+                    inputs["editor_toc"] = "\n".join(s.heading_text for s in toc_sections) if toc_sections else ""
+                else:
+                    inputs["editor_toc"] = ""
         else:
             inputs["editor_document_type"] = ""
             inputs["editor_cursor_offset"] = ""
@@ -778,6 +956,19 @@ class CustomAgentRunner(BaseAgent):
             inputs["editor_total_sections"] = ""
             inputs["editor_is_first_section"] = ""
             inputs["editor_is_last_section"] = ""
+            inputs["editor_toc"] = ""
+
+        active_artifact = shared_memory.get("active_artifact", {})
+        if active_artifact and active_artifact.get("code"):
+            inputs["previous_artifact"] = active_artifact["code"]
+            inputs["previous_artifact_type"] = active_artifact.get("artifact_type", "")
+            inputs["previous_artifact_title"] = active_artifact.get("title", "")
+            inputs["previous_artifact_language"] = active_artifact.get("language", "")
+        else:
+            inputs["previous_artifact"] = ""
+            inputs["previous_artifact_type"] = ""
+            inputs["previous_artifact_title"] = ""
+            inputs["previous_artifact_language"] = ""
 
         pin = self._get_valid_pinned_document(shared_memory)
         if pin:
@@ -970,11 +1161,35 @@ class CustomAgentRunner(BaseAgent):
                 ws_state["workspace_access_modes"] = shared_memory.get("workspace_access_modes")
             if ws_state:
                 initial_playbook_state["playbook_state"] = ws_state
-            result = await graph.ainvoke(initial_playbook_state, config=playbook_config)
+            result = await _await_cancelable_ainvoke(
+                graph.ainvoke(initial_playbook_state, config=playbook_config),
+                self._stream_cancellation_token,
+                settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
+            )
             playbook_state = result.get("playbook_state") or {}
             pending_approval = result.get("pending_approval")
             pending_auth = result.get("pending_auth")
             execution_trace = result.get("execution_trace") or []
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            cap = settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC
+            logger.warning("Pipeline execution timed out after %s s", cap)
+            return {
+                "pipeline_results": {},
+                "typed_outputs": {},
+                "pending_approval": None,
+                "pending_auth": None,
+                "playbook_config": None,
+                "response": {"formatted": f"Pipeline timed out after {cap}s."},
+                "task_status": "error",
+                "error": f"Playbook graph timed out after {cap}s",
+                "metadata": metadata,
+                "user_id": user_id,
+                "query": query,
+                "messages": state.get("messages", []),
+                "shared_memory": state.get("shared_memory", {}),
+            }
         except Exception as e:
             logger.exception("Pipeline execution failed: %s", e)
             return {
@@ -1064,8 +1279,36 @@ class CustomAgentRunner(BaseAgent):
                         collected.append(p)
         return collected
 
+    def _collect_artifacts_from_pipeline(self, pipeline_results: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Collect validated artifact payloads from steps (e.g. create_artifact, create_chart)."""
+        collected: List[Dict[str, Any]] = []
+        for key, value in pipeline_results.items():
+            if key.startswith("_"):
+                continue
+            if not isinstance(value, dict):
+                continue
+            arts_list = value.get("artifacts")
+            if isinstance(arts_list, list) and arts_list:
+                for a in arts_list:
+                    if (
+                        isinstance(a, dict)
+                        and a.get("artifact_type")
+                        and isinstance(a.get("code"), str)
+                    ):
+                        collected.append(a)
+                continue
+            art = value.get("artifact")
+            if not isinstance(art, dict):
+                continue
+            atype = art.get("artifact_type")
+            code = art.get("code")
+            if not atype or not isinstance(code, str):
+                continue
+            collected.append(art)
+        return collected
+
     async def _format_response_node(self, state: CustomAgentState) -> Dict[str, Any]:
-        """Build final AgentResponse with formatted text, typed outputs, and structured images."""
+        """Build final response payload (formatted text, typed outputs, structured images)."""
         parts: List[str] = []
         pipeline_results = state.get("pipeline_results", {})
         for key, value in pipeline_results.items():
@@ -1080,6 +1323,7 @@ class CustomAgentRunner(BaseAgent):
 
         images = self._collect_images_from_pipeline(pipeline_results)
         editor_proposals = self._collect_editor_proposals_from_pipeline(pipeline_results)
+        artifacts = self._collect_artifacts_from_pipeline(pipeline_results)
         categories: set = set()
         for key, value in pipeline_results.items():
             if key.startswith("_") or not isinstance(value, dict):
@@ -1099,6 +1343,10 @@ class CustomAgentRunner(BaseAgent):
             response_payload["images"] = images
         if editor_proposals:
             response_payload["editor_proposals"] = editor_proposals
+        if artifacts:
+            response_payload["artifact"] = artifacts[0]
+            if len(artifacts) > 1:
+                response_payload["artifacts"] = artifacts
         if categories:
             response_payload["tools_used_categories"] = sorted(categories)
 
@@ -1188,10 +1436,34 @@ class CustomAgentRunner(BaseAgent):
                 from orchestrator.checkpointer import get_async_postgres_saver
                 checkpointer = await get_async_postgres_saver()
                 graph = build_playbook_graph(steps, checkpointer=checkpointer)
-                result = await graph.ainvoke({}, config=playbook_config)
+                result = await _await_cancelable_ainvoke(
+                    graph.ainvoke({}, config=playbook_config),
+                    self._stream_cancellation_token,
+                    settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
+                )
                 playbook_state = result.get("playbook_state") or {}
                 new_pending = result.get("pending_approval")
                 new_pending_auth = result.get("pending_auth")
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                cap = settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC
+                logger.warning("Pipeline resume after approval timed out after %s s", cap)
+                return {
+                    "response": {"formatted": f"Resume timed out after {cap}s.", "typed_outputs": state.get("typed_outputs", {})},
+                    "task_status": "error",
+                    "pending_approval": None,
+                    "pending_auth": None,
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "query": state.get("query", ""),
+                    "messages": messages,
+                    "shared_memory": state.get("shared_memory", {}),
+                    "pipeline_results": state.get("pipeline_results", {}),
+                    "typed_outputs": state.get("typed_outputs", {}),
+                    "output_destinations": state.get("output_destinations", []),
+                    "execution_trace": state.get("execution_trace", []),
+                }
             except Exception as e:
                 logger.exception("Pipeline resume after approval failed: %s", e)
                 return {
@@ -1329,7 +1601,7 @@ class CustomAgentRunner(BaseAgent):
         import time
         from datetime import datetime, timezone
 
-        _ = cancellation_token
+        self._stream_cancellation_token = cancellation_token
         metadata = metadata or {}
         user_id = metadata.get("user_id", "system")
         shared_memory = metadata.get("shared_memory", {})
@@ -1360,7 +1632,11 @@ class CustomAgentRunner(BaseAgent):
                 from orchestrator.checkpointer import get_async_postgres_saver
                 checkpointer = await get_async_postgres_saver()
                 graph = build_playbook_graph(steps, checkpointer=checkpointer)
-                result = await graph.ainvoke({}, config=playbook_config)
+                result = await _await_cancelable_ainvoke(
+                    graph.ainvoke({}, config=playbook_config),
+                    self._stream_cancellation_token,
+                    settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
+                )
                 playbook_state = result.get("playbook_state") or {}
                 pending_approval = result.get("pending_approval")
                 pending_auth = result.get("pending_auth")
@@ -1400,6 +1676,12 @@ class CustomAgentRunner(BaseAgent):
                     "task_status": "complete",
                     "route_results": {},
                 }
+            except asyncio.CancelledError:
+                raise
+            except asyncio.TimeoutError:
+                cap = settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC
+                logger.warning("Resume after approval timed out after %s s", cap)
+                return self._create_error_response(f"Resume timed out after {cap}s")
             except Exception as e:
                 logger.exception("Resume after approval failed: %s", e)
                 return self._create_error_response(f"Resume failed: {e}")
@@ -1436,7 +1718,41 @@ class CustomAgentRunner(BaseAgent):
                 "shared_memory": shared_memory_merged,
             }
 
-            result_state = await workflow.ainvoke(initial_state, config=config)
+            result_state = await _await_cancelable_ainvoke(
+                workflow.ainvoke(initial_state, config=config),
+                self._stream_cancellation_token,
+                settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
+            )
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            cap = settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC
+            logger.warning("Custom agent workflow timed out after %s s", cap)
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            profile_id = metadata.get("agent_profile_id")
+            playbook_id = metadata.get("playbook_id", "")
+            if profile_id:
+                try:
+                    client = await get_backend_tool_client()
+                    profile = metadata.get("profile") or {}
+                    log_meta = {"model_used": profile.get("model_preference") or metadata.get("model_preference")}
+                    await client.log_agent_execution(
+                        user_id=user_id,
+                        profile_id=profile_id,
+                        playbook_id=playbook_id or "",
+                        query=query,
+                        status="failed",
+                        duration_ms=duration_ms,
+                        steps_completed=0,
+                        steps_total=0,
+                        error_details=f"Playbook graph timed out after {cap}s",
+                        started_at=started_at_iso,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        metadata=log_meta,
+                    )
+                except Exception as log_err:
+                    logger.warning("Failed to log agent execution (timeout path): %s", log_err)
+            return self._create_error_response(f"Playbook timed out after {cap}s")
         except Exception as e:
             logger.exception("Custom agent workflow failed: %s", e)
             duration_ms = int((time.perf_counter() - started_at) * 1000)
@@ -1507,12 +1823,13 @@ class CustomAgentRunner(BaseAgent):
         playbook_id = result_state.get("playbook_id")
         playbook = result_state.get("playbook") or {}
         steps_total = len(_definition_steps(playbook))
-        if profile_id and playbook_id is not None:
+        execution_trace = result_state.get("execution_trace") or []
+        all_silent = task_status == "complete" and not execution_trace
+        if profile_id and playbook_id is not None and not all_silent:
             try:
                 client = await get_backend_tool_client()
                 steps_completed = steps_total if task_status == "complete" and not result_state.get("pending_approval") and not result_state.get("pending_auth") else 0
                 status = "completed" if task_status == "complete" else ("running" if (result_state.get("pending_approval") or result_state.get("pending_auth")) else "failed")
-                execution_trace = result_state.get("execution_trace") or []
                 steps_json = json.dumps(execution_trace) if execution_trace else ""
                 profile = result_state.get("profile") or metadata.get("profile") or {}
                 log_meta = {"model_used": profile.get("model_preference") or metadata.get("model_preference")}
@@ -1554,6 +1871,8 @@ class CustomAgentRunner(BaseAgent):
         result_metadata = result_state.get("metadata", {})
         execution_trace = result_state.get("execution_trace") or []
         tool_call_summary = _build_tool_call_summary(execution_trace)
+        acquired_tool_log = _aggregate_acquired_tool_log(execution_trace)
+        skill_execution_events = _aggregate_skill_execution_events(execution_trace)
         out: Dict[str, Any] = {
             "response": response.get("formatted", ""),
             "formatted": response.get("formatted", ""),
@@ -1564,10 +1883,24 @@ class CustomAgentRunner(BaseAgent):
             "images": resp_images if isinstance(resp_images, list) else None,
             "agent_profile_name": result_metadata.get("agent_profile_name", ""),
             "tool_call_summary": tool_call_summary,
+            "acquired_tool_log": acquired_tool_log,
+            "skill_execution_events": skill_execution_events,
         }
+        if result_metadata.get("persona_enabled"):
+            _p = result_metadata.get("persona")
+            if isinstance(_p, dict):
+                _pan = (_p.get("ai_name") or "").strip()
+                if _pan:
+                    out["persona_ai_name"] = _pan
         if isinstance(response, dict):
             if response.get("editor_proposals"):
                 out["editor_proposals"] = response["editor_proposals"]
+            art = response.get("artifact")
+            if isinstance(art, dict) and art.get("artifact_type"):
+                out["artifact"] = art
+            arts = response.get("artifacts")
+            if isinstance(arts, list) and arts:
+                out["artifacts"] = arts
         return out
 
     def _create_error_response(self, error_message: str) -> Dict[str, Any]:

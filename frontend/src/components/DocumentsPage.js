@@ -1,4 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Box,
   IconButton,
@@ -15,6 +16,7 @@ import apiService from '../services/apiService';
 
 const DocumentsPage = () => {
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   
   // State for sidebar management with persistence
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
@@ -50,10 +52,77 @@ const DocumentsPage = () => {
     }
   });
   const [selectedFile, setSelectedFile] = useState(null);
+  const [activeDocumentTabId, setActiveDocumentTabId] = useState(null);
   const [showFeedManager, setShowFeedManager] = useState(false);
   const [rssFeedContext, setRSSFeedContext] = useState(null);
   const tabbedContentRef = useRef();
   const [isResizing, setIsResizing] = useState(false);
+
+  // Deep link: ?folder=, ?document=, ?rss_feed= (& optional ?rss_article=) e.g. home dashboard
+  useEffect(() => {
+    const folderId = searchParams.get('folder');
+    const documentId = searchParams.get('document');
+    const rssFeedId = searchParams.get('rss_feed');
+    const rssArticleId = searchParams.get('rss_article');
+    const rssFeedName = searchParams.get('rss_feed_name') || 'RSS';
+    const opdsHub = searchParams.get('opds_hub');
+
+    if (!folderId && !documentId && !rssFeedId && !opdsHub) return;
+
+    const next = new URLSearchParams(searchParams);
+    if (folderId) {
+      setSelectedFolderId(folderId);
+      try {
+        localStorage.setItem('selectedFolderId', folderId);
+      } catch (_) {}
+      next.delete('folder');
+    }
+    if (documentId) {
+      const title = searchParams.get('doc_title') || 'Document';
+      next.delete('document');
+      next.delete('doc_title');
+      const open = () => {
+        try {
+          tabbedContentRef.current?.openDocument?.(documentId, title);
+        } catch (_) {}
+      };
+      requestAnimationFrame(() => {
+        open();
+        setTimeout(open, 300);
+      });
+    }
+    if (rssFeedId) {
+      next.delete('rss_feed');
+      next.delete('rss_article');
+      next.delete('rss_feed_name');
+      const openRss = () => {
+        try {
+          tabbedContentRef.current?.openRSSFeed?.(
+            rssFeedId,
+            rssFeedName,
+            rssArticleId || undefined
+          );
+        } catch (_) {}
+      };
+      requestAnimationFrame(() => {
+        openRss();
+        setTimeout(openRss, 300);
+      });
+    }
+    if (opdsHub) {
+      next.delete('opds_hub');
+      const openOpds = () => {
+        try {
+          tabbedContentRef.current?.openOPDSHub?.();
+        } catch (_) {}
+      };
+      requestAnimationFrame(() => {
+        openOpds();
+        setTimeout(openOpds, 300);
+      });
+    }
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams]);
   
   // Min and max sidebar widths
   const MIN_SIDEBAR_WIDTH = 240;
@@ -252,9 +321,19 @@ const DocumentsPage = () => {
     } catch (_) {}
   }, []);
 
+  const handleOPDSHubClick = useCallback(() => {
+    try {
+      tabbedContentRef.current?.openOPDSHub?.();
+    } catch (_) {}
+  }, []);
+
   const handleAddRSSFeed = useCallback((context = null) => {
     setShowFeedManager(true);
     setRSSFeedContext(context ?? null);
+  }, []);
+
+  const handleActiveDocumentIdChange = useCallback((documentId) => {
+    setActiveDocumentTabId(documentId);
   }, []);
 
   // ROOSEVELT: Expose TabbedContentManager ref globally for FileTreeSidebar to access
@@ -269,15 +348,6 @@ const DocumentsPage = () => {
     setShowFeedManager(false);
     // The FileTreeSidebar will automatically refresh its feed list
     console.log('New feed added:', newFeed);
-  }, []);
-
-  // Bridge: listen for sidebar request to open News headlines tab
-  useEffect(() => {
-    const handler = () => {
-      try { tabbedContentRef.current?.openNewsHeadlines?.(); } catch {}
-    };
-    window.addEventListener('openNewsHeadlines', handler);
-    return () => window.removeEventListener('openNewsHeadlines', handler);
   }, []);
 
   return (
@@ -312,11 +382,13 @@ const DocumentsPage = () => {
         >
           <FileTreeSidebar
             selectedFolderId={selectedFolderId}
+            selectedDocumentId={activeDocumentTabId}
             onFolderSelect={handleFolderSelect}
             onFileSelect={handleFileSelect}
             onRSSFeedClick={handleRSSFeedClick}
             onRSSCategoryClick={handleRSSCategoryClick}
             onAddRSSFeed={handleAddRSSFeed}
+            onOPDSHubClick={handleOPDSHubClick}
             width={sidebarWidth}
             isCollapsed={sidebarCollapsed}
             onToggleCollapse={toggleSidebar}
@@ -373,12 +445,18 @@ const DocumentsPage = () => {
         overflow: 'hidden'
       }}>
         {/* Tabbed Content Area */}
-        <Box sx={{ 
-          flexGrow: 1, 
+        <Box sx={{
+          flexGrow: 1,
           overflow: 'hidden',
-          backgroundColor: 'background.default'
+          // Transparent so AppWallpaperLayer shows through; tab/editor panes bring their own surfaces.
+          backgroundColor: 'transparent',
         }}>
-          <TabbedContentManager ref={tabbedContentRef} />
+          <TabbedContentManager
+            ref={tabbedContentRef}
+            onActiveDocumentIdChange={handleActiveDocumentIdChange}
+            documentsFileTreeCollapsed={sidebarCollapsed}
+            documentsIsMobile={isMobile}
+          />
         </Box>
       </Box>
 

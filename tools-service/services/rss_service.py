@@ -476,17 +476,6 @@ class RSSService:
             if not can_delete:
                 return False
 
-            # Remove associated News articles synthesized from this feed's RSS articles
-            await execute(
-                """
-                DELETE FROM news_articles 
-                WHERE id IN (
-                    SELECT article_id FROM rss_articles WHERE feed_id = $1
-                )
-                """,
-                feed_id,
-            )
-
             # Delete the feed (will cascade delete rss_articles via FK)
             if is_admin:
                 result = await execute("DELETE FROM rss_feeds WHERE feed_id = $1", feed_id)
@@ -558,13 +547,30 @@ class RSSService:
             logger.error(f"RSS SERVICE ERROR: Failed to get article {article_id}: {e}")
             return None
     
-    async def get_feed_articles(self, feed_id: str, user_id: str, limit: int = 100) -> List[RSSArticle]:
-        """Get articles for a specific feed"""
+    async def get_feed_articles(
+        self,
+        feed_id: str,
+        user_id: str,
+        limit: int = 100,
+        read_filter: str = "all",
+    ) -> List[RSSArticle]:
+        """Get articles for a specific feed.
+
+        read_filter: ``all`` (default), ``unread`` (not marked read), ``read`` (marked read).
+        """
         try:
-            # Using DatabaseManager for feed articles!
-            rows = await fetch_all("""
-                SELECT * FROM rss_articles 
-                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL)
+            rf = (read_filter or "all").strip().lower()
+            if rf not in ("all", "unread", "read"):
+                rf = "all"
+            read_clause = ""
+            if rf == "unread":
+                read_clause = " AND (is_read IS NOT TRUE)"
+            elif rf == "read":
+                read_clause = " AND (is_read IS TRUE)"
+
+            rows = await fetch_all(f"""
+                SELECT * FROM rss_articles
+                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL){read_clause}
                 ORDER BY published_date DESC NULLS LAST, created_at DESC
                 LIMIT $3
             """, feed_id, user_id, limit)
@@ -996,7 +1002,6 @@ class RSSService:
                 return 0
             for r in rows:
                 aid = r["article_id"] if isinstance(r, dict) else r[0]
-                await execute("DELETE FROM news_articles WHERE id = $1", aid)
             del_rows = await fetch_all(
                 """
                 DELETE FROM rss_articles
@@ -1166,9 +1171,6 @@ class RSSService:
             owner_id = row.get("user_id") if isinstance(row, dict) else row[0]
             if owner_id is not None and owner_id != user_id:
                 return False
-
-            # Delete associated News article first
-            await execute("DELETE FROM news_articles WHERE id = $1", article_id)
 
             # Delete RSS article
             result = await execute(

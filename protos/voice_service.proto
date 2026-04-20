@@ -56,7 +56,7 @@ message SynthesizeRequest {
   string output_format = 4; // "ogg", "wav", "mp3"
   string api_key = 5;       // optional per-request override; empty = env default
   string base_url = 6;      // optional API base URL override
-  string model_id = 7;      // optional; ElevenLabs synthesis model; empty = platform default
+  string model_id = 7;      // optional; ElevenLabs model id or Hedra TTS engine UUID; empty = platform default
 }
 
 message SynthesizeResponse {

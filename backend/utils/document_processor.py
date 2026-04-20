@@ -125,7 +125,7 @@ class DocumentProcessor:
         """
         start_time = time.time()
         
-        # **ROOSEVELT FIX**: Use provided document_id instead of deriving from filename
+        # Prefer caller-provided document_id over filename-derived id
         if document_id is None:
             document_id = Path(file_path).stem.split('_')[0]
             logger.warning(f"⚠️ No document_id provided, deriving from filename: {document_id}")
@@ -133,7 +133,7 @@ class DocumentProcessor:
         try:
             logger.info(f"🔄 Processing {doc_type} document: {file_path} (doc_id: {document_id})")
             
-            # ROOSEVELT DOCTRINE: Org Mode files use structured mechanisms, not vectorization!
+            # Org files: structured handling; skip vectorization path
             if doc_type == 'org':
                 logger.info("Skipping vectorization for Org Mode file (structured data, not prose)")
                 logger.info(f"📋 Org file will be handled by llm-orchestrator (OrgInboxAgent and OrgProjectAgent migrated)")
@@ -176,6 +176,25 @@ class DocumentProcessor:
                 )
                 logger.info(f"✅ Image file registered for storage (no vectorization)")
                 return result
+
+            if doc_type in ('mp4', 'mkv', 'avi', 'mov', 'webm', 'audio'):
+                logger.info(
+                    "Skipping vectorization for binary media file (%s)",
+                    doc_type,
+                )
+                return ProcessingResult(
+                    document_id=document_id,
+                    chunks=[],
+                    entities=[],
+                    quality_metrics=QualityMetrics(
+                        overall_score=1.0,
+                        ocr_confidence=1.0,
+                        language_confidence=1.0,
+                        vocabulary_score=1.0,
+                        pattern_score=1.0,
+                    ),
+                    processing_time=time.time() - start_time,
+                )
             
             # Extract text based on document type
             page_boundaries: list[tuple[int, int]] = []
@@ -199,7 +218,9 @@ class DocumentProcessor:
             elif doc_type == 'zip':
                 text, ocr_confidence = await self._process_zip(file_path), 1.0
             elif doc_type == 'srt':
-                text, ocr_confidence = await self._process_srt(file_path), 1.0
+                text, ocr_confidence = await self._process_subtitle_file(file_path, 'srt'), 1.0
+            elif doc_type == 'vtt':
+                text, ocr_confidence = await self._process_subtitle_file(file_path, 'vtt'), 1.0
             else:
                 raise ValueError(f"Unsupported document type: {doc_type}")
             
@@ -214,7 +235,7 @@ class DocumentProcessor:
             
             # Create processing result
             result = ProcessingResult(
-                document_id=document_id,  # **ROOSEVELT FIX**: Use provided UUID, not filename
+                document_id=document_id,  # Use provided document_id UUID
                 chunks=chunks,
                 entities=entities,
                 quality_metrics=quality_metrics,
@@ -496,12 +517,12 @@ class DocumentProcessor:
                             decoded_content = part.get_payload(decode=True).decode('utf-8', errors='replace')
                             clean_content = self._sanitize_unicode(decoded_content)
                             body_parts.append(clean_content)
-                        except:
+                        except Exception:
                             try:
                                 decoded_content = part.get_payload(decode=True).decode('latin-1', errors='replace')
                                 clean_content = self._sanitize_unicode(decoded_content)
                                 body_parts.append(clean_content)
-                            except:
+                            except Exception:
                                 continue
                     elif content_type == 'text/html':
                         try:
@@ -510,7 +531,7 @@ class DocumentProcessor:
                             text_content = soup.get_text()
                             clean_content = self._sanitize_unicode(text_content)
                             body_parts.append(clean_content)
-                        except:
+                        except Exception:
                             continue
             else:
                 # Single part message
@@ -527,7 +548,7 @@ class DocumentProcessor:
                     else:
                         clean_content = self._sanitize_unicode(str(content))
                         body_parts.append(clean_content)
-                except:
+                except Exception:
                     raw_payload = str(msg.get_payload())
                     clean_content = self._sanitize_unicode(raw_payload)
                     body_parts.append(clean_content)
@@ -545,162 +566,68 @@ class DocumentProcessor:
             logger.error(f"❌ EML processing failed: {e}")
             return ""
     
-    async def _process_srt(self, file_path: str) -> str:
-        """Process SRT subtitle file"""
+    def _extract_subtitle_cues_text(self, content: str) -> tuple[str, int]:
+        """
+        Extract cue text from SRT or WebVTT. Finds the timestamp line (contains '-->')
+        in each blank-line-separated block and keeps all following lines as subtitle text.
+        Skips WEBVTT headers, NOTE/REGION blocks without timestamps, etc.
+        """
+        content = content.lstrip('\ufeff').replace('\r\n', '\n').replace('\r', '\n').strip()
+        if not content:
+            return "", 0
+        blocks = re.split(r'\n\s*\n', content)
+        subtitles: List[str] = []
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            lines = block.split('\n')
+            ts_idx = None
+            for i, line in enumerate(lines):
+                if '-->' in line:
+                    ts_idx = i
+                    break
+            if ts_idx is None:
+                continue
+            subtitle_text = '\n'.join(lines[ts_idx + 1:]).strip()
+            if subtitle_text:
+                subtitles.append(subtitle_text)
+        combined = '\n\n'.join(subtitles)
+        return combined, len(subtitles)
+
+    async def _process_subtitle_file(self, file_path: str, source_kind: str) -> str:
+        """Process SRT or WebVTT: strip timing/metadata, return plain subtitle text for chunking."""
+        label = 'SRT' if source_kind == 'srt' else 'WebVTT'
         try:
             with open(file_path, 'r', encoding='utf-8') as file:
                 content = file.read()
-            
-            # Parse SRT format
-            # SRT format:
-            # 1
-            # 00:00:01,000 --> 00:00:04,000
-            # This is the first subtitle
-            #
-            # 2
-            # 00:00:05,000 --> 00:00:08,000
-            # This is the second subtitle
-            
-            subtitles = []
-            blocks = content.strip().split('\n\n')
-            
-            for block in blocks:
-                lines = block.strip().split('\n')
-                if len(lines) >= 3:
-                    # Skip the sequence number (first line)
-                    # Skip the timestamp (second line)
-                    # Extract the subtitle text (remaining lines)
-                    subtitle_text = '\n'.join(lines[2:])
-                    if subtitle_text.strip():
-                        subtitles.append(subtitle_text.strip())
-            
-            # Combine all subtitles with proper spacing
-            combined_text = '\n\n'.join(subtitles)
-            
-            logger.info(f"✅ SRT processed: {len(subtitles)} subtitles extracted")
+            combined_text, n = self._extract_subtitle_cues_text(content)
+            logger.info(f"✅ {label} processed: {n} cues extracted")
             return combined_text
-            
         except UnicodeDecodeError:
-            # Try different encodings for SRT files
             for encoding in ['latin-1', 'cp1252', 'iso-8859-1']:
                 try:
                     with open(file_path, 'r', encoding=encoding) as file:
                         content = file.read()
-                    
-                    # Parse SRT format (same logic as above)
-                    subtitles = []
-                    blocks = content.strip().split('\n\n')
-                    
-                    for block in blocks:
-                        lines = block.strip().split('\n')
-                        if len(lines) >= 3:
-                            subtitle_text = '\n'.join(lines[2:])
-                            if subtitle_text.strip():
-                                subtitles.append(subtitle_text.strip())
-                    
-                    combined_text = '\n\n'.join(subtitles)
-                    logger.info(f"✅ SRT processed with {encoding}: {len(subtitles)} subtitles extracted")
+                    combined_text, n = self._extract_subtitle_cues_text(content)
+                    logger.info(f"✅ {label} processed with {encoding}: {n} cues extracted")
                     return combined_text
-                    
                 except UnicodeDecodeError:
                     continue
-            
-            logger.error(f"❌ Could not decode SRT file: {file_path}")
+            logger.error(f"❌ Could not decode {label} file: {file_path}")
             return ""
-            
         except Exception as e:
-            logger.error(f"❌ SRT processing failed: {e}")
+            logger.error(f"❌ {label} processing failed: {e}")
             return ""
     
     async def _process_zip(self, file_path: str) -> str:
-        """Process ZIP file by extracting and processing contained files with caching"""
-        try:
-            extracted_texts = []
-            
-            # Create a cache key for this ZIP file to avoid reprocessing
-            zip_cache_key = f"zip_{Path(file_path).stem}"
-            
-            with zipfile.ZipFile(file_path, 'r') as zip_file:
-                # Get list of files in ZIP
-                file_list = zip_file.namelist()
-                logger.info(f"📦 ZIP contains {len(file_list)} files")
-                
-                # Filter to only supported files
-                supported_files = []
-                supported_extensions = {
-                    '.pdf': 'pdf',
-                    '.txt': 'txt',
-                    '.docx': 'docx',
-                    '.pptx': 'pptx',
-                    '.html': 'html',
-                    '.htm': 'html',
-                    '.eml': 'eml',
-                    '.srt': 'srt'
-                }
-                
-                for file_name in file_list:
-                    # Skip directories and hidden files
-                    if file_name.endswith('/') or file_name.startswith('.'):
-                        continue
-                    
-                    file_ext = Path(file_name).suffix.lower()
-                    if file_ext in supported_extensions:
-                        supported_files.append((file_name, supported_extensions[file_ext]))
-                    else:
-                        logger.debug(f"⏭️  Skipping unsupported file: {file_name}")
-                
-                logger.info(f"📦 Processing {len(supported_files)} supported files from ZIP")
-                
-                # Process each supported file
-                for file_name, doc_type in supported_files:
-                    try:
-                        # Extract file to temporary location
-                        with tempfile.NamedTemporaryFile(suffix=Path(file_name).suffix, delete=False) as temp_file:
-                            temp_path = temp_file.name
-                            temp_file.write(zip_file.read(file_name))
-                        
-                        # Process the extracted file with reduced logging
-                        logger.debug(f"📄 Processing {file_name} as {doc_type}")
-                        
-                        if doc_type == 'pdf':
-                            text, _, _, _ = await self._process_pdf(temp_path)
-                        elif doc_type == 'txt':
-                            text = await self._process_text(temp_path)
-                        elif doc_type == 'docx':
-                            text = await self._process_docx(temp_path)
-                        elif doc_type == 'pptx':
-                            text = await self._process_pptx(temp_path)
-                        elif doc_type == 'html':
-                            text = await self._process_html(temp_path)
-                        elif doc_type == 'eml':
-                            text = await self._process_eml(temp_path)
-                        elif doc_type == 'srt':
-                            text = await self._process_srt(temp_path)
-                        else:
-                            text = ""
-                        
-                        if text.strip():
-                            # Add file separator and filename
-                            file_header = f"\n{'='*50}\nFILE: {file_name}\n{'='*50}\n"
-                            extracted_texts.append(file_header + text)
-                            logger.debug(f"✅ Extracted {len(text)} characters from {file_name}")
-                        
-                        # Clean up temporary file
-                        os.unlink(temp_path)
-                        
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to process {file_name}: {e}")
-                        continue
-            
-            # Combine all extracted texts
-            combined_text = "\n\n".join(extracted_texts)
-            
-            logger.info(f"✅ ZIP processing complete: {len(extracted_texts)} files processed, {len(combined_text)} total characters")
-            return combined_text
-            
-        except Exception as e:
-            logger.error(f"❌ ZIP processing failed: {e}")
-            return ""
+        """ZIP archives are expanded at upload time via ZipProcessorService; do not merge as one doc."""
+        logger.info(
+            "ZIP file reached _process_zip; ZIP contents are processed as individual "
+            "documents via ZipProcessorService at upload time. Returning empty text. path=%s",
+            file_path,
+        )
+        return ""
     
     async def _assess_quality(self, text: str, ocr_confidence: float) -> QualityMetrics:
         """Assess the quality of extracted text"""
@@ -709,7 +636,7 @@ class DocumentProcessor:
             try:
                 language = detect(text)
                 lang_confidence = 0.9 if language == 'en' else 0.7
-            except:
+            except Exception:
                 lang_confidence = 0.5
             
             # Vocabulary coherence (ratio of dictionary words)
@@ -1641,7 +1568,7 @@ class DocumentProcessor:
             # Fallback: encode/decode to remove problematic characters
             try:
                 return text.encode('utf-8', errors='replace').decode('utf-8')
-            except:
+            except Exception:
                 return str(text)
     
     def _map_entities_to_chunks(self, entities: List[Entity], chunks: List[Chunk]) -> List[Entity]:

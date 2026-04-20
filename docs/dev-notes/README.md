@@ -1,18 +1,11 @@
-# Development Notes
+# Development notes
 
-This directory contains development notes, debug logs, hotfix documentation, and bug fix records for local development use.
+This directory holds design notes, plans, and architecture write-ups for Bastion.
 
-## Purpose
+Notes may describe **historical** decisions; always verify paths and behavior against the current repository (especially under `llm-orchestrator/` and `backend/`).
 
-These notes are for:
-- **Personal development tracking** - Your own notes and observations
-- **Debug sessions** - Temporary logging and troubleshooting documentation
-- **Hotfix records** - Quick fixes that may be superseded by proper solutions
-- **Bug fix documentation** - Detailed records of specific bug investigations
+## Where to start
 
-## Structure
-
-- `debug/` - Debug logging notes and troubleshooting sessions
-- `hotfixes/` - Temporary hotfix documentation
-- `bugfixes/` - Detailed bug fix investigations
-
+- Agent Factory / orchestration: [AGENT_FACTORY_ARCHITECTURE.md](./AGENT_FACTORY_ARCHITECTURE.md), [../AGENT_FACTORY.md](../AGENT_FACTORY.md)
+- Tool contracts: `.cursor/rules/tool-io-contracts.mdc` (repo root)
+- Large modules / planned splits (orchestrator, backend, document-service, frontend): [Future_Refactors.md](./Future_Refactors.md)

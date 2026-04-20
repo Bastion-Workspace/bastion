@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo, forwardRef, useImperativeHandle, memo } from 'react';
 import {
   Box,
   Typography,
@@ -10,16 +10,10 @@ import {
   Button,
   Chip,
   useTheme,
-  Dialog,
-  DialogContent,
   Menu,
   MenuItem,
   Popover,
 } from '@mui/material';
-import {
-  AutoAwesome,
-  Close,
-} from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import ExportButton from './ExportButton';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
@@ -37,11 +31,11 @@ import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import FolderSelectionDialog from './FolderSelectionDialog';
 import { useImageLightbox } from '../common/ImageLightbox';
 import ChatMessage from './ChatMessage';
-import ChartRenderer from './ChartRenderer';
+import ChatInConversationSearchBar from './ChatInConversationSearchBar';
 
 const BOTTOM_SCROLL_THRESHOLD_PX = 100;
 
-const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
+const ChatMessagesArea = forwardRef(function ChatMessagesArea({ darkMode: darkModeProp }, ref) {
   const theme = useTheme();
   const {
     messages,
@@ -57,6 +51,12 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     editAndResendMessage,
     switchBranch,
     messageTree,
+    currentNodeId,
+    conversationMessagesLoading,
+    setActiveArtifact,
+    openArtifact,
+    activeArtifact,
+    artifactCollapsed,
   } = useChatSidebar();
   const { isAdmin, has } = useCapabilities();
   const { openLightbox } = useImageLightbox();
@@ -71,44 +71,35 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     }
   );
 
-  const { data: messagesData, isLoading: messagesLoading } = useQuery(
-    ['conversationMessages', currentConversationId],
-    () =>
-      currentConversationId
-        ? apiService.getConversationMessages(currentConversationId, 0, 500, false, true)
-        : null,
-    {
-      enabled: !!currentConversationId,
-      refetchOnWindowFocus: false,
-      staleTime: 300000, // 5 minutes
-    }
-  );
   const messagesEndRef = useRef(null);
 
   // Handle HITL permission response - DIRECT API CALL VERSION
-  const handleHITLResponse = async (response) => {
+  const handleHITLResponse = useCallback(async (response) => {
     console.log('🛡️ HITL Response - Direct submission:', response);
-    
+
     try {
       // ROOSEVELT'S DIRECT CHARGE: Use sendMessage with override parameter
       // sendMessage will handle adding the user message, so we don't duplicate it here
       await sendMessage('auto', response);
-      
+
       console.log('✅ HITL response sent directly via sendMessage override');
     } catch (error) {
       console.error('❌ Failed to send HITL response directly:', error);
-      
+
       // Show user what happened
-      setMessages?.(prev => [...prev, {
-        id: Date.now(),
-        role: 'system',
-        type: 'system',
-        content: `⚠️ Auto-submission failed. Please copy and resend: "${response}"`,
-        timestamp: new Date().toISOString(),
-        isError: true
-      }]);
+      setMessages?.((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          role: 'system',
+          type: 'system',
+          content: `⚠️ Auto-submission failed. Please copy and resend: "${response}"`,
+          timestamp: new Date().toISOString(),
+          isError: true,
+        },
+      ]);
     }
-  };
+  }, [sendMessage, setMessages]);
 
   // Fetch AI name from prompt settings
   const { data: promptSettings } = useQuery(
@@ -123,6 +114,9 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   // Get AI name from settings, fallback to "Alex"
   const aiName = promptSettings?.ai_name || 'Alex';
 
+  // Recompute only when branch structure or path shape changes — not on every streaming token.
+  // `messages` is read from the render closure when deps change; omitting `messages` avoids work on every streaming tick.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const siblingInfoByMessageId = useMemo(() => {
     const map = {};
     if (!messageTree?.byId?.size || !messages?.length) return map;
@@ -135,7 +129,7 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
       }
     });
     return map;
-  }, [messages, messageTree]);
+  }, [messageTree, currentNodeId, messages.length]);
 
   const anyMessageStreaming = useMemo(
     () => (messages || []).some((m) => m.isStreaming),
@@ -146,10 +140,31 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
   const [userHasScrolled, setUserHasScrolled] = useState(false);
   const messagesContainerRef = useRef(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchHighlightQuery, setSearchHighlightQuery] = useState('');
+  const [searchHighlightMessageIndex, setSearchHighlightMessageIndex] = useState(null);
+
+  const handleSearchActiveMatchChange = useCallback(({ query: q, messageListIndex }) => {
+    setSearchHighlightQuery(q ?? '');
+    setSearchHighlightMessageIndex(messageListIndex ?? null);
+  }, []);
+
+  const handleSearchClose = useCallback(() => {
+    setSearchOpen(false);
+    setSearchHighlightQuery('');
+    setSearchHighlightMessageIndex(null);
+  }, []);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      openConversationSearch: () => setSearchOpen(true),
+    }),
+    []
+  );
   const scrollTimeoutRef = useRef(null);
   const lastScrollTopRef = useRef(0);
   const [hasTextSelection, setHasTextSelection] = useState(false);
-  const [fullScreenChart, setFullScreenChart] = useState(null);
   const lastMessageCountRef = useRef(0);  // Track actual NEW messages vs updates
   const isScrollingRef = useRef(false);  // Track if user is actively scrolling
   const messageCountRef = useRef(0);  // Current message count for scroll-up snapshot
@@ -347,7 +362,7 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const [reactionAnchor, setReactionAnchor] = useState(null);
   const [reactionMessage, setReactionMessage] = useState(null);
 
-  const handleCopyMessage = async (message) => {
+  const handleCopyMessage = useCallback(async (message) => {
     try {
       setCopiedMessageId(message.id);
       const content = String(message?.content || '');
@@ -367,7 +382,9 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
         } catch (copyErr) {
           console.error('Failed to copy message:', copyErr);
         } finally {
-          setTimeout(() => { setCopiedMessageId(null); }, 1200);
+          setTimeout(() => {
+            setCopiedMessageId(null);
+          }, 1200);
         }
       };
       // Yield to the browser to paint the spinner before heavy work
@@ -379,9 +396,9 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     } catch (err) {
       console.error('Failed to schedule copy:', err);
     }
-  };
+  }, []);
 
-  const handleSaveAsMarkdown = async (message) => {
+  const handleSaveAsMarkdown = useCallback(async (message) => {
     if (!currentConversationId || !message.message_id) {
       console.error('Cannot save message: missing conversation ID or message ID');
       return;
@@ -431,12 +448,12 @@ ${message.content}
     } finally {
       setSavingNoteFor(null);
     }
-  };
+  }, [currentConversationId]);
 
-  const handleImportImage = (imageUrl) => {
+  const handleImportImage = useCallback((imageUrl) => {
     setImageToImport(imageUrl);
     setFolderDialogOpen(true);
-  };
+  }, []);
 
   const handleFolderSelect = async (folder) => {
     if (!imageToImport || !folder) return;
@@ -469,18 +486,21 @@ ${message.content}
     }
   };
 
-  const handleContextMenu = (event, message) => {
-    event.preventDefault();
-    setContextMenu(
-      contextMenu === null
-        ? {
-            mouseX: event.clientX + 2,
-            mouseY: event.clientY - 6,
-          }
-        : null,
-    );
-    setContextMenuMessage(message);
-  };
+  const handleContextMenu = useCallback(
+    (event, message) => {
+      event.preventDefault();
+      setContextMenu((prev) =>
+        prev === null
+          ? {
+              mouseX: event.clientX + 2,
+              mouseY: event.clientY - 6,
+            }
+          : null,
+      );
+      setContextMenuMessage(message);
+    },
+    [],
+  );
 
   const handleCloseContextMenu = () => {
     setContextMenu(null);
@@ -536,15 +556,15 @@ ${message.content}
     }
   };
 
-  const formatTimestamp = (timestamp) => {
+  const formatTimestamp = useCallback((timestamp) => {
     if (!timestamp) return '';
-    
+
     const date = new Date(timestamp);
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
+  }, []);
 
   // Extract image URLs from assistant message content for preview rendering
-  const extractImageUrls = (text) => {
+  const extractImageUrls = useCallback((text) => {
     try {
       if (!text || typeof text !== 'string') return [];
       const urls = [];
@@ -590,31 +610,24 @@ ${message.content}
     } catch {
       return [];
     }
-  };
+  }, []);
 
-  // Convert static image URL to API endpoint for proper content-type headers
-  const getImageApiUrl = (url) => {
-    if (url.startsWith('/static/images/')) {
-      const filename = url.replace('/static/images/', '');
-      return `/api/images/${filename}`;
-    }
-    // API endpoints are already correct - return as-is
-    if (url.startsWith('/api/comics/') || url.startsWith('/api/images/') || url.startsWith('/api/documents/')) {
-      return url;
-    }
-    return url; // Return as-is for external URLs
-  };
+  // All image URLs are relative API paths — return as-is (server handles redirects for legacy schemes)
+  const getImageApiUrl = useCallback((url) => url, []);
 
   // Open image in lightbox
-  const handleOpenImage = (url) => {
+  const handleOpenImage = useCallback(
+    (url) => {
       const apiUrl = getImageApiUrl(url);
-    // Extract filename from URL if possible
-    const filename = url.split('/').pop().split('?')[0];
-    openLightbox(apiUrl, { filename, alt: 'Generated image' });
-  };
+      // Extract filename from URL if possible
+      const filename = url.split('/').pop().split('?')[0];
+      openLightbox(apiUrl, { filename, alt: 'Generated image' });
+    },
+    [getImageApiUrl, openLightbox],
+  );
 
   // Check if a message contains a research plan
-  const hasResearchPlan = (message) => {
+  const hasResearchPlan = useCallback((message) => {
     return (
       message.research_plan ||
       (message.content && (
@@ -625,10 +638,10 @@ ${message.content}
         (message.content.includes('Step') && message.content.includes('Research'))
       ))
     );
-  };
+  }, []);
 
   // Check if a message is a HITL permission request
-  const isHITLPermissionRequest = (message) => {
+  const isHITLPermissionRequest = useCallback((message) => {
     // ROOSEVELT'S ENHANCED HITL: Use new tagging system first, fallback to content detection
     if (message.isPermissionRequest && message.requiresApproval) {
       return true;
@@ -649,27 +662,14 @@ ${message.content}
         (message.content.includes('Yes') && message.content.includes('No') && message.content.includes('permission'))
       )
     );
-  };
+  }, []);
 
   // Custom markdown components for better styling (memoized to avoid re-rendering all ReactMarkdown children)
   const markdownComponents = useMemo(() => ({
-    // Style code blocks - ROOSEVELT'S ENHANCED CODE BLOCK HANDLING
-    code: ({ node, inline, className, children, staticData, staticFormat, onImport, onFullScreen, ...props }) => {
+    // Style code blocks (syntax highlighting for fenced blocks)
+    code: ({ node, inline, className, children, ...props }) => {
       const match = /language-([\w:]+)/.exec(className || '');
-      
-      // Handle HTML chart visualizations - render as HTML in ChartRenderer
-      if (!inline && match && match[1] === 'html:chart') {
-        return (
-          <ChartRenderer 
-            html={String(children).replace(/\n$/, '')} 
-            staticData={staticData}
-            staticFormat={staticFormat}
-            onImport={onImport}
-            onFullScreen={onFullScreen}
-          />
-        );
-      }
-      
+
       return !inline && match ? (
         <SyntaxHighlighter
           style={materialLight}
@@ -713,7 +713,7 @@ ${message.content}
       </Typography>
     ),
     
-    // Style headings with proper hierarchy and spacing - ROOSEVELT'S BLOCK DISPLAY FIX
+    // Headings: block display; h1/h2 trimmed vs Typography h4/h5 for sidebar density (~4pt under theme size)
     h1: ({ children, ...props }) => (
       <Typography 
         variant="h4" 
@@ -724,7 +724,13 @@ ${message.content}
           fontWeight: 700, 
           lineHeight: 1.3,
           display: 'block',
-          width: '100%'
+          width: '100%',
+          fontSize: (theme) => {
+            const fs = theme.typography.h4.fontSize;
+            if (typeof fs === 'string') return `calc(${fs} - 4pt)`;
+            if (typeof fs === 'number') return `calc(${fs}px - 4pt)`;
+            return undefined;
+          },
         }} 
         {...props}
       >
@@ -741,7 +747,13 @@ ${message.content}
           fontWeight: 600, 
           lineHeight: 1.4,
           display: 'block',
-          width: '100%'
+          width: '100%',
+          fontSize: (theme) => {
+            const fs = theme.typography.h5.fontSize;
+            if (typeof fs === 'string') return `calc(${fs} - 4pt)`;
+            if (typeof fs === 'number') return `calc(${fs}px - 4pt)`;
+            return undefined;
+          },
         }} 
         {...props}
       >
@@ -924,13 +936,14 @@ ${message.content}
           '& th, & td': {
             border: '1px solid',
             borderColor: 'divider',
-            padding: '8px 12px',
-            textAlign: 'left'
+            padding: '10px 14px',
+            verticalAlign: 'middle',
+            lineHeight: 1.5,
           },
           '& th': {
             backgroundColor: 'action.hover',
-            fontWeight: 600
-          }
+            fontWeight: 600,
+          },
         }}
         {...props}
       >
@@ -976,13 +989,7 @@ ${message.content}
           </Box>
         );
       }
-      // Regular image - fix double "Comics" in path for /api/comics URLs
       let imageSrc = src;
-      if (src && src.startsWith('/api/comics/')) {
-        // Remove duplicate "Comics" segment if present
-        // e.g., /api/comics/Comics/Dilbert/... -> /api/comics/Dilbert/...
-        imageSrc = src.replace(/^\/api\/comics\/Comics\//, '/api/comics/');
-      }
       
       return (
         <Box sx={{ my: 2, textAlign: 'center' }}>
@@ -1036,6 +1043,13 @@ ${message.content}
           overflow: 'hidden',
         }}
       >
+      <ChatInConversationSearchBar
+        messages={messages}
+        scrollContainerRef={messagesContainerRef}
+        open={searchOpen}
+        onClose={handleSearchClose}
+        onActiveMatchChange={handleSearchActiveMatchChange}
+      />
       {/* Messages Container */}
       <Box 
         ref={messagesContainerRef}
@@ -1072,7 +1086,7 @@ ${message.content}
           </Box>
         )}
         {/* ROOSEVELT'S IMPROVED EMPTY STATE: Better feedback during conversation restoration */}
-        {messages.length === 0 && !isLoading && !conversationLoading && !messagesLoading && (
+        {messages.length === 0 && !isLoading && !conversationLoading && !conversationMessagesLoading && (
           <Box sx={{ 
             display: 'flex', 
             alignItems: 'center', 
@@ -1089,7 +1103,7 @@ ${message.content}
         )}
 
         {/* ROOSEVELT'S CONVERSATION RESTORATION INDICATOR: Show loading when restoring conversation */}
-        {currentConversationId && (conversationLoading || messagesLoading) && messages.length === 0 && (
+        {currentConversationId && (conversationLoading || conversationMessagesLoading) && messages.length === 0 && (
           <Box sx={{ 
             display: 'flex', 
             flexDirection: 'column',
@@ -1123,13 +1137,17 @@ ${message.content}
               key={message.id || index}
               message={message}
               index={index}
+              messageListIndex={index}
+              inThreadSearchQuery={searchHighlightQuery}
+              inThreadSearchActive={
+                searchOpen && searchHighlightMessageIndex === index
+              }
               isLoading={isLoading}
               theme={theme}
               aiName={aiName}
               markdownComponents={markdownComponents}
               handleContextMenu={handleContextMenu}
               handleImportImage={handleImportImage}
-              setFullScreenChart={setFullScreenChart}
               formatTimestamp={formatTimestamp}
               handleCopyMessage={handleCopyMessage}
               handleSaveAsMarkdown={handleSaveAsMarkdown}
@@ -1149,6 +1167,10 @@ ${message.content}
               onSwitchBranch={switchBranch}
               siblingInfo={siblingInfoByMessageId[message.message_id || message.id]}
               anyMessageStreaming={anyMessageStreaming}
+              setActiveArtifact={setActiveArtifact}
+              openArtifact={openArtifact}
+              activeArtifact={activeArtifact}
+              artifactCollapsed={artifactCollapsed}
             />
           );
         })}
@@ -1187,7 +1209,7 @@ ${message.content}
             </Box>
             <Box>
               <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.primary', display: 'block', lineHeight: 1.2 }}>
-                {aiName}
+                {messages[messages.length - 1]?.metadata?.persona_ai_name || aiName}
               </Typography>
               {(() => {
                 const lastMessage = messages[messages.length - 1];
@@ -1284,42 +1306,6 @@ ${message.content}
         onSelect={handleFolderSelect}
       />
 
-      {/* Full Screen Chart Dialog */}
-      <Dialog
-        fullScreen
-        open={!!fullScreenChart}
-        onClose={() => setFullScreenChart(null)}
-      >
-        <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-          <Box sx={{ 
-            p: 1, 
-            display: 'flex', 
-            justifyContent: 'space-between', 
-            alignItems: 'center',
-            borderBottom: '1px solid',
-            borderColor: 'divider',
-            bgcolor: 'background.paper'
-          }}>
-            <Typography variant="h6" sx={{ ml: 2 }}>Visualization Full Screen</Typography>
-            <IconButton onClick={() => setFullScreenChart(null)}>
-              <Close />
-            </IconButton>
-          </Box>
-          <Box sx={{ flexGrow: 1, bgcolor: '#fff' }}>
-            {fullScreenChart && (
-              <iframe
-                srcDoc={fullScreenChart}
-                title="Full Screen Visualization"
-                width="100%"
-                height="100%"
-                style={{ border: 'none' }}
-                sandbox="allow-scripts allow-same-origin"
-              />
-            )}
-          </Box>
-        </Box>
-      </Dialog>
-
       {/* Context Menu for Reply and React */}
       <Menu
         open={contextMenu !== null}
@@ -1363,6 +1349,6 @@ ${message.content}
       </Popover>
     </Box>
   );
-};
+});
 
-export default React.memo(ChatMessagesArea); 
+export default memo(ChatMessagesArea); 

@@ -31,25 +31,53 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Switch,
   Tooltip,
   ToggleButtonGroup,
   ToggleButton,
+  Paper,
+  Grid,
 } from '@mui/material';
-import { Close, Delete, Add, Extension, ExpandMore, ExpandLess, Lock, Lens, RadioButtonUnchecked, Schedule } from '@mui/icons-material';
-import CollapsibleToolPicker from './CollapsibleToolPicker';
-import ExternalPackConfigurator from './ExternalPackConfigurator';
+import { Close, Delete, Add, Extension, ExpandMore, ExpandLess, Lens, RadioButtonUnchecked, Schedule } from '@mui/icons-material';
+import StepCapabilitiesPanel from './StepCapabilitiesPanel';
+import SubagentsBlock from './SubagentsBlock';
+import BestOfNBlock from './BestOfNBlock';
+import FanOutBlock from './FanOutBlock';
 import DeepAgentPhaseEditor from './DeepAgentPhaseEditor';
 import IsolatedPromptTemplateField from './IsolatedPromptTemplateField';
 import IsolatedDebouncedPlainPromptField from './IsolatedDebouncedPlainPromptField';
 import { getCompatibleUpstreamOptions, getGroupedWireOptions, indexActionsByName, extractPromptPlaceholders } from '../../utils/agentFactoryTypeWiring';
 import apiService from '../../services/apiService';
 import { getSelectableChatModels } from '../../utils/chatSelectableModels';
-import agentFactoryService from '../../services/agentFactoryService';
+import agentFactoryService, { AGENT_HANDLES_QUERY_KEY } from '../../services/agentFactoryService';
 import ResizableDrawer from './ResizableDrawer';
 
 const LITERAL = '__literal__';
 const SCHEMA_TYPES = ['string', 'number', 'boolean', 'array', 'object'];
+/** Matches orchestrator playbook_limits.MAX_PARALLEL_SUBSTEPS */
+const MAX_PARALLEL_SUBSTEPS = 10;
+
+// ResizableDrawer uses Modal z-index 1400; MUI Dialog default is 1300, so dialogs would stack under the drawer.
+const DIALOG_Z_INDEX_ABOVE_STEP_DRAWER = 1600;
+// Select Menu uses modal z-index (1300) by default; it must sit above the step drawer dialogs.
+const SELECT_MENU_Z_INDEX_ABOVE_STEP_DIALOG = DIALOG_Z_INDEX_ABOVE_STEP_DRAWER + 100;
+// Select menus must sit above the drawer Modal (1400) or they appear behind the pane.
+const SELECT_MENU_Z_ABOVE_STEP_DRAWER = 1450;
+
+const STEP_DRAWER_SELECT_MENU_PROPS = {
+  disableScrollLock: true,
+  sx: { zIndex: SELECT_MENU_Z_ABOVE_STEP_DRAWER },
+  PaperProps: {
+    sx: { zIndex: SELECT_MENU_Z_ABOVE_STEP_DRAWER },
+  },
+};
+
+const STEP_DIALOG_SELECT_MENU_PROPS = {
+  disableScrollLock: true,
+  sx: { zIndex: SELECT_MENU_Z_INDEX_ABOVE_STEP_DIALOG },
+  PaperProps: {
+    sx: { zIndex: SELECT_MENU_Z_INDEX_ABOVE_STEP_DIALOG },
+  },
+};
 
 const NOTIFICATION_CHANNELS = [
   { value: 'in_app', label: 'In-app conversation' },
@@ -138,6 +166,7 @@ function LLMTaskModelOverride({ step, setStep }) {
         value={current}
         label="Model override"
         onChange={(e) => setStep((s) => ({ ...s, model_override: e.target.value || undefined }))}
+        MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
       >
         <MenuItem value="">— Use agent default</MenuItem>
         {options.map((id) => (
@@ -155,90 +184,6 @@ function LLMTaskModelOverride({ step, setStep }) {
         Optional. Override the agent default model for this step.
       </Typography>
     </FormControl>
-  );
-}
-
-function StepSkillsPicker({ step, setStep, readOnly }) {
-  const { data: skillsList = [] } = useQuery(
-    ['agentFactorySkills'],
-    () => agentFactoryService.listSkills({ include_builtin: true }),
-    { staleTime: 60000 }
-  );
-  const selectedIds = useMemo(
-    () => new Set(Array.isArray(step?.skill_ids) ? step.skill_ids : Array.isArray(step?.skills) ? step.skills : []),
-    [step?.skill_ids, step?.skills]
-  );
-  const byCategory = useMemo(() => {
-    const map = {};
-    (skillsList || []).forEach((s) => {
-      const cat = s.category || 'General';
-      if (!map[cat]) map[cat] = [];
-      map[cat].push(s);
-    });
-    return map;
-  }, [skillsList]);
-  const categories = useMemo(() => Object.keys(byCategory).sort(), [byCategory]);
-
-  const toggleSkill = (skillId) => {
-    if (readOnly) return;
-    const next = new Set(selectedIds);
-    if (next.has(skillId)) next.delete(skillId);
-    else next.add(skillId);
-    setStep((s) => ({ ...s, skill_ids: Array.from(next) }));
-  };
-
-  if (categories.length === 0) return null;
-
-  return (
-    <Box sx={{ mb: 2 }}>
-      <Typography variant="subtitle2" sx={{ mb: 1 }}>Skills</Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-        Step-level skills add procedure and auto-bind required tools for this step.
-      </Typography>
-      <Box sx={{ maxHeight: 200, overflowY: 'auto', border: 1, borderColor: 'divider', borderRadius: 1, p: 1 }}>
-        {categories.map((cat) => (
-          <Box key={cat} sx={{ mb: 1 }}>
-            <Typography variant="caption" fontWeight={600} color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
-              {cat}
-            </Typography>
-            {(byCategory[cat] || []).map((skill) => {
-              const checked = selectedIds.has(skill.id);
-              return (
-                <FormControlLabel
-                  key={skill.id}
-                  control={
-                    <Checkbox
-                      size="small"
-                      checked={checked}
-                      disabled={readOnly}
-                      onChange={() => toggleSkill(skill.id)}
-                      sx={{ p: 0.25, mr: 0.5 }}
-                    />
-                  }
-                  label={
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap' }}>
-                      {skill.is_builtin && <Lock sx={{ fontSize: 14 }} color="action" titleAccess="Built-in" />}
-                      <span>{skill.name || skill.slug}</span>
-                      {Array.isArray(skill.required_tools) && skill.required_tools.length > 0 && (
-                        <Tooltip title={skill.required_tools.join(', ')}>
-                          <Chip
-                            size="small"
-                            label={`+${skill.required_tools.length} tools`}
-                            sx={{ height: 18, fontSize: '0.7rem', cursor: 'help' }}
-                            variant="outlined"
-                          />
-                        </Tooltip>
-                      )}
-                    </Box>
-                  }
-                  sx={{ display: 'flex', alignItems: 'center', mx: 0, my: 0.25, '& .MuiFormControlLabel-label': { fontSize: '0.8125rem' } }}
-                />
-              );
-            })}
-          </Box>
-        ))}
-      </Box>
-    </Box>
   );
 }
 
@@ -290,6 +235,7 @@ function OutputSchemaEditor({ step, setStep }) {
               value={f.type}
               onChange={(e) => changeField(idx, 'type', e.target.value)}
               displayEmpty
+              MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
             >
               {SCHEMA_TYPES.map((t) => (
                 <MenuItem key={t} value={t}>{t}</MenuItem>
@@ -327,22 +273,45 @@ export default function StepConfigDrawer({
   const [pluginCreds, setPluginCreds] = useState({});
   const [showPluginForm, setShowPluginForm] = useState(false);
   const [conditionSectionOpen, setConditionSectionOpen] = useState(false);
+  const [editorOutputSectionOpen, setEditorOutputSectionOpen] = useState(false);
+  const [inputsSectionOpen, setInputsSectionOpen] = useState(false);
   const [insertRefValue, setInsertRefValue] = useState('');
-  const [addAgentDialogOpen, setAddAgentDialogOpen] = useState(false);
-  const [selectedProfileIdForAgent, setSelectedProfileIdForAgent] = useState('');
-  const [selectedPlaybookIdForAgent, setSelectedPlaybookIdForAgent] = useState('');
+  const [addSubagentDialogOpen, setAddSubagentDialogOpen] = useState(false);
+  const [subagentProfileId, setSubagentProfileId] = useState('');
   const promptDraftRef = useRef('');
   const approvalPromptDraftRef = useRef('');
   const [promptExternalRev, setPromptExternalRev] = useState(0);
 
   const drawerStepResetKey = useMemo(
-    () => `${stepIndex ?? 'x'}|${open}|${JSON.stringify(stepPath ?? null)}`,
-    [stepIndex, open, stepPath]
+    () => `${initialStep?._step_id ?? 'none'}|${stepIndex ?? 'x'}|${open}|${JSON.stringify(stepPath ?? null)}`,
+    [initialStep?._step_id, stepIndex, open, stepPath]
   );
 
-  useEffect(() => {
+  // Synchronize local state from props DURING render (not after via useEffect)
+  // so that IsolatedPromptTemplateField sees the correct seedPrompt on the same
+  // render cycle where resetKey changes.
+  const [prevInitialStepId, setPrevInitialStepId] = useState(initialStep?._step_id);
+  const [prevOpen, setPrevOpen] = useState(open);
+
+  if (initialStep?._step_id !== prevInitialStepId || (open && !prevOpen)) {
+    setPrevInitialStepId(initialStep?._step_id);
+    setPrevOpen(open);
+    if (initialStep) {
+      setStep(initialStep);
+      setInputs(initialStep.inputs || {});
+      const p = initialStep.prompt_template || initialStep.prompt || '';
+      promptDraftRef.current = p;
+      approvalPromptDraftRef.current = initialStep.prompt || '';
+    }
     setPromptExternalRev(0);
-  }, [drawerStepResetKey]);
+  }
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (!open) {
+      setShowPluginForm(false);
+      setPluginCreds({});
+    }
+  }
 
   const promptFieldResetKey = useMemo(
     () => `${drawerStepResetKey}|${promptExternalRev}`,
@@ -354,72 +323,17 @@ export default function StepConfigDrawer({
     () => (stepIndex != null && stepIndex > 0 ? steps.slice(0, stepIndex) : []),
     [steps, stepIndex]
   );
-  const actionNamesSet = useMemo(() => {
-    const set = new Set();
-    (actions || []).forEach((a) => {
-      const name = typeof a === 'string' ? a : a?.name;
-      if (name) set.add(name);
-    });
-    return set;
-  }, [actions]);
-  const retainedToolNames = useMemo(() => {
-    if (step?.step_type !== 'llm_agent' && step?.type !== 'llm_agent' && step?.action !== 'llm_agent') return [];
-    const current = Array.isArray(step?.available_tools) ? step.available_tools : [];
-    return current.filter(
-      (t) => typeof t === 'string' && !t.startsWith('agent:') && !actionNamesSet.has(t)
-    );
-  }, [step?.step_type, step?.action, step?.available_tools, actionNamesSet]);
-
-  const { data: toolPacksList = [] } = useQuery(
-    ['agentFactoryToolPacks'],
-    () => apiService.agentFactory.getToolPacks(),
-    { enabled: open }
+  const legacyAgentToolKeys = useMemo(
+    () =>
+      (Array.isArray(step?.available_tools) ? step.available_tools : []).filter(
+        (t) => typeof t === 'string' && t.startsWith('agent:')
+      ),
+    [step?.available_tools]
   );
 
-  const builtinToolPacks = useMemo(
-    () => (toolPacksList || []).filter((p) => (p.type || 'builtin') !== 'external'),
-    [toolPacksList]
-  );
-  const externalToolPacks = useMemo(
-    () => (toolPacksList || []).filter((p) => p.type === 'external'),
-    [toolPacksList]
-  );
+  // Tool packs removed in Skills-First Architecture.
+  // All capabilities are assigned via skill_ids on each step.
 
-  const commitExternalToolPacks = useCallback(
-    (nextExt) => {
-      setStep((s) => {
-        const extNames = new Set((externalToolPacks || []).map((p) => p.name));
-        const raw = Array.isArray(s.tool_packs) ? s.tool_packs : [];
-        const normalized = raw.map((e) =>
-          typeof e === 'object' && e?.pack ? { ...e } : { pack: String(e).trim(), mode: 'full' }
-        );
-        const kept = normalized.filter((e) => !extNames.has(e.pack));
-        return { ...s, tool_packs: [...kept, ...nextExt] };
-      });
-    },
-    [externalToolPacks, setStep]
-  );
-
-  const toolsCoveredBySelectedPacks = useMemo(() => {
-    const isLlmOrDeep = step?.step_type === 'llm_agent' || step?.type === 'llm_agent' || step?.action === 'llm_agent' ||
-      step?.step_type === 'deep_agent' || step?.type === 'deep_agent' || step?.action === 'deep_agent';
-    if (!isLlmOrDeep) return [];
-    const raw = Array.isArray(step?.tool_packs) ? step.tool_packs : [];
-    const packNames = raw.map((e) => (typeof e === 'object' && e?.pack ? e.pack : String(e).trim())).filter(Boolean);
-    if (packNames.length === 0 || !Array.isArray(toolPacksList) || toolPacksList.length === 0) return [];
-    const packToolSet = new Set();
-    packNames.forEach((name) => {
-      const pack = toolPacksList.find((p) => p.name === name);
-      (pack?.tools || []).forEach((t) => {
-        packToolSet.add(t);
-        if (t.endsWith('_tool')) packToolSet.add(t.slice(0, -5));
-      });
-    });
-    const current = Array.isArray(step?.available_tools) ? step.available_tools : [];
-    return current.filter(
-      (t) => typeof t === 'string' && !t.startsWith('agent:') && (packToolSet.has(t) || packToolSet.has(t + '_tool'))
-    );
-  }, [step?.step_type, step?.action, step?.tool_packs, step?.available_tools, toolPacksList]);
   const currentAction = step?.action ? actionsByName[step.action] : null;
   const inputFields = currentAction?.input_fields || [];
   const paramsSchema = currentAction?.params_schema;
@@ -427,21 +341,23 @@ export default function StepConfigDrawer({
   const isInvokeAgent = step?.action === 'invoke_agent';
 
   const { data: agentHandles = [] } = useQuery(
-    ['agentHandles'],
+    AGENT_HANDLES_QUERY_KEY,
     () => agentFactoryService.fetchAgentHandles(),
     { enabled: open && !!isInvokeAgent, staleTime: 60000 }
   );
 
   const isLlmAgentStep = step?.step_type === 'llm_agent' || step?.type === 'llm_agent' || step?.action === 'llm_agent';
+  const isDeepAgentStep = step?.step_type === 'deep_agent' || step?.type === 'deep_agent';
+  const needsAgentProfileLists = isLlmAgentStep || isDeepAgentStep;
   const { data: profiles = [] } = useQuery(
     'agentFactoryProfiles',
     () => apiService.agentFactory.listProfiles(),
-    { enabled: open && !!isLlmAgentStep, retry: false }
+    { enabled: open && needsAgentProfileLists, staleTime: 60_000, retry: false }
   );
   const { data: playbooks = [] } = useQuery(
     'agentFactoryPlaybooks',
     () => apiService.agentFactory.listPlaybooks(),
-    { enabled: open && !!isLlmAgentStep, retry: false }
+    { enabled: open && needsAgentProfileLists, staleTime: 60_000, retry: false }
   );
 
   const selectedChannel = isSendChannelMessage
@@ -454,6 +370,76 @@ export default function StepConfigDrawer({
     { enabled: open && !!isSendChannelMessage, staleTime: 60000 }
   );
   const chatBotConnections = connectionsData?.connections ?? [];
+
+  const factoryConnectionsEnabled = open && (
+    step?.step_type === 'llm_agent' || step?.type === 'llm_agent' || step?.action === 'llm_agent' ||
+    step?.step_type === 'deep_agent' || step?.type === 'deep_agent' || step?.action === 'deep_agent' ||
+    step?.step_type === 'llm_task' || step?.type === 'llm_task' || step?.action === 'llm_task'
+  );
+  const { data: allConnectionsData } = useQuery(
+    ['connections', 'dynamic_capability_ui'],
+    () => apiService.get('/api/connections'),
+    { enabled: factoryConnectionsEnabled, staleTime: 60000 }
+  );
+  const { data: editorProfile } = useQuery(
+    ['agentFactoryProfile', profileId],
+    () => apiService.agentFactory.getProfile(profileId),
+    { enabled: open && !!profileId && factoryConnectionsEnabled, staleTime: 30000, retry: false }
+  );
+  const profileAllowedConnections = Array.isArray(editorProfile?.allowed_connections)
+    ? editorProfile.allowed_connections
+    : [];
+  const connectionsForSkills = useMemo(() => {
+    const raw = allConnectionsData?.connections ?? [];
+    const out = [];
+    const seen = new Set();
+    for (const c of raw) {
+      const cid = Number(c.id);
+      if (!Number.isFinite(cid)) continue;
+      const caps =
+        Array.isArray(c.capabilities) && c.capabilities.length > 0
+          ? c.capabilities
+          : [String(c.connection_type || '').trim()].filter(Boolean);
+      const baseLabel = c.display_name || c.account_identifier || String(cid);
+      const prov = String(c.provider || '').trim();
+      const multiCap = caps.length > 1;
+      for (const capKey of caps) {
+        if (!capKey) continue;
+        const k = `${capKey}:${cid}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        out.push({
+          ...c,
+          id: cid,
+          connection_type: capKey,
+          provider: prov,
+          display_name: multiCap ? `${baseLabel} — ${capKey}` : baseLabel,
+          account_identifier: c.account_identifier,
+        });
+      }
+    }
+    return out;
+  }, [allConnectionsData]);
+  const capabilityChips = useMemo(() => {
+    const list = allConnectionsData?.connections || [];
+    const chips = [];
+    for (const c of list) {
+      const cid = Number(c.id);
+      const caps =
+        Array.isArray(c.capabilities) && c.capabilities.length > 0
+          ? c.capabilities
+          : [String(c.connection_type || '').trim()].filter(Boolean);
+      const base = c.display_name || c.account_identifier || String(c.id);
+      for (const capKey of caps) {
+        if (!capKey) continue;
+        chips.push({
+          key: `${cid}-${capKey}`,
+          label: `${capKey}: ${base}`,
+        });
+      }
+    }
+    return chips;
+  }, [allConnectionsData]);
 
   const selectedConnectionId = step?.params?.connection_id ? String(step.params.connection_id) : '';
   const { data: knownChatsData } = useQuery(
@@ -471,12 +457,12 @@ export default function StepConfigDrawer({
   const { data: plugins = [], isLoading: pluginsLoading } = useQuery(
     'agentFactoryPlugins',
     () => apiService.agentFactory.getPlugins(),
-    { enabled: open && !!profileId, retry: false }
+    { enabled: open && !!profileId, staleTime: 60_000, retry: false }
   );
   const { data: pluginConfigs = [] } = useQuery(
     ['agentFactoryPluginConfigs', profileId],
     () => apiService.agentFactory.listPluginConfigs(profileId),
-    { enabled: open && !!profileId, retry: false }
+    { enabled: open && !!profileId, staleTime: 30_000, retry: false }
   );
   const upsertPluginConfigsMutation = useMutation(
     ({ profileId: id, body }) => apiService.agentFactory.upsertPluginConfigs(id, body),
@@ -494,19 +480,7 @@ export default function StepConfigDrawer({
   const pluginConnected = !!(pluginConfig?.has_credentials);
   const pluginNeedsConfig = pluginMeta?.connection_requirements?.length > 0 && (!pluginConnected || showPluginForm);
 
-  useEffect(() => {
-    if (initialStep) {
-      setStep(initialStep);
-      setInputs(initialStep.inputs || {});
-      const p = initialStep.prompt_template || initialStep.prompt || '';
-      promptDraftRef.current = p;
-      approvalPromptDraftRef.current = initialStep.prompt || '';
-    }
-    if (!open) {
-      setShowPluginForm(false);
-      setPluginCreds({});
-    }
-  }, [initialStep, open]);
+  // State sync from initialStep/open is handled above during render (not via useEffect).
 
   const commitPromptDraftToStep = useCallback((val) => {
     setStep((s) => ({ ...s, prompt_template: val, prompt: val }));
@@ -525,6 +499,9 @@ export default function StepConfigDrawer({
     } else if (stepTypeInner === 'approval') {
       merged = { ...merged, prompt: approvalPromptDraftRef.current };
     }
+    const outKey = String(merged.output_key || '').trim();
+    const nameTrim = String(merged.name ?? '').trim();
+    merged.name = nameTrim || outKey || `step_${typeof stepIndex === 'number' ? stepIndex + 1 : 1}`;
     onSave(stepIndex, merged, stepPath);
     onClose();
   };
@@ -561,6 +538,10 @@ export default function StepConfigDrawer({
 
   const actionName = step.action || step.step_type || step.type || '';
   const stepType = step.step_type || step.type || 'tool';
+  const showUserFactsPolicy =
+    stepType === 'llm_task' || stepType === 'llm_agent' || stepType === 'deep_agent' || stepType === 'tool';
+  const showPersonaPolicy =
+    stepType === 'llm_task' || stepType === 'llm_agent' || stepType === 'deep_agent';
 
   const promptPlaceholders = useMemo(
     () => ((stepType === 'llm_task' || stepType === 'llm_agent') ? extractPromptPlaceholders(step?.prompt_template || step?.prompt || '') : []),
@@ -649,24 +630,302 @@ export default function StepConfigDrawer({
           </Alert>
         )}
         <Box sx={readOnly ? { pointerEvents: 'none', opacity: 0.9 } : {}}>
-        <FormControl fullWidth sx={{ mb: 2 }} disabled={readOnly}>
-          <InputLabel>Step type</InputLabel>
-          <Select
-            value={stepType}
-            label="Step type"
-            onChange={(e) => setStep((s) => ({ ...s, step_type: e.target.value }))}
-          >
-            <MenuItem value="tool">Tool</MenuItem>
-            <MenuItem value="llm_task">LLM task</MenuItem>
-            <MenuItem value="llm_agent">LLM Agent</MenuItem>
-            <MenuItem value="deep_agent">Deep Agent</MenuItem>
-            <MenuItem value="approval">Approval</MenuItem>
-            <MenuItem value="browser_authenticate">Browser Auth</MenuItem>
-            <MenuItem value="loop">Loop</MenuItem>
-            <MenuItem value="parallel">Parallel</MenuItem>
-            <MenuItem value="branch">Branch</MenuItem>
-          </Select>
-        </FormControl>
+        <Grid container spacing={2} sx={{ mb: 2 }}>
+          <Grid item xs={6} sx={{ minWidth: 0 }}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Name"
+              value={step.name ?? ''}
+              onChange={(e) => setStep((s) => ({ ...s, name: e.target.value }))}
+              placeholder={step.output_key ? String(step.output_key) : 'Step label'}
+              helperText="Shown on the workflow. Leave empty to use output key on save."
+              disabled={readOnly}
+            />
+          </Grid>
+          <Grid item xs={6} sx={{ minWidth: 0 }}>
+            <FormControl fullWidth size="small" disabled={readOnly}>
+              <InputLabel>Step type</InputLabel>
+              <Select
+                value={stepType}
+                label="Step type"
+                onChange={(e) => setStep((s) => ({ ...s, step_type: e.target.value }))}
+                MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
+              >
+                <MenuItem value="tool">Tool</MenuItem>
+                <MenuItem value="llm_task">LLM task</MenuItem>
+                <MenuItem value="llm_agent">LLM Agent</MenuItem>
+                <MenuItem value="deep_agent">Deep Agent</MenuItem>
+                <MenuItem value="approval">Approval</MenuItem>
+                <MenuItem value="browser_authenticate">Browser Auth</MenuItem>
+                <MenuItem value="loop">Loop</MenuItem>
+                <MenuItem value="parallel">Parallel</MenuItem>
+                <MenuItem value="branch">Branch</MenuItem>
+              </Select>
+            </FormControl>
+          </Grid>
+          <Grid item xs={6} sx={{ minWidth: 0 }}>
+            <TextField
+              fullWidth
+              size="small"
+              label="Output key"
+              value={step.output_key || ''}
+              onChange={(e) => setStep((s) => ({ ...s, output_key: e.target.value }))}
+              placeholder="e.g. step_1"
+              helperText="State key; wiring uses this first in {key.field}."
+              disabled={readOnly}
+            />
+          </Grid>
+          <Grid item xs={6} sx={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
+            {showUserFactsPolicy ? (
+              <>
+                <FormControl fullWidth size="small" disabled={readOnly}>
+                  <InputLabel id="user-facts-policy-label">User facts policy</InputLabel>
+                  <Select
+                    labelId="user-facts-policy-label"
+                    id="step-user-facts-policy-select"
+                    label="User facts policy"
+                    value={step.user_facts_policy || 'inherit'}
+                    disabled={readOnly}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setStep((s) => {
+                        const next = { ...s };
+                        if (v === 'inherit') {
+                          delete next.user_facts_policy;
+                        } else {
+                          next.user_facts_policy = v;
+                        }
+                        return next;
+                      });
+                    }}
+                    MenuProps={{
+                      ...STEP_DRAWER_SELECT_MENU_PROPS,
+                      PaperProps: {
+                        ...STEP_DRAWER_SELECT_MENU_PROPS.PaperProps,
+                        style: { maxHeight: 320 },
+                      },
+                    }}
+                  >
+                    <MenuItem value="inherit">Inherit (profile defaults)</MenuItem>
+                    <MenuItem value="no_write">No write</MenuItem>
+                    <MenuItem value="isolated">Isolated</MenuItem>
+                  </Select>
+                </FormControl>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                  When the profile has user facts: step can only restrict.
+                </Typography>
+              </>
+            ) : null}
+            {showPersonaPolicy ? (
+              <>
+                <FormControl fullWidth size="small" disabled={readOnly} sx={{ mt: showUserFactsPolicy ? 2 : 0 }}>
+                  <InputLabel id="persona-policy-label">Persona policy</InputLabel>
+                  <Select
+                    labelId="persona-policy-label"
+                    id="step-persona-policy-select"
+                    label="Persona policy"
+                    value={step.persona_policy || 'inherit'}
+                    disabled={readOnly}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setStep((s) => {
+                        const next = { ...s };
+                        if (v === 'inherit') {
+                          delete next.persona_policy;
+                        } else {
+                          next.persona_policy = v;
+                        }
+                        return next;
+                      });
+                    }}
+                    MenuProps={{
+                      ...STEP_DRAWER_SELECT_MENU_PROPS,
+                      PaperProps: {
+                        ...STEP_DRAWER_SELECT_MENU_PROPS.PaperProps,
+                        style: { maxHeight: 320 },
+                      },
+                    }}
+                  >
+                    <MenuItem value="inherit">Inherit (profile persona)</MenuItem>
+                    <MenuItem value="off">Off (no persona)</MenuItem>
+                  </Select>
+                </FormControl>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                  Suppress persona name and style for this step.
+                </Typography>
+              </>
+            ) : null}
+            <>
+              <FormControl fullWidth size="small" disabled={readOnly} sx={{ mt: showPersonaPolicy || showUserFactsPolicy ? 2 : 0 }}>
+                <InputLabel id="history-policy-label">History policy</InputLabel>
+                <Select
+                  labelId="history-policy-label"
+                  id="step-history-policy-select"
+                  label="History policy"
+                  value={step.history_policy || 'inherit'}
+                  disabled={readOnly}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setStep((s) => {
+                      const next = { ...s };
+                      if (v === 'inherit') {
+                        delete next.history_policy;
+                      } else {
+                        next.history_policy = v;
+                      }
+                      return next;
+                    });
+                  }}
+                  MenuProps={{
+                    ...STEP_DRAWER_SELECT_MENU_PROPS,
+                    PaperProps: {
+                      ...STEP_DRAWER_SELECT_MENU_PROPS.PaperProps,
+                      style: { maxHeight: 320 },
+                    },
+                  }}
+                >
+                  <MenuItem value="inherit">Inherit (log normally)</MenuItem>
+                  <MenuItem value="silent">Silent (no journal entry)</MenuItem>
+                </Select>
+              </FormControl>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                Suppress this step from execution history. If all steps are silent, the entire run is hidden.
+              </Typography>
+            </>
+          </Grid>
+          <Grid item xs={6} sx={{ minWidth: 0 }}>
+            <Button
+              fullWidth
+              size="small"
+              onClick={() => setEditorOutputSectionOpen((o) => !o)}
+              endIcon={editorOutputSectionOpen ? <ExpandLess /> : <ExpandMore />}
+              sx={{ justifyContent: 'space-between', textTransform: 'none' }}
+            >
+              Editor heading level
+            </Button>
+            <Collapse in={editorOutputSectionOpen}>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1, mt: 1 }}>
+                Markdown heading depth for editor location variables. Empty = default (2).
+              </Typography>
+              <TextField
+                fullWidth
+                size="small"
+                type="number"
+                label="Heading level"
+                value={step.heading_level ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setStep((s) => ({
+                    ...s,
+                    heading_level: v === '' ? undefined : Math.max(1, Math.min(6, parseInt(v, 10) || 2)),
+                  }));
+                }}
+                placeholder="Default: 2"
+                inputProps={{ min: 1, max: 6, step: 1 }}
+              />
+            </Collapse>
+          </Grid>
+          <Grid item xs={6} sx={{ minWidth: 0 }}>
+            <Button
+              fullWidth
+              size="small"
+              onClick={() => setConditionSectionOpen((o) => !o)}
+              endIcon={conditionSectionOpen ? <ExpandLess /> : <ExpandMore />}
+              sx={{ justifyContent: 'space-between', textTransform: 'none' }}
+            >
+              Condition (optional)
+            </Button>
+            <Collapse in={conditionSectionOpen}>
+              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1, mt: 1 }}>
+                Run only when true. Use {'{step_key.field}'} for upstream values; AND / OR; matches regex.
+              </Typography>
+              <TextField
+                size="small"
+                fullWidth
+                label="Expression"
+                placeholder="{search.count} > 0"
+                value={step.condition || ''}
+                onChange={(e) => {
+                  const v = e.target.value || undefined;
+                  setStep((s) => ({
+                    ...s,
+                    condition: v,
+                    ...(v ? {} : { exclusive: undefined }),
+                  }));
+                }}
+                sx={{ mb: 1 }}
+              />
+              <FormControl size="small" fullWidth>
+                <InputLabel>Insert reference</InputLabel>
+                <Select
+                  value={insertRefValue}
+                  label="Insert reference"
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setInsertRefValue('');
+                    if (!v) return;
+                    setStep((s) => ({ ...s, condition: ((s.condition || '') + (s.condition ? ' ' : '') + v).trim() }));
+                  }}
+                  MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
+                >
+                  <MenuItem value="">—</MenuItem>
+                  <ListSubheader>Upstream step outputs</ListSubheader>
+                  {(() => {
+                    const grouped = getGroupedWireOptions('text', upstreamSteps, actionsByName, playbookInputs || []);
+                    return grouped.upstream.flatMap(({ options }) =>
+                      options.map((opt) => <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>)
+                    );
+                  })()}
+                  <ListSubheader>Playbook inputs</ListSubheader>
+                  {(() => {
+                    const grouped = getGroupedWireOptions('text', upstreamSteps, actionsByName, playbookInputs || []);
+                    return (grouped.playbookInputs || []).map((opt) => (
+                      <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
+                    ));
+                  })()}
+                  <ListSubheader>Runtime</ListSubheader>
+                  {(() => {
+                    const grouped = getGroupedWireOptions('text', upstreamSteps, actionsByName, playbookInputs || []);
+                    return (grouped.runtime || []).map((opt) => {
+                      const tip = opt.alwaysAvailable ? 'Always available' : opt.requiresOpenFile ? 'Requires open document' : opt.scheduleOnly ? 'Scheduled or webhook trigger only' : null;
+                      const Icon = opt.alwaysAvailable ? Lens : opt.requiresOpenFile ? RadioButtonUnchecked : opt.scheduleOnly ? Schedule : null;
+                      return (
+                        <MenuItem key={opt.value} value={opt.value}>
+                          {Icon && (
+                            <Tooltip title={tip}>
+                              <Icon sx={{ fontSize: 12, mr: 0.5, verticalAlign: 'middle' }} color="action" />
+                            </Tooltip>
+                          )}
+                          {opt.label}
+                        </MenuItem>
+                      );
+                    });
+                  })()}
+                </Select>
+              </FormControl>
+              {step.condition ? (
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={!!step.exclusive}
+                      onChange={(e) =>
+                        setStep((s) => ({
+                          ...s,
+                          exclusive: e.target.checked ? true : undefined,
+                        }))
+                      }
+                      size="small"
+                      disabled={readOnly}
+                    />
+                  }
+                  label="Exclusive (stop after match)"
+                  sx={{ mt: 1, alignItems: 'flex-start' }}
+                />
+              ) : null}
+            </Collapse>
+          </Grid>
+        </Grid>
 
         {stepType === 'tool' && (
           <Autocomplete
@@ -706,7 +965,7 @@ export default function StepConfigDrawer({
                 value={step?.params?.agent_handle ?? ''}
                 label="Agent to invoke"
                 onChange={(e) => handleParamChange('agent_handle', e.target.value || undefined)}
-                MenuProps={{ disableScrollLock: true }}
+                MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
               >
                 <MenuItem value="">—</MenuItem>
                 {(agentHandles || []).map((h) => (
@@ -801,142 +1060,6 @@ export default function StepConfigDrawer({
           </Box>
         )}
 
-        <TextField
-          fullWidth
-          label="Output key"
-          value={step.output_key || ''}
-          onChange={(e) => setStep((s) => ({ ...s, output_key: e.target.value }))}
-          placeholder="e.g. step_1"
-          sx={{ mb: 2 }}
-        />
-
-        <TextField
-          fullWidth
-          type="number"
-          label="Heading level (optional)"
-          value={step.heading_level ?? ''}
-          onChange={(e) => {
-            const v = e.target.value;
-            setStep((s) => ({
-              ...s,
-              heading_level: v === '' ? undefined : Math.max(1, Math.min(6, parseInt(v, 10) || 2)),
-            }));
-          }}
-          placeholder="Default: 2"
-          helperText="Section granularity for editor/ref location variables (# and ## by default). 1–6. First step that sets it applies to the whole run."
-          inputProps={{ min: 1, max: 6, step: 1 }}
-          sx={{ mb: 2 }}
-        />
-
-        <Box sx={{ mb: 2 }}>
-          <Button
-            fullWidth
-            size="small"
-            onClick={() => setConditionSectionOpen((o) => !o)}
-            endIcon={conditionSectionOpen ? <ExpandLess /> : <ExpandMore />}
-            sx={{ justifyContent: 'space-between', textTransform: 'none' }}
-          >
-            Condition (optional)
-          </Button>
-          <Collapse in={conditionSectionOpen}>
-            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-              Step runs only when this expression is true. Use {'{step_name.field}'} for upstream values. Combine with AND or OR for multiple conditions. Operators: &gt;, &lt;, ==, !=, &gt;=, &lt;=; &quot;is defined&quot;, &quot;is not defined&quot;; &quot;matches&quot; (regex, e.g. {'{query}'} matches &quot;edit|fix&quot;); AND, OR.
-            </Typography>
-            <Box sx={{ display: 'flex', gap: 1, mb: 1, flexWrap: 'wrap' }}>
-              <TextField
-                size="small"
-                fullWidth
-                label="Condition expression"
-                placeholder="{search.count} > 0"
-                value={step.condition || ''}
-                onChange={(e) => setStep((s) => ({ ...s, condition: e.target.value || undefined }))}
-                sx={{ minWidth: 200 }}
-              />
-              <FormControl size="small" sx={{ minWidth: 160 }}>
-                <InputLabel>Insert reference</InputLabel>
-                <Select
-                  value={insertRefValue}
-                  label="Insert reference"
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setInsertRefValue('');
-                    if (!v) return;
-                    setStep((s) => ({ ...s, condition: ((s.condition || '') + (s.condition ? ' ' : '') + v).trim() }));
-                  }}
-                  MenuProps={{ disableScrollLock: true }}
-                >
-                  <MenuItem value="">—</MenuItem>
-                  <ListSubheader>Upstream step outputs</ListSubheader>
-                  {(() => {
-                    const grouped = getGroupedWireOptions('text', upstreamSteps, actionsByName, playbookInputs || []);
-                    return grouped.upstream.flatMap(({ options }) =>
-                      options.map((opt) => <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>)
-                    );
-                  })()}
-                  <ListSubheader>Playbook inputs</ListSubheader>
-                  {(() => {
-                    const grouped = getGroupedWireOptions('text', upstreamSteps, actionsByName, playbookInputs || []);
-                    return (grouped.playbookInputs || []).map((opt) => (
-                      <MenuItem key={opt.value} value={opt.value}>{opt.label}</MenuItem>
-                    ));
-                  })()}
-                  <ListSubheader>Runtime</ListSubheader>
-                  {(() => {
-                    const grouped = getGroupedWireOptions('text', upstreamSteps, actionsByName, playbookInputs || []);
-                    return (grouped.runtime || []).map((opt) => {
-                      const tip = opt.alwaysAvailable ? 'Always available' : opt.requiresOpenFile ? 'Requires open document' : opt.scheduleOnly ? 'Scheduled or webhook trigger only' : null;
-                      const Icon = opt.alwaysAvailable ? Lens : opt.requiresOpenFile ? RadioButtonUnchecked : opt.scheduleOnly ? Schedule : null;
-                      return (
-                        <MenuItem key={opt.value} value={opt.value}>
-                          {Icon && (
-                            <Tooltip title={tip}>
-                              <Icon sx={{ fontSize: 12, mr: 0.5, verticalAlign: 'middle' }} color="action" />
-                            </Tooltip>
-                          )}
-                          {opt.label}
-                        </MenuItem>
-                      );
-                    });
-                  })()}
-                </Select>
-              </FormControl>
-            </Box>
-          </Collapse>
-        </Box>
-
-        {(stepType === 'llm_task' || stepType === 'llm_agent' || stepType === 'deep_agent' || stepType === 'tool') && (
-          <Box sx={{ mb: 2 }}>
-            <FormControl fullWidth size="small">
-              <InputLabel id="user-facts-policy-label">User facts policy</InputLabel>
-              <Select
-                labelId="user-facts-policy-label"
-                label="User facts policy"
-                value={step.user_facts_policy || 'inherit'}
-                disabled={readOnly}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setStep((s) => {
-                    const next = { ...s };
-                    if (v === 'inherit') {
-                      delete next.user_facts_policy;
-                    } else {
-                      next.user_facts_policy = v;
-                    }
-                    return next;
-                  });
-                }}
-              >
-                <MenuItem value="inherit">Inherit (use profile defaults)</MenuItem>
-                <MenuItem value="no_write">No write — facts in context; cannot save</MenuItem>
-                <MenuItem value="isolated">Isolated — omit facts from prompt; no fact tools</MenuItem>
-              </Select>
-            </FormControl>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-              Applies when the agent profile has user facts enabled. Step settings can only restrict, not expand.
-            </Typography>
-          </Box>
-        )}
-
         {stepType === 'llm_task' && (
           <>
             <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Prompt template</Typography>
@@ -954,40 +1077,18 @@ export default function StepConfigDrawer({
             />
             <LLMTaskModelOverride step={step} setStep={setStep} />
             <OutputSchemaEditor step={step} setStep={setStep} />
-            <StepSkillsPicker step={step} setStep={setStep} readOnly={readOnly} />
-            <Box sx={{ mb: 2 }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={step.auto_discover_skills !== false}
-                    disabled={readOnly}
-                    onChange={(e) => setStep((s) => ({ ...s, auto_discover_skills: e.target.checked }))}
-                  />
-                }
-                label="Auto-discover skills"
-              />
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                Automatically finds the most relevant skills based on the step&apos;s prompt.
-              </Typography>
-              {step.auto_discover_skills !== false && (
-                <TextField
-                  fullWidth
-                  type="number"
-                  label="Max auto-discovered skills"
-                  value={step.max_auto_skills ?? 3}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setStep((s) => ({
-                      ...s,
-                      max_auto_skills: v === '' ? 3 : Math.max(1, Math.min(10, Number(v) || 3)),
-                    }));
-                  }}
-                  inputProps={{ min: 1, max: 10, step: 1 }}
-                  size="small"
-                  sx={{ mt: 1 }}
-                />
-              )}
-            </Box>
+            <StepCapabilitiesPanel
+              variant="llm_task"
+              step={step}
+              setStep={setStep}
+              readOnly={readOnly}
+              capabilityChips={capabilityChips}
+              connectionsForSkills={connectionsForSkills}
+              profileAllowedConnections={profileAllowedConnections}
+              profileIncludeAgentMemory={!!editorProfile?.include_agent_memory}
+              actions={actions}
+              advancedFooter={null}
+            />
           </>
         )}
 
@@ -1006,188 +1107,83 @@ export default function StepConfigDrawer({
               actionsByName={actionsByName}
               placeholder="Use {step_name.field} for upstream values. Type { for variables."
             />
-            <Typography variant="subtitle2" sx={{ mt: 1.5, mb: 0.5 }}>Tool packs</Typography>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1.5 }}>
-              {(builtinToolPacks || []).map((pack) => {
-                const raw = Array.isArray(step.tool_packs) ? step.tool_packs : [];
-                const entries = raw.map((e) =>
-                  typeof e === 'object' && e?.pack
-                    ? { pack: e.pack, mode: e.mode === 'read' ? 'read' : 'full' }
-                    : { pack: String(e).trim(), mode: 'full' }
-                ).filter((e) => e.pack);
-                const entry = entries.find((e) => e.pack === pack.name);
-                const selected = !!entry;
-                const hasWriteTools = pack.has_write_tools === true;
-                return (
-                  <Box key={pack.name} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
-                    <Chip
-                      label={pack.name}
-                      size="small"
-                      onClick={() => {
-                        if (selected) {
-                          setStep((s) => ({
-                            ...s,
-                            tool_packs: (s.tool_packs || []).filter((e) => (typeof e === 'object' && e?.pack ? e.pack : String(e)) !== pack.name),
-                          }));
-                        } else {
-                          setStep((s) => {
-                            const list = (Array.isArray(s.tool_packs) ? s.tool_packs : []).map((e) =>
-                              typeof e === 'object' && e?.pack ? e : { pack: String(e), mode: 'full' }
-                            );
-                            return { ...s, tool_packs: [...list, { pack: pack.name, mode: 'full' }] };
-                          });
-                        }
-                      }}
-                      color={selected ? 'primary' : 'default'}
-                      variant={selected ? 'filled' : 'outlined'}
-                      sx={{ cursor: 'pointer' }}
-                    />
-                    {selected && hasWriteTools && (
-                      <ToggleButtonGroup
-                        value={entry?.mode || 'full'}
-                        exclusive
-                        size="small"
-                        onChange={(_, v) => {
-                          if (v == null) return;
-                          setStep((s) => {
-                            const list = (Array.isArray(s.tool_packs) ? s.tool_packs : []).map((e) =>
-                              typeof e === 'object' && e?.pack ? e : { pack: String(e), mode: 'full' }
-                            );
-                            const idx = list.findIndex((e) => e.pack === pack.name);
-                            const next = list.slice();
-                            if (idx >= 0) next[idx] = { ...next[idx], mode: v };
-                            else next.push({ pack: pack.name, mode: v });
-                            return { ...s, tool_packs: next };
-                          });
-                        }}
-                        sx={{ ml: 0.25, '& .MuiToggleButton-root': { py: 0, px: 0.75, fontSize: '0.7rem' } }}
-                      >
-                        <ToggleButton value="read" aria-label="Read only">Read</ToggleButton>
-                        <ToggleButton value="full" aria-label="Full access">Full</ToggleButton>
-                      </ToggleButtonGroup>
-                    )}
-                  </Box>
-                );
-              })}
-            </Box>
-            <ExternalPackConfigurator
-              externalPacks={externalToolPacks}
-              stepToolPacks={step.tool_packs}
-              onCommit={commitExternalToolPacks}
+            <SubagentsBlock
+              variant="llm_agent"
+              resetKey={drawerStepResetKey}
+              step={step}
+              setStep={setStep}
+              profiles={profiles}
+              playbooks={playbooks}
+              readOnly={readOnly}
+              onOpenAddDialog={() => {
+                setSubagentProfileId('');
+                setAddSubagentDialogOpen(true);
+              }}
+            />
+            <BestOfNBlock
+              variant="llm_agent"
+              resetKey={drawerStepResetKey}
+              step={step}
+              setStep={setStep}
               readOnly={readOnly}
             />
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Invoke agents (as tools)</Typography>
-            <Box sx={{ mb: 2 }}>
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1 }}>
-                {(Array.isArray(step.available_tools) ? step.available_tools : [])
-                  .filter((t) => typeof t === 'string' && t.startsWith('agent:'))
-                  .map((agentKey) => {
-                    const parts = agentKey.split(':');
-                    const profileId = parts[1] || '';
-                    const playbookId = parts[2] || '';
-                    const profile = profiles.find((p) => p.id === profileId);
-                    const playbook = playbookId ? playbooks.find((p) => p.id === playbookId) : null;
-                    const label = playbookId
-                      ? `${profile?.name || profileId} (${playbook?.name || playbookId})`
-                      : `${profile?.name || profileId} (default playbook)`;
-                    return (
-                      <Chip
-                        key={agentKey}
-                        label={label}
-                        size="small"
-                        onDelete={() => {
-                          const current = Array.isArray(step.available_tools) ? step.available_tools : [];
-                          setStep((s) => ({
-                            ...s,
-                            available_tools: current.filter((t) => t !== agentKey),
-                          }));
-                        }}
-                        sx={{ mb: 0.5 }}
-                      />
-                    );
-                  })}
-              </Box>
-              <Button
-                size="small"
-                startIcon={<Add />}
-                onClick={() => {
-                  setSelectedProfileIdForAgent('');
-                  setSelectedPlaybookIdForAgent('');
-                  setAddAgentDialogOpen(true);
-                }}
-              >
-                Add agent
-              </Button>
-            </Box>
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Available tools</Typography>
-            {retainedToolNames.length > 0 && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                Also selected (not in current list): {retainedToolNames.join(', ')}
-              </Typography>
-            )}
-            {toolsCoveredBySelectedPacks.length > 0 && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                Already in selected packs: {toolsCoveredBySelectedPacks.join(', ')}
-              </Typography>
-            )}
-            <Box sx={{ mb: 2 }}>
-              <CollapsibleToolPicker
-                actions={(actions || []).filter((a) => {
-                  const name = typeof a === 'string' ? a : a?.name;
-                  return name && !String(name).startsWith('agent:');
-                })}
-                selectedTools={(Array.isArray(step.available_tools) ? step.available_tools : []).filter(
-                  (t) => typeof t !== 'string' || !t.startsWith('agent:')
-                )}
-                onToggleTool={(next) => {
-                  const agentTools = (Array.isArray(step.available_tools) ? step.available_tools : []).filter(
-                    (t) => typeof t === 'string' && t.startsWith('agent:')
-                  );
-                  const merged = [...next, ...agentTools];
-                  const seen = new Set();
-                  const deduped = merged.filter((t) => {
-                    if (seen.has(t)) return false;
-                    seen.add(t);
-                    return true;
-                  });
-                  setStep((s) => ({ ...s, available_tools: deduped }));
-                }}
-              />
-            </Box>
-            <StepSkillsPicker step={step} setStep={setStep} readOnly={readOnly} />
-            <Box sx={{ mb: 2 }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={step.auto_discover_skills !== false}
-                    disabled={readOnly}
-                    onChange={(e) => setStep((s) => ({ ...s, auto_discover_skills: e.target.checked }))}
-                  />
-                }
-                label="Auto-discover skills"
-              />
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-                Automatically finds the most relevant skills based on the step&apos;s prompt.
-              </Typography>
-              {step.auto_discover_skills !== false && (
-                <TextField
-                  fullWidth
-                  type="number"
-                  label="Max auto-discovered skills"
-                  value={step.max_auto_skills ?? 3}
-                  onChange={(e) => {
-                    const v = e.target.value;
-                    setStep((s) => ({
-                      ...s,
-                      max_auto_skills: v === '' ? 3 : Math.max(1, Math.min(10, Number(v) || 3)),
-                    }));
-                  }}
-                  inputProps={{ min: 1, max: 10, step: 1 }}
-                  size="small"
-                  sx={{ mt: 1 }}
-                />
-              )}
-            </Box>
+            <FanOutBlock
+              resetKey={drawerStepResetKey}
+              step={step}
+              setStep={setStep}
+              readOnly={readOnly}
+            />
+            <StepCapabilitiesPanel
+              variant="llm_agent"
+              step={step}
+              setStep={setStep}
+              readOnly={readOnly}
+              capabilityChips={capabilityChips}
+              connectionsForSkills={connectionsForSkills}
+              profileAllowedConnections={profileAllowedConnections}
+              actions={actions}
+              advancedFooter={
+                legacyAgentToolKeys.length > 0 ? (
+                  <Alert severity="info" sx={{ mt: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      This step still has obsolete <strong>agent:…</strong> tool entries (replaced by Subagents). Add the same agent profiles under Subagents above, then remove each chip below.
+                    </Typography>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                      {legacyAgentToolKeys.map((agentKey) => {
+                        const parts = agentKey.split(':');
+                        const profileId = parts[1] || '';
+                        const playbookId = parts[2] || '';
+                        const profile = profiles.find((p) => p.id === profileId);
+                        const playbook = playbookId ? playbooks.find((p) => p.id === playbookId) : null;
+                        const base = profile?.name || profileId || 'Profile';
+                        const label = playbookId
+                          ? `${base} (legacy playbook: ${playbook?.name || playbookId})`
+                          : base;
+                        return (
+                          <Chip
+                            key={agentKey}
+                            label={label}
+                            size="small"
+                            onDelete={
+                              readOnly
+                                ? undefined
+                                : () => {
+                                    const current = Array.isArray(step.available_tools) ? step.available_tools : [];
+                                    setStep((s) => ({
+                                      ...s,
+                                      available_tools: current.filter((t) => t !== agentKey),
+                                    }));
+                                  }
+                            }
+                            sx={{ mb: 0.5 }}
+                          />
+                        );
+                      })}
+                    </Box>
+                  </Alert>
+                ) : null
+              }
+            />
             <TextField
               fullWidth
               type="number"
@@ -1195,177 +1191,57 @@ export default function StepConfigDrawer({
               value={step.max_iterations ?? 3}
               onChange={(e) => {
                 const v = e.target.value;
-                setStep((s) => ({ ...s, max_iterations: v === '' ? 3 : Math.max(1, Math.min(25, Number(v) || 3)) }));
+                setStep((s) => ({ ...s, max_iterations: v === '' ? 3 : Math.max(1, Math.min(50, Number(v) || 3)) }));
               }}
-              inputProps={{ min: 1, max: 25, step: 1 }}
+              inputProps={{ min: 1, max: 50, step: 1 }}
               sx={{ mb: 2 }}
             />
             <LLMTaskModelOverride step={step} setStep={setStep} />
             <OutputSchemaEditor step={step} setStep={setStep} />
-            <Dialog open={addAgentDialogOpen} onClose={() => setAddAgentDialogOpen(false)} maxWidth="sm" fullWidth>
-              <DialogTitle>Add agent as tool</DialogTitle>
-              <DialogContent>
-                <FormControl fullWidth sx={{ mt: 1, mb: 2 }}>
-                  <InputLabel>Agent</InputLabel>
-                  <Select
-                    value={selectedProfileIdForAgent}
-                    label="Agent"
-                    onChange={(e) => {
-                      setSelectedProfileIdForAgent(e.target.value || '');
-                      setSelectedPlaybookIdForAgent('');
-                    }}
-                  >
-                    <MenuItem value="">— Select —</MenuItem>
-                    {(profiles || []).map((p) => (
-                      <MenuItem key={p.id} value={p.id}>{p.name || p.handle || p.id}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                <FormControl fullWidth sx={{ mb: 1 }}>
-                  <InputLabel>Playbook</InputLabel>
-                  <Select
-                    value={selectedPlaybookIdForAgent}
-                    label="Playbook"
-                    onChange={(e) => setSelectedPlaybookIdForAgent(e.target.value || '')}
-                    disabled={!selectedProfileIdForAgent}
-                  >
-                    <MenuItem value="">Default (agent&apos;s default playbook)</MenuItem>
-                    {(playbooks || []).map((p) => (
-                      <MenuItem key={p.id} value={p.id}>{p.name || p.id}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </DialogContent>
-              <DialogActions>
-                <Button onClick={() => setAddAgentDialogOpen(false)}>Cancel</Button>
-                <Button
-                  variant="contained"
-                  onClick={() => {
-                    if (!selectedProfileIdForAgent) return;
-                    const agentKey = selectedPlaybookIdForAgent
-                      ? `agent:${selectedProfileIdForAgent}:${selectedPlaybookIdForAgent}`
-                      : `agent:${selectedProfileIdForAgent}`;
-                    const current = Array.isArray(step.available_tools) ? step.available_tools : [];
-                    if (current.includes(agentKey)) {
-                      setAddAgentDialogOpen(false);
-                      return;
-                    }
-                    setStep((s) => ({ ...s, available_tools: [...current, agentKey] }));
-                    setAddAgentDialogOpen(false);
-                  }}
-                  disabled={!selectedProfileIdForAgent}
-                >
-                  Add
-                </Button>
-              </DialogActions>
-            </Dialog>
           </>
         )}
 
         {stepType === 'deep_agent' && (
           <Box sx={{ mb: 2 }}>
-            <Typography variant="subtitle2" sx={{ mb: 0.5 }}>Tool packs</Typography>
-            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1.5 }}>
-              {(builtinToolPacks || []).map((pack) => {
-                const raw = Array.isArray(step.tool_packs) ? step.tool_packs : [];
-                const entries = raw.map((e) =>
-                  typeof e === 'object' && e?.pack
-                    ? { pack: e.pack, mode: e.mode === 'read' ? 'read' : 'full' }
-                    : { pack: String(e).trim(), mode: 'full' }
-                ).filter((e) => e.pack);
-                const entry = entries.find((e) => e.pack === pack.name);
-                const selected = !!entry;
-                const hasWriteTools = pack.has_write_tools === true;
-                return (
-                  <Box key={pack.name} sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.25 }}>
-                    <Chip
-                      label={pack.name}
-                      size="small"
-                      onClick={() => {
-                        if (selected) {
-                          setStep((s) => ({
-                            ...s,
-                            tool_packs: (s.tool_packs || []).filter((e) => (typeof e === 'object' && e?.pack ? e.pack : String(e)) !== pack.name),
-                          }));
-                        } else {
-                          setStep((s) => {
-                            const list = (Array.isArray(s.tool_packs) ? s.tool_packs : []).map((e) =>
-                              typeof e === 'object' && e?.pack ? e : { pack: String(e), mode: 'full' }
-                            );
-                            return { ...s, tool_packs: [...list, { pack: pack.name, mode: 'full' }] };
-                          });
-                        }
-                      }}
-                      color={selected ? 'primary' : 'default'}
-                      variant={selected ? 'filled' : 'outlined'}
-                      sx={{ cursor: 'pointer' }}
-                    />
-                    {selected && hasWriteTools && (
-                      <ToggleButtonGroup
-                        value={entry?.mode || 'full'}
-                        exclusive
-                        size="small"
-                        onChange={(_, v) => {
-                          if (v == null) return;
-                          setStep((s) => {
-                            const list = (Array.isArray(s.tool_packs) ? s.tool_packs : []).map((e) =>
-                              typeof e === 'object' && e?.pack ? e : { pack: String(e), mode: 'full' }
-                            );
-                            const idx = list.findIndex((e) => e.pack === pack.name);
-                            const next = list.slice();
-                            if (idx >= 0) next[idx] = { ...next[idx], mode: v };
-                            else next.push({ pack: pack.name, mode: v });
-                            return { ...s, tool_packs: next };
-                          });
-                        }}
-                        sx={{ ml: 0.25, '& .MuiToggleButton-root': { py: 0, px: 0.75, fontSize: '0.7rem' } }}
-                      >
-                        <ToggleButton value="read" aria-label="Read only">Read</ToggleButton>
-                        <ToggleButton value="full" aria-label="Full access">Full</ToggleButton>
-                      </ToggleButtonGroup>
-                    )}
-                  </Box>
-                );
-              })}
-            </Box>
-            <ExternalPackConfigurator
-              externalPacks={externalToolPacks}
-              stepToolPacks={step.tool_packs}
-              onCommit={commitExternalToolPacks}
+            <SubagentsBlock
+              variant="deep_agent"
+              resetKey={drawerStepResetKey}
+              step={step}
+              setStep={setStep}
+              profiles={profiles}
+              playbooks={playbooks}
+              readOnly={readOnly}
+              onOpenAddDialog={() => {
+                setSubagentProfileId('');
+                setAddSubagentDialogOpen(true);
+              }}
+            />
+            <BestOfNBlock
+              variant="deep_agent"
+              resetKey={drawerStepResetKey}
+              step={step}
+              setStep={setStep}
               readOnly={readOnly}
             />
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>Step-level tools (shared by all phases)</Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-              Tools selected here are available to Act and Search phases. Phases can optionally restrict to a subset.
-            </Typography>
-            {toolsCoveredBySelectedPacks.length > 0 && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                Already in selected packs: {toolsCoveredBySelectedPacks.join(', ')}
-              </Typography>
-            )}
-            <Box sx={{ mb: 2 }}>
-              <CollapsibleToolPicker
-                actions={(actions || []).filter((a) => {
-                  const name = typeof a === 'string' ? a : a?.name;
-                  return name && !String(name).startsWith('agent:');
-                })}
-                selectedTools={Array.isArray(step.available_tools) ? step.available_tools : []}
-                onToggleTool={(next) => setStep((s) => ({ ...s, available_tools: next }))}
-              />
-            </Box>
-            <StepSkillsPicker step={step} setStep={setStep} readOnly={readOnly} />
-            <Box sx={{ mb: 2 }}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={step.auto_discover_skills !== false}
-                    disabled={readOnly}
-                    onChange={(e) => setStep((s) => ({ ...s, auto_discover_skills: e.target.checked }))}
-                  />
-                }
-                label="Auto-discover skills"
-              />
-            </Box>
+            <FanOutBlock
+              resetKey={drawerStepResetKey}
+              step={step}
+              setStep={setStep}
+              readOnly={readOnly}
+            />
+            <StepCapabilitiesPanel
+              variant="deep_agent"
+              step={step}
+              setStep={setStep}
+              readOnly={readOnly}
+              capabilityChips={capabilityChips}
+              connectionsForSkills={connectionsForSkills}
+              profileAllowedConnections={profileAllowedConnections}
+              profileIncludeAgentMemory={!!editorProfile?.include_agent_memory}
+              actions={actions}
+              advancedToolsCaption="Step-level tools (shared by all phases). Tools here are available to Act and Search phases; phases can optionally restrict to a subset."
+              advancedFooter={null}
+            />
             <DeepAgentPhaseEditor
               step={step}
               setStep={setStep}
@@ -1394,6 +1270,7 @@ export default function StepConfigDrawer({
                 value={step.preview_from || ''}
                 label="Preview from"
                 onChange={(e) => setStep((s) => ({ ...s, preview_from: e.target.value || undefined }))}
+                MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
               >
                 <MenuItem value="">— None</MenuItem>
                 {upstreamSteps.map((s, i) => {
@@ -1434,6 +1311,7 @@ export default function StepConfigDrawer({
                 value={step.on_reject || 'stop'}
                 label="On reject"
                 onChange={(e) => setStep((s) => ({ ...s, on_reject: e.target.value }))}
+                MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
               >
                 <MenuItem value="stop">Stop (default)</MenuItem>
                 <MenuItem value="skip">Skip and continue</MenuItem>
@@ -1524,7 +1402,7 @@ export default function StepConfigDrawer({
               size="small"
               variant="outlined"
               startIcon={<Add />}
-              onClick={() => setStep((s) => ({ ...s, steps: [...(s.steps || []), { step_type: 'tool', name: '', action: '', output_key: '' }] }))}
+              onClick={() => setStep((s) => ({ ...s, steps: [...(s.steps || []), { _step_id: crypto.randomUUID(), step_type: 'tool', name: '', action: '', output_key: '' }] }))}
             >
               Add step to loop
             </Button>
@@ -1536,6 +1414,7 @@ export default function StepConfigDrawer({
             <Typography variant="subtitle2" sx={{ mb: 1 }}>Parallel sub-steps</Typography>
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
               All sub-steps run simultaneously. Each produces its own output. Configure a step by clicking it in the workflow.
+              Maximum {MAX_PARALLEL_SUBSTEPS} parallel sub-steps; higher counts increase load and cost.
             </Typography>
             <List dense disablePadding sx={{ mb: 1 }}>
               {(step.parallel_steps || []).map((child, cIdx) => (
@@ -1559,7 +1438,18 @@ export default function StepConfigDrawer({
               size="small"
               variant="outlined"
               startIcon={<Add />}
-              onClick={() => setStep((s) => ({ ...s, parallel_steps: [...(s.parallel_steps || []), { step_type: 'tool', name: '', action: '', output_key: '', inputs: {} }] }))}
+              disabled={readOnly || (step.parallel_steps || []).length >= MAX_PARALLEL_SUBSTEPS}
+              onClick={() => setStep((s) => {
+                const cur = s.parallel_steps || [];
+                if (cur.length >= MAX_PARALLEL_SUBSTEPS) return s;
+                return {
+                  ...s,
+                  parallel_steps: [
+                    ...cur,
+                    { _step_id: crypto.randomUUID(), step_type: 'tool', name: '', action: '', output_key: '', inputs: {} },
+                  ],
+                };
+              })}
             >
               Add to group
             </Button>
@@ -1603,7 +1493,7 @@ export default function StepConfigDrawer({
               size="small"
               variant="outlined"
               startIcon={<Add />}
-              onClick={() => setStep((s) => ({ ...s, then_steps: [...(s.then_steps || []), { step_type: 'tool', name: '', action: '', output_key: '', inputs: {} }] }))}
+              onClick={() => setStep((s) => ({ ...s, then_steps: [...(s.then_steps || []), { _step_id: crypto.randomUUID(), step_type: 'tool', name: '', action: '', output_key: '', inputs: {} }] }))}
               sx={{ mb: 2 }}
             >
               Add to THEN
@@ -1634,7 +1524,7 @@ export default function StepConfigDrawer({
               size="small"
               variant="outlined"
               startIcon={<Add />}
-              onClick={() => setStep((s) => ({ ...s, else_steps: [...(s.else_steps || []), { step_type: 'tool', name: '', action: '', output_key: '', inputs: {} }] }))}
+              onClick={() => setStep((s) => ({ ...s, else_steps: [...(s.else_steps || []), { _step_id: crypto.randomUUID(), step_type: 'tool', name: '', action: '', output_key: '', inputs: {} }] }))}
             >
               Add to ELSE
             </Button>
@@ -1642,16 +1532,26 @@ export default function StepConfigDrawer({
         )}
 
         <Divider sx={{ my: 2 }} />
-        <Typography variant="subtitle2" sx={{ mb: 1 }}>Inputs</Typography>
-        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-          {(stepType === 'llm_task' || stepType === 'llm_agent')
-            ? 'Wire "context" (and any {ref} in your prompt) to upstream step outputs below. Use {context} in the prompt to insert the wired content.'
-            : stepType === 'approval'
-              ? 'Wire from upstream steps (e.g. {step_1.formatted}) to use in the approval prompt, or add inputs manually.'
-              : inputFields.length > 0
-                ? 'Configure each input: wire from upstream steps (e.g. {step_1.formatted}) or enter a literal value.'
-                : 'Wire from upstream steps (e.g. {search.formatted}) or enter a literal value.'}
-        </Typography>
+        <Box sx={{ mb: 2 }}>
+          <Button
+            fullWidth
+            size="small"
+            onClick={() => setInputsSectionOpen((o) => !o)}
+            endIcon={inputsSectionOpen ? <ExpandLess /> : <ExpandMore />}
+            sx={{ justifyContent: 'space-between', textTransform: 'none', mb: inputsSectionOpen ? 1 : 0 }}
+          >
+            Inputs (wiring)
+          </Button>
+          <Collapse in={inputsSectionOpen}>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              {(stepType === 'llm_task' || stepType === 'llm_agent')
+                ? 'Wire "context" (and any {ref} in your prompt) to upstream step outputs below. Use {context} in the prompt to insert the wired content.'
+                : stepType === 'approval'
+                  ? 'Wire from upstream steps (e.g. {step_1.formatted}) to use in the approval prompt, or add inputs manually.'
+                  : inputFields.length > 0
+                    ? 'Configure each input: wire from upstream steps (e.g. {step_1.formatted}) or enter a literal value.'
+                    : 'Wire from upstream steps (e.g. {search.formatted}) or enter a literal value.'}
+            </Typography>
         {inputKeys.length > 0 && (
           <Box sx={{ mb: 2 }}>
             {inputKeys.map((key) => {
@@ -1715,7 +1615,7 @@ export default function StepConfigDrawer({
                         if (v === LITERAL) handleInputChange(key, '');
                         else handleInputChange(key, v);
                       }}
-                      MenuProps={{ disableScrollLock: true }}
+                      MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                     >
                       <MenuItem value={LITERAL}>Literal value</MenuItem>
                       <ListSubheader sx={{ fontWeight: 600 }}>Upstream step outputs</ListSubheader>
@@ -1821,6 +1721,8 @@ export default function StepConfigDrawer({
             Add
           </Button>
         </Box>
+          </Collapse>
+        </Box>
 
         {stepType === 'tool' && paramsSchema?.properties && Object.keys(paramsSchema.properties).length > 0 && (
           <>
@@ -1852,7 +1754,7 @@ export default function StepConfigDrawer({
                           value={value || 'telegram'}
                           label="Channel"
                           onChange={(e) => handleParamChange(propName, e.target.value || 'telegram')}
-                          MenuProps={{ disableScrollLock: true }}
+                          MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                         >
                           <MenuItem value="in_app">In-app conversation</MenuItem>
                           <MenuItem value="telegram">Telegram</MenuItem>
@@ -1886,7 +1788,7 @@ export default function StepConfigDrawer({
                         value={value || ''}
                         label="Connection"
                         onChange={(e) => handleParamChange(propName, e.target.value || '')}
-                        MenuProps={{ disableScrollLock: true }}
+                        MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                       >
                         <MenuItem value="">Default (first for channel)</MenuItem>
                         {chatBotConnections.map((c) => (
@@ -1921,7 +1823,7 @@ export default function StepConfigDrawer({
                           value={selectValue}
                           label="Recipient"
                           onChange={(e) => handleParamChange(propName, e.target.value === '__default__' ? '' : e.target.value)}
-                          MenuProps={{ disableScrollLock: true }}
+                          MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                         >
                           <MenuItem value="__default__">Last chat (default)</MenuItem>
                           {knownChats.map((chat) => (
@@ -1968,7 +1870,7 @@ export default function StepConfigDrawer({
                         value={value || 'system'}
                         label="From"
                         onChange={(e) => handleParamChange(propName, e.target.value || 'system')}
-                        MenuProps={{ disableScrollLock: true }}
+                        MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                       >
                         <MenuItem value="system">System (SMTP)</MenuItem>
                         <MenuItem value="user">My email account</MenuItem>
@@ -2041,6 +1943,66 @@ export default function StepConfigDrawer({
             </Box>
           </>
         )}
+
+        <Dialog
+          open={addSubagentDialogOpen}
+          onClose={() => setAddSubagentDialogOpen(false)}
+          maxWidth="sm"
+          fullWidth
+          sx={{ zIndex: DIALOG_Z_INDEX_ABOVE_STEP_DRAWER }}
+        >
+          <DialogTitle>Add subagent</DialogTitle>
+          <DialogContent>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1, mb: 2 }}>
+              Choose an <strong>agent profile</strong>. Delegation runs that profile with its <strong>default playbook</strong> — the same as when you use the profile outside this step.
+            </Typography>
+            <FormControl fullWidth sx={{ mb: 1 }}>
+              <InputLabel>Agent profile</InputLabel>
+              <Select
+                value={subagentProfileId}
+                label="Agent profile"
+                onChange={(e) => setSubagentProfileId(e.target.value || '')}
+                MenuProps={STEP_DIALOG_SELECT_MENU_PROPS}
+              >
+                <MenuItem value="">— Select profile —</MenuItem>
+                {(profiles || []).map((p) => (
+                  <MenuItem key={p.id} value={p.id}>{p.name || p.handle || p.id}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setAddSubagentDialogOpen(false)}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={() => {
+                if (!subagentProfileId) return;
+                const profile = (profiles || []).find((p) => p.id === subagentProfileId);
+                const roleDefault = (profile?.description && String(profile.description).trim().slice(0, 500))
+                  || `Specialist: ${profile?.name || 'subagent'}`;
+                const entry = {
+                  agent_profile_id: subagentProfileId,
+                  role: roleDefault,
+                  accepts: '',
+                  returns: '',
+                };
+                setStep((s) => {
+                  const list = [...(Array.isArray(s.subagents) ? s.subagents : [])];
+                  const dup = list.some((x) => (x.agent_profile_id || '') === subagentProfileId);
+                  if (dup) {
+                    setAddSubagentDialogOpen(false);
+                    return s;
+                  }
+                  return { ...s, subagents: [...list, entry] };
+                });
+                setAddSubagentDialogOpen(false);
+              }}
+              disabled={!subagentProfileId}
+            >
+              Add
+            </Button>
+          </DialogActions>
+        </Dialog>
 
         </Box>
         <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end', mt: 2 }}>

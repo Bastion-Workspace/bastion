@@ -1,5 +1,5 @@
 """
-Podcast Models - Roosevelt's Plain-Text ElevenLabs Script Structures
+Pydantic models for plain-text podcast / ElevenLabs scripts
 
 Structured request/response for the podcast script agent producing
 plain text with inline bracket cues (e.g., [stress], [flatly], [pause:1.0s]).

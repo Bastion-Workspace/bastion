@@ -1,0 +1,7 @@
+# Vector-service: use Elasticsearch/OpenSearch client backend (merge with --profile elasticsearch).
+# See docker/README.md
+services:
+  vector-service:
+    environment:
+      VECTOR_DB_BACKEND: elasticsearch
+      ES_URL: http://elasticsearch:9200

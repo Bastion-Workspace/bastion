@@ -14,6 +14,8 @@ import {
   Select,
   Stack,
   TextField,
+  ToggleButton,
+  ToggleButtonGroup,
   Typography,
 } from '@mui/material';
 import { Add, Edit, MoreVert, Save } from '@mui/icons-material';
@@ -41,6 +43,9 @@ export default function HomeDashboardChrome({
   onCloseAddMenu,
   onPickWidgetType,
   widgetTypeOptions,
+  layoutMode,
+  onLayoutModeChange,
+  showLayoutModeToggle,
 }) {
   const [dashMenuAnchor, setDashMenuAnchor] = useState(null);
 
@@ -131,6 +136,18 @@ export default function HomeDashboardChrome({
         </Button>
       ) : (
         <>
+          {showLayoutModeToggle ? (
+            <ToggleButtonGroup
+              size="small"
+              exclusive
+              value={layoutMode === 'grid' ? 'grid' : 'stack'}
+              onChange={onLayoutModeChange}
+              aria-label="Layout mode"
+            >
+              <ToggleButton value="stack">Stack</ToggleButton>
+              <ToggleButton value="grid">Grid</ToggleButton>
+            </ToggleButtonGroup>
+          ) : null}
           <Button variant="outlined" startIcon={<Add />} onClick={onAddWidgetClick}>
             Add widget
           </Button>

@@ -14,7 +14,7 @@ from pathlib import Path
 import pickle
 
 from openai import AsyncOpenAI
-from qdrant_client.models import PointStruct
+from models.vector_point import VectorPoint
 
 from config import settings
 from models.api_models import Chunk
@@ -332,7 +332,7 @@ class ResilientEmbeddingManager:
             content_hash = abs(hash(chunk.content))
             
             # Create point
-            point = PointStruct(
+            point = VectorPoint(
                 id=content_hash,
                 vector=embedding,
                 payload={

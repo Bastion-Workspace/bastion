@@ -1,8 +1,5 @@
 """
-Roosevelt's Messaging API
-REST and WebSocket endpoints for user-to-user messaging
-
-BULLY! Let the messages flow like a cavalry charge!
+Messaging API: REST and WebSocket endpoints for user-to-user messaging.
 """
 
 import logging
@@ -32,10 +29,19 @@ class CreateRoomRequest(BaseModel):
     room_name: Optional[str] = Field(None, description="Optional room name")
 
 
+class MentionItem(BaseModel):
+    type: str = Field(..., description="'user' or 'agent'")
+    user_id: Optional[str] = Field(None, description="User ID for user mentions")
+    agent_profile_id: Optional[str] = Field(None, description="Agent profile ID for agent mentions")
+    display_name: Optional[str] = Field(None, description="Display name for rendering")
+
+
 class SendMessageRequest(BaseModel):
     content: str = Field(..., max_length=10000, description="Message content")
     message_type: str = Field(default="text", description="Message type: text, ai_share, system")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Optional metadata")
+    mentions: Optional[List[MentionItem]] = Field(None, description="@-mentions in this message")
+    reply_to_message_id: Optional[str] = Field(None, description="Message ID being replied to")
 
 
 class UpdateRoomNameRequest(BaseModel):
@@ -333,43 +339,75 @@ async def send_message(
         if not settings.MESSAGING_ENABLED:
             raise HTTPException(status_code=503, detail="Messaging is not enabled")
         
+        metadata = dict(request.metadata) if request.metadata else {}
+        if request.mentions:
+            metadata["mentions"] = [m.dict(exclude_none=True) for m in request.mentions]
+
         message = await messaging_service.send_message(
             room_id=room_id,
             sender_id=current_user.user_id,
             content=request.content,
             message_type=request.message_type,
-            metadata=request.metadata
+            metadata=metadata or None,
+            reply_to_message_id=request.reply_to_message_id,
         )
         
         if not message:
             raise HTTPException(status_code=403, detail="Not authorized to send messages to this room")
         
-        # Broadcast to room via WebSocket
         ws_manager = get_websocket_manager()
         await ws_manager.broadcast_to_room(
             room_id=room_id,
-            message={
-                "type": "new_message",
-                "message": message
-            },
-            exclude_user_id=current_user.user_id
+            message={"type": "new_message", "message": message},
+            exclude_user_id=current_user.user_id,
         )
+
+        # Send mention notifications via user-level WebSocket
+        if request.mentions:
+            for mention in request.mentions:
+                if mention.type == "user" and mention.user_id and mention.user_id != current_user.user_id:
+                    await ws_manager.broadcast_to_users([mention.user_id], {
+                        "type": "mention_notification",
+                        "room_id": room_id,
+                        "message_id": message.get("message_id") if isinstance(message, dict) else None,
+                        "mentioned_by": current_user.user_id,
+                        "mentioned_by_name": current_user.display_name or current_user.username,
+                        "content_preview": (request.content or "")[:100],
+                    })
         
-        # Agent conversation watches (chat rooms): skip if this message was posted by an agent to avoid re-triggering
-        from_agent = (request.metadata or {}).get("from_agent_profile_id") if request.metadata else None
+        from_agent = metadata.get("from_agent_profile_id")
         if not from_agent:
             try:
                 from services.database_manager.database_helpers import fetch_all
                 from services.celery_tasks.agent_tasks import dispatch_conversation_reaction
+                content = request.content or (message.get("content") if isinstance(message, dict) else "") or ""
+
+                mentioned_agent_ids = set()
+                if request.mentions:
+                    for mention in request.mentions:
+                        if mention.type == "agent" and mention.agent_profile_id:
+                            mentioned_agent_ids.add(mention.agent_profile_id)
+                            dispatch_conversation_reaction.delay(
+                                agent_profile_id=mention.agent_profile_id,
+                                user_id=current_user.user_id,
+                                message_content=content,
+                                message_sender=current_user.user_id,
+                                watch_type="chat_room",
+                                conversation_id=None,
+                                room_id=room_id,
+                            )
+
                 watches = await fetch_all(
                     "SELECT agent_profile_id FROM agent_conversation_watches "
                     "WHERE room_id = $1::uuid AND watch_type = 'chat_room' AND is_active = true",
                     room_id,
                 )
-                content = request.content or (message.get("content") if isinstance(message, dict) else "") or ""
                 for w in watches:
+                    apid = str(w["agent_profile_id"])
+                    if apid in mentioned_agent_ids:
+                        continue
                     dispatch_conversation_reaction.delay(
-                        agent_profile_id=str(w["agent_profile_id"]),
+                        agent_profile_id=apid,
                         user_id=current_user.user_id,
                         message_content=content,
                         message_sender=current_user.user_id,
@@ -385,7 +423,7 @@ async def send_message(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Failed to send message: {e}")
+        logger.error(f"Failed to send message: {e}")
         raise HTTPException(status_code=500, detail="Failed to send message")
 
 
@@ -418,6 +456,69 @@ async def delete_message(
         raise HTTPException(status_code=500, detail="Failed to delete message")
 
 
+class EditMessageRequest(BaseModel):
+    content: str = Field(..., max_length=10000, description="New message content")
+
+
+@router.put("/api/messaging/rooms/{room_id}/messages/{message_id}")
+async def edit_message(
+    room_id: str,
+    message_id: str,
+    request: EditMessageRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Edit a message (sender only)"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        updated = await messaging_service.edit_message(
+            message_id=message_id,
+            user_id=current_user.user_id,
+            new_content=request.content,
+        )
+        if not updated:
+            raise HTTPException(status_code=403, detail="Not authorized to edit this message")
+        
+        ws_manager = get_websocket_manager()
+        await ws_manager.broadcast_to_room(
+            room_id=room_id,
+            message={"type": "message_edited", "message": updated},
+        )
+        return updated
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to edit message: {e}")
+        raise HTTPException(status_code=500, detail="Failed to edit message")
+
+
+@router.get("/api/messaging/rooms/{room_id}/messages/search")
+async def search_room_messages(
+    room_id: str,
+    q: str = Query(..., min_length=1, max_length=200),
+    limit: int = Query(20, ge=1, le=100),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Search messages in a room"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        results = await messaging_service.search_messages(
+            room_id=room_id,
+            user_id=current_user.user_id,
+            query=q,
+            limit=limit,
+        )
+        return {"results": results, "total": len(results), "query": q}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to search messages: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search messages")
+
+
 # =====================
 # ATTACHMENT ENDPOINTS
 # =====================
@@ -443,6 +544,22 @@ async def upload_message_attachment(
             file=file,
             user_id=current_user.user_id
         )
+        if getattr(settings, "FEDERATION_ENABLED", False):
+            try:
+                wire = await messaging_service.get_message_federation_wire_id(message_id)
+                if wire:
+                    from services.federation_message_service import (
+                        federation_message_service,
+                    )
+
+                    await federation_message_service.deliver_outbound_attachment(
+                        room_id,
+                        attachment,
+                        wire,
+                        str(current_user.user_id),
+                    )
+            except Exception as fe:
+                logger.warning("Federated attachment outbound failed: %s", fe)
         
         return attachment
     
@@ -547,16 +664,38 @@ async def add_reaction(
         if not settings.MESSAGING_ENABLED:
             raise HTTPException(status_code=503, detail="Messaging is not enabled")
         
-        reaction_id = await messaging_service.add_reaction(
+        rec = await messaging_service.add_reaction(
             message_id=message_id,
             user_id=current_user.user_id,
             emoji=request.emoji
         )
         
-        if not reaction_id:
+        if not rec:
             raise HTTPException(status_code=500, detail="Failed to add reaction")
+        if getattr(settings, "FEDERATION_ENABLED", False):
+            try:
+                wire = await messaging_service.get_message_federation_wire_id(message_id)
+                if wire:
+                    from services.federation_message_service import (
+                        federation_message_service,
+                    )
+
+                    await federation_message_service.deliver_outbound_reaction(
+                        rec["room_id"],
+                        "add",
+                        wire,
+                        rec["emoji"],
+                        str(current_user.user_id),
+                        rec["reaction_id"],
+                    )
+            except Exception as fe:
+                logger.warning("Federated reaction outbound failed: %s", fe)
         
-        return {"success": True, "reaction_id": reaction_id, "emoji": request.emoji}
+        return {
+            "success": True,
+            "reaction_id": rec["reaction_id"],
+            "emoji": request.emoji,
+        }
     
     except HTTPException:
         raise
@@ -575,13 +714,33 @@ async def remove_reaction(
         if not settings.MESSAGING_ENABLED:
             raise HTTPException(status_code=503, detail="Messaging is not enabled")
         
-        success = await messaging_service.remove_reaction(
+        prev = await messaging_service.remove_reaction(
             reaction_id=reaction_id,
             user_id=current_user.user_id
         )
         
-        if not success:
+        if not prev:
             raise HTTPException(status_code=403, detail="Not authorized to remove this reaction")
+        if getattr(settings, "FEDERATION_ENABLED", False):
+            try:
+                wire = await messaging_service.get_message_federation_wire_id(
+                    prev["message_id"]
+                )
+                if wire:
+                    from services.federation_message_service import (
+                        federation_message_service,
+                    )
+
+                    await federation_message_service.deliver_outbound_reaction(
+                        prev["room_id"],
+                        "remove",
+                        wire,
+                        prev["emoji"],
+                        str(current_user.user_id),
+                        None,
+                    )
+            except Exception as fe:
+                logger.warning("Federated reaction remove outbound failed: %s", fe)
         
         return {"success": True, "reaction_id": reaction_id}
     
@@ -740,6 +899,54 @@ async def get_users_for_messaging(
         raise HTTPException(status_code=500, detail="Failed to get users")
 
 
+@router.get("/api/messaging/rooms/{room_id}/mentionables")
+async def get_mentionables(
+    room_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get users and agents that can be @-mentioned in a room"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+
+        participants = await messaging_service.get_room_participants(room_id)
+
+        from services.database_manager.database_helpers import fetch_all
+        agents = await fetch_all(
+            """SELECT ap.id, ap.name, ap.handle, ap.bot_user_id
+               FROM agent_profiles ap
+               WHERE ap.user_id = $1 AND ap.is_active = true
+               ORDER BY ap.name""",
+            current_user.user_id,
+        )
+        agent_list = [
+            {
+                "type": "agent",
+                "agent_profile_id": str(a["id"]),
+                "display_name": a["name"],
+                "handle": a["handle"],
+                "bot_user_id": a.get("bot_user_id"),
+            }
+            for a in agents
+        ]
+        user_list = [
+            {
+                "type": "user",
+                "user_id": p["user_id"],
+                "display_name": p.get("display_name") or p.get("username"),
+                "avatar_url": p.get("avatar_url"),
+            }
+            for p in participants
+            if p["user_id"] != current_user.user_id
+        ]
+        return {"mentionables": user_list + agent_list}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get mentionables: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get mentionables")
+
+
 # =====================
 # WEBSOCKET ENDPOINT
 # =====================
@@ -829,7 +1036,7 @@ async def websocket_room_endpoint(websocket: WebSocket, room_id: str):
         logger.error(f"❌ Room WebSocket error for room {room_id}: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
-        except:
+        except Exception:
             pass
 
 
@@ -926,6 +1133,6 @@ async def websocket_user_endpoint(websocket: WebSocket):
         logger.error(f"❌ User WebSocket error: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
-        except:
+        except Exception:
             pass
 

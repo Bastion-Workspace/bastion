@@ -1,14 +1,8 @@
 /**
- * PDF Document Viewer - Roosevelt's Cavalry Charge for PDF Display!
- * 
- * Features:
- * - Zoom controls (zoom in, out, fit width, fit page)
- * - Continuous scroll through all pages
- * - Download PDF
- * - Responsive layout
+ * PDF document viewer: zoom, continuous scroll, download, in-document find.
  */
 
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
@@ -30,27 +24,29 @@ import {
   ZoomOutMap,
   FitScreen,
   Download,
-  Description
+  Description,
+  Search as SearchIcon,
 } from '@mui/icons-material';
+import FindInDocumentBar from './FindInDocumentBar';
 
 // Configure PDF.js worker from CDN
 pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
-const PDFDocumentViewer = ({ documentId, filename }) => {
+const PDFDocumentViewer = ({ documentId, filename, onTextExtracted }) => {
   const [numPages, setNumPages] = useState(null);
   const [scale, setScale] = useState(1.0);
   const [loading, setLoading] = useState(false);  // Start false to let Document component render and load
   const [error, setError] = useState(null);
   const [containerWidth, setContainerWidth] = useState(null);
   const containerRef = useRef(null);
+  const pdfFindRootRef = useRef(null);
+  const pdfViewerRootRef = useRef(null);
+  const [findOpen, setFindOpen] = useState(false);
 
   const [pdfData, setPdfData] = React.useState(null);
 
   // Fetch PDF with authentication
   React.useEffect(() => {
-    console.log('PDFDocumentViewer mounted:', { documentId, filename });
-    console.log('PDF URL will be:', `/api/documents/${documentId}/pdf`);
-    
     const fetchPdfWithAuth = async () => {
       try {
         const token = localStorage.getItem('auth_token');
@@ -73,7 +69,6 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
         setPdfData(url);
-        console.log('PDF fetched successfully with auth');
       } catch (error) {
         console.error('Failed to fetch PDF with auth:', error);
         setError('Failed to load PDF document. Authentication may have failed.');
@@ -106,16 +101,46 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
     return () => window.removeEventListener('resize', updateWidth);
   }, []);
 
+  // Extract plain text for agent / {editor} read-only context (client-side pdf.js)
+  React.useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      if (!pdfData || !numPages || typeof onTextExtracted !== 'function') return;
+      try {
+        const loadingTask = pdfjs.getDocument(pdfData);
+        const pdf = await loadingTask.promise;
+        const parts = [];
+        for (let i = 1; i <= numPages; i++) {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const line = textContent.items
+            .map((item) => (item && typeof item.str === 'string' ? item.str : ''))
+            .join(' ');
+          parts.push(line);
+        }
+        const fullText = parts.filter(Boolean).join('\n\n');
+        if (!cancelled && fullText.trim()) {
+          onTextExtracted(fullText);
+        }
+      } catch (e) {
+        console.warn('PDF text extraction failed:', e);
+      }
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [pdfData, numPages, onTextExtracted]);
+
   // PDF document load success handler
   const onDocumentLoadSuccess = useCallback(({ numPages }) => {
     setNumPages(numPages);
     setLoading(false);
-    console.log(`📄 PDF loaded successfully - ${numPages} pages`);
   }, []);
 
   // PDF document load error handler
   const onDocumentLoadError = useCallback((error) => {
-    console.error('❌ Failed to load PDF:', error);
+    console.error('Failed to load PDF:', error);
     setError('Failed to load PDF document. The file may be corrupted or unavailable.');
     setLoading(false);
   }, []);
@@ -152,13 +177,31 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
     link.click();
   }, [documentId, filename]);
 
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const root = pdfViewerRootRef.current;
+      const t = e.target;
+      if (!root || !(t instanceof Node) || !root.contains(t)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, []);
+
   return (
     <Box
+      ref={pdfViewerRootRef}
+      tabIndex={-1}
       sx={{
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: '#f5f5f5'
+        backgroundColor: '#f5f5f5',
+        outline: 'none',
+        minHeight: 0,
       }}
     >
       {/* Toolbar */}
@@ -239,6 +282,17 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
 
           <Divider orientation="vertical" flexItem />
 
+          <Tooltip title="Find in document (Ctrl+F)">
+            <IconButton
+              onClick={() => setFindOpen((o) => !o)}
+              size="small"
+              color={findOpen ? 'primary' : 'default'}
+              aria-label="Find in document"
+            >
+              <SearchIcon />
+            </IconButton>
+          </Tooltip>
+
           {/* Download */}
           <Tooltip title="Download PDF">
             <IconButton onClick={handleDownload} size="small" color="primary">
@@ -247,6 +301,14 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
           </Tooltip>
         </Stack>
       </Paper>
+
+      {findOpen && (
+        <FindInDocumentBar
+          containerRef={pdfFindRootRef}
+          open={findOpen}
+          onClose={() => setFindOpen(false)}
+        />
+      )}
 
       {/* PDF Viewer */}
       <Box
@@ -292,6 +354,7 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
             }
           >
             <Box
+              ref={pdfFindRootRef}
               sx={{
                 display: 'flex',
                 flexDirection: 'column',

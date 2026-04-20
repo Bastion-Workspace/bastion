@@ -26,6 +26,27 @@ class OrgJournalService:
         self.upload_dir = Path(settings.UPLOAD_DIR)
         self._capture_lock = asyncio.Lock()
 
+    async def _jread_lines(self, user_id: str, file_path: Path) -> List[str]:
+        from services import ds_upload_library_fs as dsf
+
+        text = await dsf.read_text(user_id, file_path)
+        return text.splitlines(True)
+
+    async def _jwrite_lines(self, user_id: str, file_path: Path, lines: List[str]) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        await dsf.write_text(user_id, file_path, "".join(lines))
+
+    async def _jwrite_text(self, user_id: str, file_path: Path, text: str) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        await dsf.write_text(user_id, file_path, text)
+
+    async def _jappend_raw(self, user_id: str, file_path: Path, text: str) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        await dsf.append_text(user_id, file_path, text)
+
     async def capture_journal_entry(
         self,
         user_id: str,
@@ -86,15 +107,18 @@ class OrgJournalService:
                 # Serialize read-modify-write per process so sequential quick captures
                 # do not overwrite each other (second write would lose first entry).
                 await self._ensure_hierarchy_exists(
-                    file_path, entry_date, journal_prefs.organization_mode, journal_prefs
+                    user_id,
+                    file_path,
+                    entry_date,
+                    journal_prefs.organization_mode,
+                    journal_prefs,
                 )
 
                 entry_text = await self._append_journal_entry(
                     file_path, entry_date, request, journal_prefs, user_id
                 )
 
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    line_count = len(f.readlines())
+                line_count = len(await self._jread_lines(user_id, file_path))
 
             logger.info(f"JOURNAL CAPTURE: Added entry to {file_path.name}")
 
@@ -174,9 +198,6 @@ class OrgJournalService:
         else:
             journal_dir = user_base_dir
         
-        # Ensure journal directory exists
-        journal_dir.mkdir(parents=True, exist_ok=True)
-        
         # Determine filename based on organization mode
         if journal_prefs.organization_mode == JournalOrganizationMode.MONOLITHIC:
             filename = "journal.org"
@@ -193,6 +214,7 @@ class OrgJournalService:
     
     async def _ensure_hierarchy_exists(
         self,
+        user_id: str,
         file_path: Path,
         entry_date: date,
         organization_mode: JournalOrganizationMode,
@@ -204,24 +226,24 @@ class OrgJournalService:
         This reads the file, checks for existing headings, and inserts
         missing hierarchy levels in the correct chronological position.
         """
+        from services import ds_upload_library_fs as dsf
+
         # If file doesn't exist, create it with frontmatter
-        if not file_path.exists():
+        if not await dsf.exists(user_id, file_path):
             file_title = self._generate_file_title(organization_mode, entry_date)
-            
+
             # Get default tags from journal preferences for file frontmatter
             default_tags = journal_prefs.default_tags if journal_prefs.default_tags else ["journal"]
             filetags_str = ":" + ":".join(default_tags) + ":"
-            
+
             frontmatter = f"#+TITLE: {file_title}\n#+FILETAGS: {filetags_str}\n\n"
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(frontmatter)
+            await self._jwrite_text(user_id, file_path, frontmatter)
             logger.info(f"📝 Created new journal file: {file_path.name}")
-        
+
         # Read existing file content
-        file_lines = []
-        if file_path.exists():
-            with open(file_path, 'r', encoding='utf-8') as f:
-                file_lines = f.readlines()
+        file_lines: List[str] = []
+        if await dsf.exists(user_id, file_path):
+            file_lines = await self._jread_lines(user_id, file_path)
         
         existing_content = ''.join(file_lines)
         
@@ -455,8 +477,7 @@ class OrgJournalService:
         
         # Write the file back with inserted headings
         if missing_headings:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.writelines(file_lines)
+            await self._jwrite_lines(user_id, file_path, file_lines)
             hierarchy_list = [f"{'*' * level} {text}" for level, text in missing_headings]
             logger.info(f"📝 Created missing hierarchy: {hierarchy_list}")
     
@@ -615,7 +636,9 @@ class OrgJournalService:
             file_path = await self._determine_journal_file_path(
                 user_id, username, entry_date, journal_prefs
             )
-            if not file_path.exists():
+            from services import ds_upload_library_fs as dsf
+
+            if not await dsf.exists(user_id, file_path):
                 return {
                     "success": False,
                     "content": "",
@@ -626,8 +649,7 @@ class OrgJournalService:
                     "has_content": False,
                     "error": "Journal file does not exist",
                 }
-            with open(file_path, 'r', encoding='utf-8') as f:
-                file_lines = f.readlines()
+            file_lines = await self._jread_lines(user_id, file_path)
             bounds = self._get_date_section_bounds(file_lines, entry_date, journal_prefs)
             if not bounds:
                 return {
@@ -714,10 +736,13 @@ class OrgJournalService:
             )
             async with self._capture_lock:
                 await self._ensure_hierarchy_exists(
-                    file_path, entry_date, journal_prefs.organization_mode, journal_prefs
+                    user_id,
+                    file_path,
+                    entry_date,
+                    journal_prefs.organization_mode,
+                    journal_prefs,
                 )
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    file_lines = f.readlines()
+                file_lines = await self._jread_lines(user_id, file_path)
                 bounds = self._get_date_section_bounds(file_lines, entry_date, journal_prefs)
                 if not bounds:
                     return {"success": False, "date": entry_date.strftime("%Y-%m-%d"), "error": "Date heading not found"}
@@ -732,8 +757,7 @@ class OrgJournalService:
                     appended = content.rstrip()
                     combined = (existing + '\n\n' + appended).strip() + '\n' if (existing or appended) else ''
                     file_lines[content_start:content_end] = [combined]
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.writelines(file_lines)
+                await self._jwrite_lines(user_id, file_path, file_lines)
                 try:
                     await self._touch_document_updated_at(file_path, username, user_id)
                 except Exception as touch_err:
@@ -789,6 +813,8 @@ class OrgJournalService:
                 end_d = date.today()
             if start_d > end_d:
                 return {"success": False, "entries": [], "total": 0, "error": "start_date must be before end_date"}
+            from services import ds_upload_library_fs as dsf
+
             entries: List[Dict[str, Any]] = []
             seen_files: Dict[Path, List[str]] = {}
             current = start_d
@@ -796,12 +822,11 @@ class OrgJournalService:
                 file_path = await self._determine_journal_file_path(
                     user_id, username, current, journal_prefs
                 )
-                if not file_path.exists():
+                if not await dsf.exists(user_id, file_path):
                     current += timedelta(days=1)
                     continue
                 if file_path not in seen_files:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        seen_files[file_path] = f.readlines()
+                    seen_files[file_path] = await self._jread_lines(user_id, file_path)
                 file_lines = seen_files[file_path]
                 bounds = self._get_date_section_bounds(file_lines, current, journal_prefs)
                 if bounds:
@@ -851,6 +876,8 @@ class OrgJournalService:
             if start_d > end_d:
                 return {"success": False, "entries": [], "total": 0, "error": "start_date must be before end_date"}
             cap = max(1, min(max_entries, 500))
+            from services import ds_upload_library_fs as dsf
+
             entries: List[Dict[str, Any]] = []
             seen_files: Dict[Path, List[str]] = {}
             current = start_d
@@ -858,12 +885,11 @@ class OrgJournalService:
                 file_path = await self._determine_journal_file_path(
                     user_id, username, current, journal_prefs
                 )
-                if not file_path.exists():
+                if not await dsf.exists(user_id, file_path):
                     current += timedelta(days=1)
                     continue
                 if file_path not in seen_files:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        seen_files[file_path] = f.readlines()
+                    seen_files[file_path] = await self._jread_lines(user_id, file_path)
                 file_lines = seen_files[file_path]
                 bounds = self._get_date_section_bounds(file_lines, current, journal_prefs)
                 if bounds:
@@ -910,6 +936,8 @@ class OrgJournalService:
             if start_d > end_d:
                 return {"success": False, "results": [], "count": 0, "error": "start_date must be before end_date"}
             query_lower = query.lower()
+            from services import ds_upload_library_fs as dsf
+
             results: List[Dict[str, str]] = []
             seen_files: Dict[Path, List[str]] = {}
             current = start_d
@@ -917,12 +945,11 @@ class OrgJournalService:
                 file_path = await self._determine_journal_file_path(
                     user_id, username, current, journal_prefs
                 )
-                if not file_path.exists():
+                if not await dsf.exists(user_id, file_path):
                     current += timedelta(days=1)
                     continue
                 if file_path not in seen_files:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        seen_files[file_path] = f.readlines()
+                    seen_files[file_path] = await self._jread_lines(user_id, file_path)
                 file_lines = seen_files[file_path]
                 bounds = self._get_date_section_bounds(file_lines, current, journal_prefs)
                 if bounds:
@@ -975,11 +1002,10 @@ class OrgJournalService:
             body = expand_capture_placeholders(request.content.strip(), now)
             lines.append(body)
         entry_text = '\n'.join(lines)
-        
+
         # Read existing file content
-        with open(file_path, 'r', encoding='utf-8') as f:
-            file_lines = f.readlines()
-        
+        file_lines = await self._jread_lines(user_id, file_path)
+
         # Find the date header for this entry
         day_name = entry_date.strftime('%A')
         date_str = entry_date.strftime('%Y-%m-%d')
@@ -1012,11 +1038,11 @@ class OrgJournalService:
         # If date header not found, append to end (shouldn't happen if _ensure_hierarchy_exists worked)
         if date_header_line == -1:
             logger.warning(f"Date header '{target_header}' not found, appending to end of file")
-            with open(file_path, 'a', encoding='utf-8') as f:
-                if file_lines and not file_lines[-1].endswith('\n'):
-                    f.write('\n')
-                f.write(entry_text)
-                f.write('\n')
+            suffix = ""
+            if file_lines and not file_lines[-1].endswith("\n"):
+                suffix += "\n"
+            suffix += entry_text + "\n"
+            await self._jappend_raw(user_id, file_path, suffix)
             return entry_text
         
         # Find insertion point: right after the date header, before any entries for that date
@@ -1042,13 +1068,12 @@ class OrgJournalService:
         separator = '\n' if has_existing_content else ''
         entry_with_newlines = separator + entry_text + '\n'
         file_lines.insert(insertion_line, entry_with_newlines)
-        
+
         # Write the file back
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.writelines(file_lines)
-        
+        await self._jwrite_lines(user_id, file_path, file_lines)
+
         return entry_text
-    
+
     async def _validate_journal_location(
         self,
         user_id: str,
@@ -1069,15 +1094,14 @@ class OrgJournalService:
         
         # Build full path
         journal_path = user_base_dir / journal_location
-        
-        # Check if it exists and is a directory
-        if journal_path.exists():
-            if journal_path.is_dir():
-                return True, ""
-            else:
-                return False, f"Journal location exists but is not a directory: {journal_location}"
-        else:
-            return False, f"Journal location does not exist: {journal_location}. Please create the folder first."
+
+        from services import ds_upload_library_fs as dsf
+
+        if await dsf.is_dir(user_id, journal_path):
+            return True, ""
+        if await dsf.exists(user_id, journal_path):
+            return False, f"Journal location exists but is not a directory: {journal_location}"
+        return False, f"Journal location does not exist: {journal_location}. Please create the folder first."
     
     def _generate_file_title(
         self, organization_mode: JournalOrganizationMode, entry_date: date

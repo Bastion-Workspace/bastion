@@ -53,7 +53,7 @@ The **File Tree Sidebar** provides a hierarchical view of documents and folders 
 - **Web Content**: `.html`
 - **Archives**: `.zip`
 - **Email**: `.eml`
-- **Subtitles**: `.srt`
+- **Subtitles**: `.srt`, `.vtt` (WebVTT)
 
 #### Processing Pipeline
 

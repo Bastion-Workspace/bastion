@@ -24,7 +24,7 @@ async def quick_capture(
     """
     Quick capture to inbox.org (Emacs org-capture style)
     
-    **BULLY!** Capture anything, anywhere with a hotkey!
+    Capture content into the user's org inbox (hotkey-friendly).
     
     **How it works:**
     1. Press Ctrl+Shift+C from anywhere in the app
@@ -78,7 +78,7 @@ async def check_inbox_status(
     """
     Check inbox.org status for the current user
     
-    **BULLY!** Detect duplicate inbox files before they cause trouble!
+    Return whether duplicate inbox.org-style files exist for the user.
     
     **Returns:**
     - inbox_configured: bool - Whether inbox is configured in settings
@@ -105,12 +105,15 @@ async def check_inbox_status(
         
         upload_dir = Path(settings.UPLOAD_DIR)
         user_base_dir = upload_dir / "Users" / username
-        
-        # Search for ALL inbox.org files
+
+        from services import ds_upload_library_fs as dsf
+
+        # Search for ALL inbox.org files under the user's library (document-service)
         inbox_files = []
-        if user_base_dir.exists():
-            inbox_files = list(user_base_dir.rglob("inbox.org"))
-            inbox_files.sort()  # Consistent ordering
+        for p in await dsf.walk_org_files(current_user.user_id, username, include_archives=False):
+            if p.name.lower() == "inbox.org":
+                inbox_files.append(p)
+        inbox_files.sort(key=lambda x: str(x))
         
         # Build response
         response = {

@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel, Field
 
 from services.settings_service import settings_service
@@ -16,6 +16,8 @@ from models.api_models import (
     SettingsResponse, SettingUpdateRequest, BulkSettingsUpdateRequest, 
     SettingUpdateResponse, AuthenticatedUserResponse
 )
+from models.bbs_wallpaper_models import BbsWallpaperConfig
+from models.ui_wallpaper_models import UiWallpaperConfig
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +53,14 @@ class TimeFormatRequest(BaseModel):
 
 class PreferredNameRequest(BaseModel):
     preferred_name: str
+
+
+class BbsWallpaperPutRequest(BaseModel):
+    config: BbsWallpaperConfig
+
+
+class UiWallpaperPutRequest(BaseModel):
+    config: UiWallpaperConfig
 
 
 class AiContextRequest(BaseModel):
@@ -744,6 +754,110 @@ async def set_user_preferred_name(
     except Exception as e:
         logger.error(f"❌ Failed to set preferred name for user {current_user.username}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/bbs-wallpaper")
+async def get_user_bbs_wallpaper(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+    cols: Optional[int] = Query(
+        None, ge=20, le=512, description="Terminal width for built-in matrix rain frames"
+    ),
+    rows: Optional[int] = Query(
+        None, ge=6, le=120, description="Content height for built-in matrix rain frames"
+    ),
+):
+    """Get resolved BBS wallpaper text plus full library config for Settings."""
+    try:
+        bundle = await settings_service.get_user_bbs_wallpaper_bundle(
+            current_user.user_id,
+            animation_cols=cols,
+            animation_rows=rows,
+        )
+        return {
+            "success": True,
+            "wallpaper": bundle.get("wallpaper") or "",
+            "config": bundle.get("config") or {},
+            "cycling": bool(bundle.get("cycling")),
+            "animation": bundle.get("animation"),
+            "user_id": current_user.user_id,
+        }
+    except Exception as e:
+        logger.error("Failed to get BBS wallpaper for user %s: %s", current_user.username, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.put("/api/settings/user/bbs-wallpaper")
+async def set_user_bbs_wallpaper(
+    request: BbsWallpaperPutRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Replace user's BBS wallpaper library (full config)."""
+    try:
+        ok, err = await settings_service.set_user_bbs_wallpaper_config(
+            current_user.user_id, request.config
+        )
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "Invalid wallpaper config")
+        bundle = await settings_service.get_user_bbs_wallpaper_bundle(current_user.user_id)
+        return {
+            "success": True,
+            "message": "BBS wallpaper updated successfully",
+            "wallpaper": bundle.get("wallpaper") or "",
+            "config": bundle.get("config") or {},
+            "cycling": bool(bundle.get("cycling")),
+            "animation": bundle.get("animation"),
+            "user_id": current_user.user_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to set BBS wallpaper for user %s: %s", current_user.username, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/api/settings/user/ui-wallpaper")
+async def get_user_ui_wallpaper(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get web UI wallpaper config (built-in or document-backed)."""
+    try:
+        bundle = await settings_service.get_user_ui_wallpaper_bundle(current_user.user_id)
+        return {
+            "success": True,
+            "config": bundle.get("config") or {},
+            "allowed_builtin_keys": bundle.get("allowed_builtin_keys") or [],
+            "user_id": current_user.user_id,
+        }
+    except Exception as e:
+        logger.error("Failed to get UI wallpaper for user %s: %s", current_user.username, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.put("/api/settings/user/ui-wallpaper")
+async def set_user_ui_wallpaper(
+    request: UiWallpaperPutRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Replace user's web UI wallpaper config."""
+    try:
+        ok, err = await settings_service.set_user_ui_wallpaper_config(
+            current_user.user_id, request.config
+        )
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "Invalid wallpaper config")
+        bundle = await settings_service.get_user_ui_wallpaper_bundle(current_user.user_id)
+        return {
+            "success": True,
+            "message": "UI wallpaper updated successfully",
+            "config": bundle.get("config") or {},
+            "allowed_builtin_keys": bundle.get("allowed_builtin_keys") or [],
+            "user_id": current_user.user_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to set UI wallpaper for user %s: %s", current_user.username, e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/settings/user/phone-number")

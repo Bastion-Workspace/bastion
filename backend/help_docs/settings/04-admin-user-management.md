@@ -37,15 +37,15 @@ order: 4
 
 - Click **Edit** on a user row to open the edit dialog. You can change:
   - **Email**, **display name**, **role**. Username may be read-only or editable depending on the instance.
-  - **Capabilities** — A set of feature flags (e.g. `feature.games.view`, `feature.news.view`, `feature.maps.view`) that control whether the user sees **Games**, **News**, or **Map** in the navigation. Grant or revoke capabilities as needed. Other capabilities may exist for specific features; the list depends on deployment.
+  - **Capabilities** — A set of feature flags (e.g. `feature.games.view`, `feature.maps.view`) that control whether the user sees certain areas in the navigation. Grant or revoke capabilities as needed. Other capabilities may exist for specific features; the list depends on deployment.
 - Save. Changes apply immediately; the user may need to refresh or log in again to see nav or permission changes.
 
 ---
 
 ## Roles and capabilities
 
-- **Admin** — Full access: User Management, Database tab, capability grants, and all feature areas. Admins always see Games, News, Map, and other capability-gated items unless restricted by policy.
-- **User** — Standard access. Which features they see (Games, News, Map, etc.) is controlled by **capabilities**. By default a new user may have no extra capabilities; grant **feature.games.view**, **feature.news.view**, **feature.maps.view**, etc., to show those nav entries and pages.
+- **Admin** — Full access: User Management, Database tab, capability grants, and all feature areas.
+- **User** — Standard access. Which features they see is controlled by **capabilities**. By default a new user may have no extra capabilities; grant capabilities (e.g. `feature.games.view`, `feature.maps.view`) to show those nav entries and pages.
 - Capabilities are stored per user; editing a user lets you add or remove them.
 
 ---
@@ -65,7 +65,7 @@ order: 4
 ## Summary
 
 - **User Management** (Settings > User Management) is **admin-only**. Use it to **create**, **edit**, and **delete** users and to set **roles** and **capabilities**.
-- **Create user**: username, email, password, display name, role. **Edit user**: change email, display name, role, and **capabilities** (e.g. feature.games.view, feature.news.view, feature.maps.view).
+- **Create user**: username, email, password, display name, role. **Edit user**: change email, display name, role, and **capabilities** (e.g. `feature.games.view`, `feature.maps.view`).
 - **Change password** and **Delete** are available per user. Roles: **admin** (full access) and **user** (access controlled by capabilities).
 
 ---

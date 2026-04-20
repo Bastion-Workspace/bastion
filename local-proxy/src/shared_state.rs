@@ -42,6 +42,7 @@ pub struct AppState {
     pub want_connected: bool,
     pub recent_invocations: VecDeque<InvocationRecord>,
     pub command_tx: Option<mpsc::Sender<DaemonCommand>>,
+    pub active_workspace_root: Option<String>,
 }
 
 impl AppState {
@@ -53,6 +54,7 @@ impl AppState {
             want_connected: false,
             recent_invocations: VecDeque::new(),
             command_tx: None,
+            active_workspace_root: None,
         }
     }
 

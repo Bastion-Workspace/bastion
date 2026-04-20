@@ -21,6 +21,36 @@ from repositories.document_repository_extensions import DocumentRepositoryZipExt
 
 logger = logging.getLogger(__name__)
 
+# DB / legacy strings that are not exact DocumentType enum names
+_DOC_TYPE_ALIASES = {
+    "markdown": DocumentType.MD,
+    "text": DocumentType.TXT,
+}
+
+
+def _coerce_document_type(raw: Any) -> DocumentType:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return DocumentType.TXT
+    s = str(raw).strip().lower()
+    if s in _DOC_TYPE_ALIASES:
+        return _DOC_TYPE_ALIASES[s]
+    try:
+        return DocumentType(s)
+    except ValueError:
+        logger.warning("Unknown doc_type %r, coercing to md", raw)
+        return DocumentType.MD
+
+
+def _coerce_processing_status(raw: Any) -> ProcessingStatus:
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return ProcessingStatus.PENDING
+    s = str(raw).strip().lower()
+    try:
+        return ProcessingStatus(s)
+    except ValueError:
+        logger.warning("Unknown processing_status %r, coercing to pending", raw)
+        return ProcessingStatus.PENDING
+
 
 class DocumentRepository:
     """Repository for document metadata database operations"""
@@ -38,6 +68,8 @@ class DocumentRepository:
             # Use DatabaseManager for connection management
             from services.database_manager.database_manager_service import get_database_manager
             self._database_manager = await get_database_manager()
+            # Expose the underlying pool so service_container.db_pool (and auth_service) share it
+            self.pool = self._database_manager._pool
             
             logger.info("✅ Document Repository initialized with DatabaseManager")
             
@@ -168,7 +200,7 @@ class DocumentRepository:
             return False
 
     async def create_with_folder(self, doc_info: DocumentInfo, folder_id: str = None) -> bool:
-        """Create document and assign to folder in a single transaction - Roosevelt Architecture"""
+        """Create document and assign to folder in a single transaction."""
         try:
             from services.database_manager.database_helpers import execute
             
@@ -216,13 +248,17 @@ class DocumentRepository:
                 'user_role': rls_role
             }
             
+            team_id_val = getattr(doc_info, "team_id", None)
+            if team_id_val is not None and not isinstance(team_id_val, str):
+                team_id_val = str(team_id_val)
+
             await execute(
                 """
                 INSERT INTO document_metadata (
                     document_id, filename, title, doc_type, upload_date, file_size,
                     file_hash, processing_status, quality_score, page_count, chunk_count, entity_count,
-                    user_id, collection_type, folder_id, exempt_from_vectorization
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                    user_id, collection_type, team_id, folder_id, exempt_from_vectorization
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                 ON CONFLICT (document_id) DO NOTHING
                 """,
                 doc_info.document_id,
@@ -239,6 +275,7 @@ class DocumentRepository:
                 getattr(doc_info, 'entity_count', 0),
                 user_id,
                 getattr(doc_info, 'collection_type', 'user'),  # Default to 'user' if not specified
+                team_id_val,
                 folder_id,  # Include folder_id in the initial insert for atomic operation
                 exempt_from_vectorization,  # Include exemption status
                 rls_context=rls_context  # Pass RLS context to ensure proper permission check
@@ -266,10 +303,17 @@ class DocumentRepository:
             # This ensures RLS policies allow access to all documents
             logger.debug(f"🔍 Looking for document {document_id} with admin context")
             
-            row = await fetch_one("""
-                SELECT * FROM document_metadata WHERE document_id = $1
-            """, document_id, rls_context={'user_id': '', 'user_role': 'admin'})
-            
+            row = await fetch_one(
+                """
+                SELECT dm.*, COALESCE(dm.team_id, df.team_id) AS resolved_team_id
+                FROM document_metadata dm
+                LEFT JOIN document_folders df ON df.folder_id = dm.folder_id
+                WHERE dm.document_id = $1
+                """,
+                document_id,
+                rls_context={'user_id': '', 'user_role': 'admin'},
+            )
+
             if row:
                 logger.debug(f"🔍 Found document {document_id} - user_id: {row.get('user_id')}, collection_type: {row.get('collection_type')}")
                 return self._row_to_document_info(row)
@@ -279,6 +323,34 @@ class DocumentRepository:
             
         except Exception as e:
             logger.error(f"❌ Failed to get document {document_id}: {e}")
+            return None
+
+    async def get_document_metadata(self, document_id: str) -> Optional[Dict[str, Any]]:
+        """Lightweight row for WebSocket status (folder_id, filename) and parallel/zip processors. Admin RLS."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+
+            row = await fetch_one(
+                """
+                SELECT dm.document_id, dm.filename, dm.folder_id, dm.processing_status,
+                       dm.collection_type, dm.user_id,
+                       COALESCE(dm.team_id, df.team_id) AS team_id
+                FROM document_metadata dm
+                LEFT JOIN document_folders df ON df.folder_id = dm.folder_id
+                WHERE dm.document_id = $1
+                """,
+                document_id,
+                rls_context={"user_id": "", "user_role": "admin"},
+            )
+            if not row:
+                return None
+            out = dict(row)
+            tid = out.get("team_id")
+            if tid is not None and not isinstance(tid, str):
+                out["team_id"] = str(tid)
+            return out
+        except Exception as e:
+            logger.error("get_document_metadata failed for %s: %s", document_id, e)
             return None
     
     async def update(self, document_id: str, user_id: str = None, **updates) -> bool:
@@ -423,6 +495,7 @@ class DocumentRepository:
             
             rows = await fetch_all("""
                 SELECT * FROM document_metadata 
+                WHERE LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 ORDER BY upload_date DESC 
                 LIMIT $1 OFFSET $2
             """, limit, skip)
@@ -446,6 +519,7 @@ class DocumentRepository:
             rows = await fetch_all("""
                 SELECT * FROM document_metadata 
                 WHERE user_id = $1
+                  AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 ORDER BY upload_date DESC 
                 LIMIT $2 OFFSET $3
             """, user_id, limit, skip, rls_context=rls_context)
@@ -481,7 +555,8 @@ class DocumentRepository:
             
             rows = await fetch_all("""
                 SELECT * FROM document_metadata 
-                WHERE user_id IS NULL OR collection_type = 'global'
+                WHERE (user_id IS NULL OR collection_type = 'global')
+                  AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 ORDER BY upload_date DESC 
                 LIMIT $1 OFFSET $2
             """, limit, skip)
@@ -507,6 +582,9 @@ class DocumentRepository:
             where_clauses = []
             values = []
             param_count = 1
+
+            # Hide image metadata sidecars from admin filter/list UI
+            where_clauses.append("LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'")
 
             # Text search
             if filter_request.search_query:
@@ -1069,6 +1147,12 @@ class DocumentRepository:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse quality metrics: {e}")
         
+        raw_team = row.get("resolved_team_id")
+        if raw_team is None:
+            raw_team = row.get("team_id")
+        if raw_team is not None and not isinstance(raw_team, str):
+            raw_team = str(raw_team)
+
         return DocumentInfo(
             document_id=row["document_id"],
             filename=row["filename"],
@@ -1079,10 +1163,10 @@ class DocumentRepository:
             author=row["author"],
             language=row["language"],
             publication_date=row["publication_date"],
-            doc_type=DocumentType(row["doc_type"]),
+            doc_type=_coerce_document_type(row.get("doc_type")),
             file_size=row["file_size"],
             file_hash=row["file_hash"],
-            status=ProcessingStatus(row["processing_status"]),
+            status=_coerce_processing_status(row.get("processing_status")),
             upload_date=row["upload_date"],
             page_count=row.get("page_count", 0),
             chunk_count=row.get("chunk_count", 0),
@@ -1090,9 +1174,11 @@ class DocumentRepository:
             quality_metrics=quality_metrics,
             user_id=row.get("user_id", None),
             folder_id=row.get("folder_id", None),
+            team_id=raw_team,
             collection_type=row.get("collection_type", "user"),  # CRITICAL: Must include collection_type!
             exempt_from_vectorization=row.get("exempt_from_vectorization", None),
             has_pending_proposals=bool(row.get("has_pending_proposals", False)),
+            is_encrypted=bool(row.get("is_encrypted", False)),
         )
     
     async def execute_query(self, query: str, *params, rls_context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
@@ -1345,7 +1431,7 @@ class DocumentRepository:
         """
         Create a new folder or return existing one if already present
         
-        **ROOSEVELT'S UPSERT CAVALRY!** 🏇
+        
         Uses PostgreSQL ON CONFLICT to handle race conditions at database level
         
         Returns:
@@ -1398,7 +1484,7 @@ class DocumentRepository:
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to check parent folder exemption for {parent_id}: {e}")
             
-            # **ROOSEVELT'S NULL-SAFE UPSERT!**
+            # Null-safe UPSERT
             # PostgreSQL's ON CONFLICT with partial indexes requires different syntax
             # for root folders (NULL parent) vs. non-root folders
             
@@ -1864,7 +1950,9 @@ class DocumentRepository:
             """
             if folder_id is None:
                 count_row = await fetch_one("""
-                    SELECT COUNT(*) AS c FROM document_metadata WHERE folder_id IS NULL
+                    SELECT COUNT(*) AS c FROM document_metadata
+                    WHERE folder_id IS NULL
+                      AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 """, rls_context=rls_context)
                 if limit is not None:
                     rows = await fetch_all(f"""
@@ -1873,9 +1961,11 @@ class DocumentRepository:
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
                                reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               is_encrypted,
                                {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id IS NULL
+                          AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                         ORDER BY filename
                         LIMIT $1 OFFSET $2
                     """, limit, offset, rls_context=rls_context)
@@ -1886,14 +1976,18 @@ class DocumentRepository:
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
                                reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               is_encrypted,
                                {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id IS NULL
+                          AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                         ORDER BY filename
                     """, rls_context=rls_context)
             else:
                 count_row = await fetch_one("""
-                    SELECT COUNT(*) AS c FROM document_metadata WHERE folder_id = $1
+                    SELECT COUNT(*) AS c FROM document_metadata
+                    WHERE folder_id = $1
+                      AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 """, folder_id, rls_context=rls_context)
                 if limit is not None:
                     rows = await fetch_all(f"""
@@ -1902,9 +1996,11 @@ class DocumentRepository:
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
                                reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               is_encrypted,
                                {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id = $1
+                          AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                         ORDER BY filename
                         LIMIT $2 OFFSET $3
                     """, folder_id, limit, offset, rls_context=rls_context)
@@ -1915,9 +2011,11 @@ class DocumentRepository:
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
                                reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               is_encrypted,
                                {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id = $1
+                          AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                         ORDER BY filename
                     """, folder_id, rls_context=rls_context)
             
@@ -1947,6 +2045,7 @@ class DocumentRepository:
             count_row = await fetch_one("""
                 SELECT COUNT(*) AS c FROM document_metadata
                 WHERE folder_id IS NULL AND collection_type = $1
+                  AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
             """, collection_type, rls_context=rls_context)
             total = int(count_row['c']) if count_row else 0
             
@@ -1969,9 +2068,11 @@ class DocumentRepository:
                        quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                        submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
                        reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                       is_encrypted,
                        {has_pending_subquery}
                 FROM document_metadata 
                 WHERE folder_id IS NULL AND collection_type = $1
+                  AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 ORDER BY filename
             """ + suffix, *args, rls_context=rls_context)
             
@@ -1996,7 +2097,9 @@ class DocumentRepository:
                 rls_context = {'user_id': '', 'user_role': 'admin'}
             
             result = await fetch_one("""
-                SELECT COUNT(*) FROM document_metadata WHERE folder_id = $1
+                SELECT COUNT(*) FROM document_metadata
+                WHERE folder_id = $1
+                  AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
             """, folder_id, rls_context=rls_context)
             return result.get('count', 0) if result else 0
         except Exception as e:
@@ -2043,6 +2146,7 @@ class DocumentRepository:
                 SELECT folder_id, COUNT(*) AS count
                 FROM document_metadata
                 WHERE folder_id = ANY($1::text[])
+                  AND LOWER(COALESCE(doc_type::text, '')) <> 'image_sidecar'
                 GROUP BY folder_id
                 """,
                 folder_ids,
@@ -2111,7 +2215,7 @@ class DocumentRepository:
         """
         Update folder metadata (category, tags, inherit_tags)
         
-        **ROOSEVELT FOLDER TAGGING**: Store metadata for automatic inheritance!
+        Store folder metadata for tag/category inheritance
         """
         try:
             from services.database_manager.database_helpers import execute
@@ -2163,13 +2267,13 @@ class DocumentRepository:
         """
         Get all unique tags from documents and folders
         
-        **ROOSEVELT TAG DETECTION**: Used for fuzzy matching user queries!
+        Tag detection for fuzzy query matching
         """
         try:
             from services.database_manager.database_helpers import fetch_all
             
             # Get tags from both documents and folders
-            # **ROOSEVELT SQL FIX**: Wrap unnest in subquery to filter on alias
+            # Wrap unnest in subquery to filter on alias
             query = """
                 SELECT tag
                 FROM (
@@ -2197,7 +2301,7 @@ class DocumentRepository:
         """
         Get all unique categories from documents and folders
         
-        **ROOSEVELT TAG DETECTION**: Used for fuzzy matching user queries!
+        Tag detection for fuzzy query matching
         """
         try:
             from services.database_manager.database_helpers import fetch_all
@@ -2525,7 +2629,7 @@ class DocumentRepository:
             return False
     
     async def update_document_folder(self, document_id: str, folder_id: str = None, user_id: str = None) -> bool:
-        """Update the folder assignment of a document - Roosevelt Architecture"""
+        """Update the folder assignment of a document."""
         try:
             from services.database_manager.database_helpers import execute, fetch_one
             

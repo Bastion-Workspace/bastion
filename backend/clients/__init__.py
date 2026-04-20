@@ -1,8 +1,5 @@
 """
-Client libraries for external services
+Client libraries for external services.
+
+Import concrete clients from submodules, e.g. ``from clients.vector_service_client import ...``.
 """
-
-from clients.vector_service_client import VectorServiceClient, get_vector_service_client
-
-__all__ = ["VectorServiceClient", "get_vector_service_client"]
-

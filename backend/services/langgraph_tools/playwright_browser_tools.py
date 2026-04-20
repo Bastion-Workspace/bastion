@@ -197,34 +197,3 @@ async def browser_run(
     finally:
         if session_id:
             await client.browser_destroy_session(session_id)
-
-
-async def browser_download(
-    user_id: str,
-    url: str,
-    download_selector: str,
-    folder_path: str,
-    steps: Optional[List[Dict[str, Any]]] = None,
-    connection_id: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    title: Optional[str] = None,
-    goal: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Run a browser session and trigger a file download (saved to folder_path).
-    Thin wrapper around browser_run with final_action_type=download.
-    Returns dict with success, document_id, filename, file_size_bytes, error.
-    """
-    result = await browser_run(
-        user_id=user_id,
-        url=url,
-        final_action_type="download",
-        final_selector=download_selector,
-        folder_path=folder_path,
-        steps=steps,
-        connection_id=connection_id,
-        tags=tags,
-        title=title,
-        goal=goal,
-    )
-    return result

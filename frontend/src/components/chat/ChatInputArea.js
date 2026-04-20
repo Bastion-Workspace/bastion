@@ -32,7 +32,7 @@ import { useTheme } from '../../contexts/ThemeContext';
 import { ACCENT_PALETTES } from '../../theme/themeConfig';
 import apiService from '../../services/apiService';
 import { getSelectableChatModels } from '../../utils/chatSelectableModels';
-import agentFactoryService from '../../services/agentFactoryService';
+import agentFactoryService, { AGENT_HANDLES_QUERY_KEY } from '../../services/agentFactoryService';
 import ConversationService from '../../services/conversation/ConversationService';
 
 const ChatInputArea = () => {
@@ -44,7 +44,6 @@ const ChatInputArea = () => {
     currentConversationId,
     clearChat,
     createNewConversation,
-    currentJobId,
     cancelCurrentJob,
     replyToMessage,
     setReplyToMessage,
@@ -80,7 +79,7 @@ const ChatInputArea = () => {
   // @mention autocomplete for Agent Factory
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const { data: agentHandles = [] } = useQuery(
-    ['agentHandles'],
+    AGENT_HANDLES_QUERY_KEY,
     () => agentFactoryService.fetchAgentHandles(),
     { staleTime: 60000 }
   );
@@ -285,7 +284,7 @@ const ChatInputArea = () => {
   };
 
   const handleCancelJob = async () => {
-    if (currentJobId && cancelCurrentJob) {
+    if (cancelCurrentJob) {
       await cancelCurrentJob();
     }
   };
@@ -669,8 +668,8 @@ const ChatInputArea = () => {
             </IconButton>
           </Tooltip>
 
-          {isLoading && currentJobId ? (
-            <Tooltip title="Cancel processing">
+          {isLoading ? (
+            <Tooltip title="Stop generation">
               <IconButton
                 onClick={handleCancelJob}
                 color="error"

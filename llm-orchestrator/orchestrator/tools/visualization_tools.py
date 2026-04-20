@@ -31,7 +31,6 @@ class CreateChartParams(BaseModel):
     color_scheme: str = Field(default="plotly", description="Color scheme")
     width: int = Field(default=800, description="Chart width in pixels")
     height: int = Field(default=600, description="Chart height in pixels")
-    include_static: bool = Field(default=False, description="Also generate static SVG")
 
 
 class CreateChartOutputs(BaseModel):
@@ -65,7 +64,6 @@ async def create_chart_tool(
     color_scheme: str = "plotly",
     width: int = 800,
     height: int = 600,
-    include_static: bool = False
 ) -> Dict[str, Any]:
     """
     Create a chart or graph from structured data
@@ -84,13 +82,12 @@ async def create_chart_tool(
         color_scheme: Color scheme to use (default: "plotly")
         width: Chart width in pixels (default: 800)
         height: Chart height in pixels (default: 600)
-        include_static: Also generate a static SVG version (default: False)
-        
+
     Returns:
         Dict with success status, output format, and chart_data
     """
     try:
-        logger.info(f"Creating {chart_type} chart via Tools Service: {title} (static: {include_static})")
+        logger.info(f"Creating {chart_type} chart via Tools Service: {title}")
         
         # Validate chart type locally (quick check before gRPC call)
         if chart_type not in SUPPORTED_CHART_TYPES:
@@ -115,12 +112,19 @@ async def create_chart_tool(
             color_scheme=color_scheme,
             width=width,
             height=height,
-            include_static=include_static
         )
         
         if result.get("success"):
             logger.info(f"Chart created successfully: {chart_type}, format: {result.get('output_format')}")
             formatted = f"Chart created successfully: {chart_type} ({result.get('output_format', '')})"
+            chart_title = (title or "").strip() or f"{chart_type.replace('_', ' ').title()} chart"
+            artifact = {
+                "artifact_type": "chart",
+                "title": chart_title,
+                "code": result.get("chart_data") or "",
+                "language": "html",
+            }
+            return {**result, "formatted": formatted, "artifact": artifact}
         else:
             logger.error(f"Chart creation failed: {result.get('error')}")
             formatted = f"Chart creation failed: {result.get('error', 'Unknown error')}"

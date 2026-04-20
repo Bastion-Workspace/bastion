@@ -7,7 +7,9 @@ CPU-optimized.
 import logging
 import time
 from typing import List, Dict, Any, Optional, Tuple
+import io
 from pathlib import Path
+
 import numpy as np
 
 try:
@@ -95,12 +97,15 @@ class VisionEngine:
             logger.error(f"Failed to initialize Vision Engine: {e}")
             raise
     
-    async def detect_faces(self, image_path: str) -> Dict[str, Any]:
+    async def detect_faces(
+        self, image_path: str = "", image_data: Optional[bytes] = None
+    ) -> Dict[str, Any]:
         """
         Detect faces in an image and return encodings
         
         Args:
-            image_path: Path to image file
+            image_path: Path to image file (ignored when ``image_data`` is set).
+            image_data: Raw image bytes (optional).
             
         Returns:
             Dict with:
@@ -115,16 +120,15 @@ class VisionEngine:
         start_time = time.time()
         
         try:
-            # Load image
-            image_path_obj = Path(image_path)
-            if not image_path_obj.exists():
-                raise FileNotFoundError(f"Image not found: {image_path}")
-            
-            # Load image with face_recognition (uses PIL internally)
-            image = face_recognition.load_image_file(str(image_path))
-            
-            # Get image dimensions
-            pil_image = Image.open(image_path)
+            if image_data:
+                image = face_recognition.load_image_file(io.BytesIO(image_data))
+                pil_image = Image.open(io.BytesIO(image_data))
+            else:
+                image_path_obj = Path(image_path)
+                if not image_path_obj.exists():
+                    raise FileNotFoundError(f"Image not found: {image_path}")
+                image = face_recognition.load_image_file(str(image_path))
+                pil_image = Image.open(image_path)
             image_width, image_height = pil_image.size
             
             # Detect face locations (hog = faster on CPU, cnn = more accurate)
@@ -280,27 +284,34 @@ class VisionEngine:
         image_path: str,
         class_filter: Optional[List[str]] = None,
         confidence_threshold: float = 0.5,
+        image_data: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Detect objects using YOLO (region proposals).
 
         Args:
-            image_path: Path to image file.
+            image_path: Path to image file (ignored when ``image_data`` is set).
             class_filter: Optional list of COCO class names to include.
             confidence_threshold: Minimum confidence (0.0-1.0).
+            image_data: Raw image bytes (optional).
 
         Returns:
             Dict with objects (bbox, class_name, confidence), image dimensions, processing_time_seconds.
         """
         await self.initialize_object_detection()
         start_time = time.time()
-        image_path_obj = Path(image_path)
-        if not image_path_obj.exists():
-            raise FileNotFoundError(f"Image not found: {image_path}")
-        pil_image = Image.open(image_path)
+        if image_data:
+            pil_image = Image.open(io.BytesIO(image_data)).convert("RGB")
+            yolo_source = np.array(pil_image)
+        else:
+            image_path_obj = Path(image_path)
+            if not image_path_obj.exists():
+                raise FileNotFoundError(f"Image not found: {image_path}")
+            pil_image = Image.open(image_path)
+            yolo_source = str(image_path)
         image_width, image_height = pil_image.size
         results = self.yolo_model.predict(
-            str(image_path),
+            yolo_source,
             conf=confidence_threshold,
             verbose=False,
         )
@@ -340,15 +351,17 @@ class VisionEngine:
         regions: List[Dict[str, Any]],
         object_descriptions: List[str],
         similarity_threshold: float = 0.25,
+        image_data: Optional[bytes] = None,
     ) -> List[Dict[str, Any]]:
         """
         Match image regions to text descriptions using CLIP.
 
         Args:
-            image_path: Path to image file.
+            image_path: Path to image file (ignored when ``image_data`` is set).
             regions: List of dicts with bbox_x, bbox_y, bbox_width, bbox_height.
             object_descriptions: Text descriptions to match (e.g. "Nike logo", "tribal tattoo").
             similarity_threshold: Minimum cosine similarity (CLIP logits are normalized).
+            image_data: Raw image bytes (optional).
 
         Returns:
             List of matches: region index, matched_description, confidence (0-1).
@@ -356,7 +369,11 @@ class VisionEngine:
         if not object_descriptions or not regions:
             return []
         await self.initialize_object_detection()
-        pil_image = Image.open(image_path)
+        pil_image = (
+            Image.open(io.BytesIO(image_data)).convert("RGB")
+            if image_data
+            else Image.open(image_path).convert("RGB")
+        )
         device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
         text_inputs = self.clip_processor(
             text=object_descriptions,
@@ -448,13 +465,14 @@ class VisionEngine:
         similarity_threshold: float = 0.25,
         max_chunks: int = 200,
         nms_iou_threshold: float = 0.5,
+        image_data: Optional[bytes] = None,
     ) -> List[Dict[str, Any]]:
         """
         Run CLIP on a grid of image chunks to find regions matching text descriptions.
         Used when semantic terms are set to find items YOLO may have missed.
 
         Args:
-            image_path: Path to image file.
+            image_path: Path to image file (ignored when ``image_data`` is set).
             object_descriptions: Text descriptions to match (e.g. "logo", "tattoo").
             chunk_size: Side length of square window (default 224 for CLIP).
             stride: Step between windows; default chunk_size (no overlap).
@@ -470,7 +488,11 @@ class VisionEngine:
         await self.initialize_object_detection()
         if not CLIP_AVAILABLE:
             return []
-        pil_image = Image.open(image_path).convert("RGB")
+        pil_image = (
+            Image.open(io.BytesIO(image_data)).convert("RGB")
+            if image_data
+            else Image.open(image_path).convert("RGB")
+        )
         w, h = pil_image.size
         stride = stride if stride is not None else chunk_size
         # Build grid of windows
@@ -537,14 +559,16 @@ class VisionEngine:
         image_path: str,
         bbox: Dict[str, int],
         description: str,
+        image_data: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Extract CLIP embeddings for a user-annotated region (visual + semantic + combined).
 
         Args:
-            image_path: Path to image file.
+            image_path: Path to image file (ignored when ``image_data`` is set).
             bbox: Dict with x, y, width, height (or bbox_x, bbox_y, bbox_width, bbox_height).
             description: User text description.
+            image_data: Raw image bytes (optional).
 
         Returns:
             Dict with visual_embedding, semantic_embedding, combined_embedding (lists), embedding_dim.
@@ -554,7 +578,11 @@ class VisionEngine:
         y = bbox.get("bbox_y", bbox.get("y", 0))
         w = bbox.get("bbox_width", bbox.get("width", 0))
         h = bbox.get("bbox_height", bbox.get("height", 0))
-        pil_image = Image.open(image_path)
+        pil_image = (
+            Image.open(io.BytesIO(image_data)).convert("RGB")
+            if image_data
+            else Image.open(image_path).convert("RGB")
+        )
         crop = pil_image.crop((x, y, x + w, y + h))
         device = "cuda" if (torch is not None and torch.cuda.is_available()) else "cpu"
         image_inputs = self.clip_processor(images=crop, return_tensors="pt").to(device)

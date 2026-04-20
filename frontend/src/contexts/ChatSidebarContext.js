@@ -1,4 +1,13 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+  useReducer,
+  useRef,
+} from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useLocation } from 'react-router-dom';
 import apiService from '../services/apiService';
@@ -7,7 +16,8 @@ import tabNotificationManager from '../utils/tabNotification';
 import browserNotificationManager from '../utils/browserNotification';
 import { documentDiffStore } from '../services/documentDiffStore';
 import { createAgentStatusWebSocket } from '../utils/agentStatusTypes';
-import { buildMessageTree, getActivePath, getNextSibling } from '../utils/messageTreeUtils';
+import { buildMessageTree, getActivePath, getNextSibling, extendToLinearLeaf } from '../utils/messageTreeUtils';
+import { devLog } from '../utils/devConsole';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -18,6 +28,85 @@ const formatAgentName = (agentType) => {
     .join(' ');
   return formatted;
 };
+
+/** Stable key for deduping optimistic UI messages against server rows (role + content prefix). */
+function buildMessageMergeKey(msg) {
+  const role = msg.role || msg.type || '';
+  const text = (msg.content || '').trim().slice(0, 500);
+  return `${role}|${text}`;
+}
+
+function appendStreamingTailToBase(base, prevMessages) {
+  const tail = prevMessages.filter(
+    (msg) =>
+      (msg.isStreaming || msg.isPending) &&
+      !base.some(
+        (p) => String(p.message_id || p.id) === String(msg.message_id || msg.id)
+      )
+  );
+  return tail.length ? [...base, ...tail] : base;
+}
+
+/** After streaming completes, refetch can return before new rows exist; keep local messages not yet on server. */
+function appendOptimisticTailToBase(base, prevMessages) {
+  const baseIds = new Set(
+    base.map((p) => String(p.message_id || p.id)).filter((x) => x && x !== 'undefined')
+  );
+  const baseKeys = new Set(base.map(buildMessageMergeKey));
+  const extra = prevMessages.filter((msg) => {
+    if (msg.isStreaming || msg.isPending) return false;
+    const id = msg.message_id ?? msg.id;
+    if (id != null && id !== undefined && baseIds.has(String(id))) return false;
+    const key = buildMessageMergeKey(msg);
+    if (key === '|') return false;
+    if (baseKeys.has(key)) return false;
+    return true;
+  });
+  return extra.length ? [...base, ...extra] : base;
+}
+
+function mergeFetchedPathWithPrevious(pathForDisplay, prevMessages) {
+  const withStreaming = appendStreamingTailToBase(pathForDisplay, prevMessages);
+  return appendOptimisticTailToBase(withStreaming, prevMessages);
+}
+
+const ARTIFACT_DRAWER_INITIAL = { active: null, history: [] };
+
+function artifactDrawerReducer(state, action) {
+  switch (action.type) {
+    case 'open': {
+      if (!action.payload) return state;
+      const next = action.payload;
+      if (!state.active) {
+        return { ...state, active: next };
+      }
+      if (state.active.code !== next.code) {
+        return { active: next, history: [...state.history, state.active] };
+      }
+      return { ...state, active: next };
+    }
+    case 'close':
+      return ARTIFACT_DRAWER_INITIAL;
+    case 'revert': {
+      const idx = action.index;
+      if (idx < 0 || idx >= state.history.length) return state;
+      return {
+        active: state.history[idx],
+        history: state.history.slice(0, idx),
+      };
+    }
+    case 'stream_replace_if_open': {
+      const next = action.payload;
+      if (!next || state.active == null) return state;
+      if (state.active.code !== next.code) {
+        return { active: next, history: [...state.history, state.active] };
+      }
+      return { ...state, active: next };
+    }
+    default:
+      return state;
+  }
+}
 
 const ChatSidebarContext = createContext();
 
@@ -42,11 +131,11 @@ export const ChatSidebarProvider = ({ children }) => {
     try {
       const saved = localStorage.getItem('chatSidebarCurrentConversation');
       const conversationId = saved && saved !== 'null' ? saved : null;
-      console.log('💾 Page refresh - loading conversation from localStorage:', conversationId);
+      devLog('💾 Page refresh - loading conversation from localStorage:', conversationId);
       if (conversationId) {
-        console.log('🔄 Will restore conversation automatically on page load');
+        devLog('🔄 Will restore conversation automatically on page load');
       } else {
-        console.log('🆕 No saved conversation - starting fresh');
+        devLog('🆕 No saved conversation - starting fresh');
       }
       return conversationId;
     } catch (error) {
@@ -72,6 +161,65 @@ export const ChatSidebarProvider = ({ children }) => {
   const [backgroundJobService, setBackgroundJobService] = useState(null);
   /** When set, chat follow-ups route to this agent line (CEO) until @auto */
   const [activeLineRouting, setActiveLineRouting] = useState(null);
+  /** Chat artifact drawer: active payload + session-only version stack. */
+  const [artifactDrawer, dispatchArtifactDrawer] = useReducer(
+    artifactDrawerReducer,
+    ARTIFACT_DRAWER_INITIAL
+  );
+  const activeArtifact = artifactDrawer.active;
+  const artifactHistory = artifactDrawer.history;
+
+  const [artifactCollapsed, setArtifactCollapsed] = useState(false);
+
+  const prevArtifactCodeRef = useRef(null);
+  useEffect(() => {
+    const code = activeArtifact?.code ?? null;
+    if (code != null && code !== prevArtifactCodeRef.current) {
+      setArtifactCollapsed(false);
+    }
+    prevArtifactCodeRef.current = code;
+  }, [activeArtifact]);
+
+  useEffect(() => {
+    try {
+      if (currentConversationId) {
+        sessionStorage.setItem('bastion_ui_active_conversation_id', currentConversationId);
+      } else {
+        sessionStorage.removeItem('bastion_ui_active_conversation_id');
+      }
+    } catch (_) {
+      /* ignore quota or private mode */
+    }
+  }, [currentConversationId]);
+
+  const setActiveArtifact = useCallback((art) => {
+    if (art == null) {
+      setArtifactCollapsed(false);
+      dispatchArtifactDrawer({ type: 'close' });
+    } else {
+      dispatchArtifactDrawer({ type: 'open', payload: art });
+    }
+  }, []);
+
+  const openArtifact = useCallback(
+    (art) => {
+      if (art == null) return;
+      if (
+        artifactCollapsed &&
+        activeArtifact &&
+        activeArtifact.code === art.code
+      ) {
+        setArtifactCollapsed(false);
+        return;
+      }
+      dispatchArtifactDrawer({ type: 'open', payload: art });
+    },
+    [artifactCollapsed, activeArtifact]
+  );
+
+  const revertArtifact = useCallback((index) => {
+    dispatchArtifactDrawer({ type: 'revert', index });
+  }, []);
   const [sessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
 
   const messageTree = useMemo(() => buildMessageTree(allMessages), [allMessages]);
@@ -97,6 +245,12 @@ export const ChatSidebarProvider = ({ children }) => {
   // LangGraph is the only system - no toggles needed
   const useLangGraphSystem = true; // Always use LangGraph
   const messagesConversationIdRef = React.useRef(null); // Track which conversation the current messages belong to
+  /** Latest action implementations for stable context wrappers (avoids new context value every render). */
+  const chatSidebarActionsRef = React.useRef({});
+  /** Active streaming fetch AbortController; Stop aborts read and backend uses Redis cancel when run_id is known. */
+  const streamAbortControllerRef = React.useRef(null);
+  /** Assistant placeholder message id for the in-flight stream (Stop / abort UI). */
+  const activeStreamMessageIdRef = React.useRef(null);
   const lastCreatedConversationIdRef = React.useRef(null); // Skip redundant refetch after creating new conversation
   const isLoadingFromMetadataRef = React.useRef(false); // Track when we're loading preferences from metadata to prevent save loop
   
@@ -168,12 +322,12 @@ export const ChatSidebarProvider = ({ children }) => {
     // Apply user's editor preference ONLY when on documents page, otherwise force 'ignore'
     if (onDocumentsPage) {
       if (editorPreference !== userEditorPreference) {
-        console.log('On documents page - applying user editor preference:', userEditorPreference);
+        devLog('On documents page - applying user editor preference:', userEditorPreference);
         setEditorPreference(userEditorPreference);
       }
     } else {
       if (editorPreference !== 'ignore') {
-        console.log('Not on documents page - disabling editor preference');
+        devLog('Not on documents page - disabling editor preference');
         setEditorPreference('ignore');
       }
     }
@@ -225,46 +379,10 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const queryClient = useQueryClient();
 
-  // WebSocket: line sub-agent messages during CEO run (out-of-band from SSE)
-  useEffect(() => {
-    if (!currentConversationId) return undefined;
-    const token = localStorage.getItem('auth_token');
-    if (!token) return undefined;
-    const ctrl = createAgentStatusWebSocket({
-      conversationId: currentConversationId,
-      token,
-      onMessage: (msg) => {
-        if (msg.type !== 'line_agent_message') return;
-        if (msg.conversation_id && msg.conversation_id !== currentConversationId) return;
-        const mid = msg.message_id || `line-${Date.now()}`;
-        setMessages((prev) => {
-          if (prev.some((m) => m.message_id === mid || m.id === mid)) return prev;
-          return [
-            ...prev,
-            {
-              id: mid,
-              message_id: mid,
-              role: 'assistant',
-              type: 'assistant',
-              content: msg.content || '',
-              timestamp: msg.timestamp || new Date().toISOString(),
-              metadata: msg.metadata || {},
-            },
-          ];
-        });
-      },
-    });
-    return () => {
-      try {
-        ctrl.close();
-      } catch (_) { /* ignore */ }
-    };
-  }, [currentConversationId]);
-
   // Preference update function for saving to conversation metadata
   const updateConversationPreference = React.useCallback(async (key, value) => {
     if (!currentConversationId) {
-      console.log('No conversation - only updating global preference');
+      devLog('No conversation - only updating global preference');
       return;
     }
     
@@ -276,7 +394,7 @@ export const ChatSidebarProvider = ({ children }) => {
         }
       });
       
-      console.log(`Saved ${key} to conversation ${currentConversationId}:`, value);
+      devLog(`Saved ${key} to conversation ${currentConversationId}:`, value);
       
       // Invalidate conversation query to refresh
       queryClient.invalidateQueries(['conversation', currentConversationId]);
@@ -304,14 +422,14 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // Initialize background job service
   useEffect(() => {
-    console.log('🔄 Initializing background job service...');
+    devLog('🔄 Initializing background job service...');
     const service = new BackgroundJobService(apiService);
-    console.log('✅ Background job service created:', service);
+    devLog('✅ Background job service created:', service);
     setBackgroundJobService(service);
     
     return () => {
       if (service) {
-        console.log('🧹 Cleaning up background job service...');
+        devLog('🧹 Cleaning up background job service...');
         service.disconnectAll();
       }
     };
@@ -319,7 +437,7 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // CRITICAL: Log conversation ID changes for debugging
   useEffect(() => {
-    console.log('🔄 ChatSidebarContext: currentConversationId changed to:', currentConversationId);
+    devLog('🔄 ChatSidebarContext: currentConversationId changed to:', currentConversationId);
   }, [currentConversationId]);
 
   // Load sidebar preferences and model selection from localStorage
@@ -340,7 +458,7 @@ export const ChatSidebarProvider = ({ children }) => {
     if (savedModel !== null) {
       setSelectedModel(savedModel);
       // Immediately notify backend of the saved model selection
-      console.log('🔄 App loaded - notifying backend of saved model:', savedModel);
+      devLog('🔄 App loaded - notifying backend of saved model:', savedModel);
       apiService.selectModel(savedModel).catch(error => {
         console.warn('⚠️ Failed to notify backend of saved model on app load:', error);
       });
@@ -405,10 +523,10 @@ export const ChatSidebarProvider = ({ children }) => {
     try {
       if (currentConversationId) {
         localStorage.setItem('chatSidebarCurrentConversation', currentConversationId);
-        console.log('💾 Persisted conversation to localStorage:', currentConversationId);
+        devLog('💾 Persisted conversation to localStorage:', currentConversationId);
       } else {
         localStorage.removeItem('chatSidebarCurrentConversation');
-        console.log('💾 Cleared conversation from localStorage');
+        devLog('💾 Cleared conversation from localStorage');
       }
     } catch (error) {
       console.error('Failed to persist current conversation to localStorage:', error);
@@ -425,7 +543,7 @@ export const ChatSidebarProvider = ({ children }) => {
       refetchOnMount: true, // Always refetch when component mounts (e.g., switching conversations)
       staleTime: 0, // Always consider data stale to get latest metadata
       onSuccess: (data) => {
-        console.log('✅ ChatSidebarContext: Conversation data loaded:', {
+        devLog('✅ ChatSidebarContext: Conversation data loaded:', {
           conversationId: currentConversationId,
           hasMessages: !!data?.messages,
           messageCount: data?.messages?.length || 0,
@@ -447,7 +565,7 @@ export const ChatSidebarProvider = ({ children }) => {
       lastCreatedConversationIdRef.current = null;
       return;
     }
-    console.log('🔄 Conversation switched, refetching to get latest metadata:', currentConversationId);
+    devLog('🔄 Conversation switched, refetching to get latest metadata:', currentConversationId);
     refetchConversation();
   }, [currentConversationId, refetchConversation]);
 
@@ -478,20 +596,20 @@ export const ChatSidebarProvider = ({ children }) => {
       
       // Load model preference
       if (metadata.user_chat_model) {
-        console.log('🔄 Loading conversation model preference:', metadata.user_chat_model, 'for conversation:', currentConversationId);
+        devLog('🔄 Loading conversation model preference:', metadata.user_chat_model, 'for conversation:', currentConversationId);
         setSelectedModel(metadata.user_chat_model);
       } else {
         // Fall back to global preference
         const globalModel = localStorage.getItem('chatSidebarSelectedModel');
         if (globalModel) {
-          console.log('🔄 No conversation model preference, using global:', globalModel);
+          devLog('🔄 No conversation model preference, using global:', globalModel);
           setSelectedModel(globalModel);
         }
       }
       
       // Load editor preference (only on documents page)
       if (metadata.editor_preference && location.pathname.startsWith('/documents')) {
-        console.log('🔄 Loading conversation editor preference:', metadata.editor_preference);
+        devLog('🔄 Loading conversation editor preference:', metadata.editor_preference);
         setEditorPreference(metadata.editor_preference);
       } else {
         // Fall back to global user preference
@@ -503,7 +621,7 @@ export const ChatSidebarProvider = ({ children }) => {
     } else if (conversationData) {
       setActiveLineRouting(null);
       // Conversation loaded but no metadata yet - use global preferences
-      console.log('🔄 Conversation loaded but no metadata, using global preferences');
+      devLog('🔄 Conversation loaded but no metadata, using global preferences');
       const globalModel = localStorage.getItem('chatSidebarSelectedModel');
       if (globalModel) setSelectedModel(globalModel);
       
@@ -536,7 +654,7 @@ export const ChatSidebarProvider = ({ children }) => {
       refetchOnWindowFocus: false,
       staleTime: 300000, // 5 minutes
       onSuccess: (data) => {
-        console.log('✅ ChatSidebarContext: Messages loaded:', {
+        devLog('✅ ChatSidebarContext: Messages loaded:', {
           conversationId: currentConversationId,
           messageCount: data?.messages?.length || 0,
           hasMore: data?.has_more || false
@@ -548,12 +666,18 @@ export const ChatSidebarProvider = ({ children }) => {
             data.current_node_message_id ||
             data.currentNodeMessageId ||
             null;
-          setCurrentNodeId(nodeId);
           const tree = buildMessageTree(normalizedMessages);
-          let pathMsgs = nodeId ? getActivePath(tree, nodeId) : [];
-          if (nodeId && pathMsgs.length === 0) {
+          const effectiveNodeId =
+            nodeId && tree.byId.has(nodeId)
+              ? extendToLinearLeaf(tree, nodeId)
+              : nodeId;
+          setCurrentNodeId(effectiveNodeId ?? null);
+          let pathMsgs = effectiveNodeId
+            ? getActivePath(tree, effectiveNodeId)
+            : [];
+          if (effectiveNodeId && pathMsgs.length === 0) {
             const orphan = normalizedMessages.find(
-              (m) => (m.message_id || m.id) === nodeId
+              (m) => (m.message_id || m.id) === effectiveNodeId
             );
             if (orphan) {
               pathMsgs = [orphan];
@@ -564,40 +688,11 @@ export const ChatSidebarProvider = ({ children }) => {
               ? pathMsgs.map((m) => normalizeServerMessage(m))
               : normalizedMessages;
 
-          const appendStreamingTail = (base, prevMessages) => {
-            const tail = prevMessages.filter(
-              (msg) =>
-                (msg.isStreaming || msg.isPending) &&
-                !base.some(
-                  (p) =>
-                    (p.message_id || p.id) === (msg.message_id || msg.id)
-                )
-            );
-            return tail.length ? [...base, ...tail] : base;
-          };
-
           setMessages((prevMessages) => {
-            const isConversationSwitch = messagesConversationIdRef.current !== currentConversationId;
-
-            if (isConversationSwitch) {
+            if (messagesConversationIdRef.current !== currentConversationId) {
               messagesConversationIdRef.current = currentConversationId;
-              return appendStreamingTail(pathForDisplay, prevMessages);
             }
-
-            const hasUnsavedMessages = prevMessages.some(
-              (msg) => msg.isPending || msg.isStreaming
-            );
-            const serverActivePathReady = Boolean(nodeId && pathMsgs.length > 0);
-
-            if (serverActivePathReady) {
-              return appendStreamingTail(pathForDisplay, prevMessages);
-            }
-
-            if (hasUnsavedMessages && pathForDisplay.length < prevMessages.length) {
-              return prevMessages;
-            }
-
-            return pathForDisplay;
+            return mergeFetchedPathWithPrevious(pathForDisplay, prevMessages);
           });
         }
       },
@@ -609,10 +704,15 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // Update messages when conversation data changes (fallback)
   useEffect(() => {
-    if (conversationData?.messages && !messagesData) {
-      console.log('🔄 ChatSidebarContext: Using fallback conversation messages');
+    const embedded = conversationData?.messages;
+    if (
+      Array.isArray(embedded) &&
+      embedded.length > 0 &&
+      !messagesData
+    ) {
+      devLog('🔄 ChatSidebarContext: Using fallback conversation messages');
       // Normalize message format for consistent frontend handling
-      const normalizedMessages = conversationData.messages.map(message => ({
+      const normalizedMessages = embedded.map(message => ({
         id: message.message_id || message.id,
         message_id: message.message_id,
         role: message.role,
@@ -662,7 +762,7 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // Handle background job progress updates
   const handleBackgroundJobProgress = (jobData) => {
-    console.log('🔄 Background job progress:', jobData);
+    devLog('🔄 Background job progress:', jobData);
     
     // Update the execution message with progress
     setMessages(prev => prev.map(msg => {
@@ -682,8 +782,8 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // Handle background job completion
   const handleBackgroundJobCompleted = (jobData) => {
-    console.log('✅ Background job completed:', jobData);
-    console.log('🔍 Job details:', {
+    devLog('✅ Background job completed:', jobData);
+    devLog('🔍 Job details:', {
       jobId: jobData.job_id,
       conversationId: jobData.conversation_id,
       currentConversationId: currentConversationId,
@@ -695,7 +795,7 @@ export const ChatSidebarProvider = ({ children }) => {
     // CRITICAL: Refresh messages from database to ensure we get the complete conversation
     // This ensures research plan results are properly displayed
     if (currentConversationId && jobData.conversation_id === currentConversationId) {
-      console.log('🔄 Refreshing messages from database after job completion');
+      devLog('🔄 Refreshing messages from database after job completion');
       refetchMessages(); // This will reload messages from the API
       
       // Also invalidate the conversation query to ensure fresh data
@@ -759,7 +859,7 @@ export const ChatSidebarProvider = ({ children }) => {
       updateCurrentActivityState({ currentJobId: null });
     }
     
-    console.log('✅ Background job completion handling completed');
+    devLog('✅ Background job completion handling completed');
   };
 
   // Check if a query is a HITL permission response
@@ -804,11 +904,11 @@ export const ChatSidebarProvider = ({ children }) => {
   };
 
   const toggleSidebar = () => {
-    setIsCollapsed(!isCollapsed);
+    setIsCollapsed((c) => !c);
   };
 
   const selectConversation = (conversationId) => {
-    console.log('🔄 ChatSidebarContext: Selecting conversation:', conversationId);
+    devLog('🔄 ChatSidebarContext: Selecting conversation:', conversationId);
     
     // Clear current state to prevent cross-conversation contamination
     setMessages([]);
@@ -823,7 +923,7 @@ export const ChatSidebarProvider = ({ children }) => {
     
     // Update background job service with new conversation ID
     if (backgroundJobService) {
-      console.log('🔄 ChatSidebarContext: Updating background job service conversation ID');
+      devLog('🔄 ChatSidebarContext: Updating background job service conversation ID');
       backgroundJobService.setCurrentConversationId(conversationId);
       backgroundJobService.disconnectAll(); // Clear any existing connections
       backgroundJobService.clearCompletedJobs();
@@ -836,7 +936,7 @@ export const ChatSidebarProvider = ({ children }) => {
     queryClient.invalidateQueries(['conversation', conversationId]);
     queryClient.invalidateQueries(['conversationMessages', conversationId]);
     
-    console.log('✅ ChatSidebarContext: Conversation selection completed for:', conversationId);
+    devLog('✅ ChatSidebarContext: Conversation selection completed for:', conversationId);
   };
 
   const createNewConversation = () => {
@@ -858,10 +958,10 @@ export const ChatSidebarProvider = ({ children }) => {
       actualQuery = replyPrefix + actualQuery;
     }
     
-    console.log('🔄 sendMessage called with:', { query: actualQuery, overrideQuery: !!overrideQuery, backgroundJobService: !!backgroundJobService, executionMode, hasReply: !!replyToMessage });
+    devLog('🔄 sendMessage called with:', { query: actualQuery, overrideQuery: !!overrideQuery, backgroundJobService: !!backgroundJobService, executionMode, hasReply: !!replyToMessage });
     
     if (!actualQuery || !backgroundJobService) {
-      console.log('❌ sendMessage early return:', { hasQuery: !!actualQuery, hasService: !!backgroundJobService });
+      devLog('❌ sendMessage early return:', { hasQuery: !!actualQuery, hasService: !!backgroundJobService });
       return;
     }
 
@@ -882,7 +982,7 @@ export const ChatSidebarProvider = ({ children }) => {
     if (isHITLPermissionResponse(currentQuery)) {
       const recentPermissionRequest = findRecentPermissionRequest();
       if (recentPermissionRequest) {
-        console.log('🛡️ Detected HITL permission response, continuing LangGraph flow:', currentQuery);
+        devLog('🛡️ Detected HITL permission response, continuing LangGraph flow:', currentQuery);
         // Continue with normal LangGraph flow - it will handle the permission response
         // Don't return early - let the normal flow handle it
       }
@@ -903,12 +1003,12 @@ export const ChatSidebarProvider = ({ children }) => {
         const newConversation = await apiService.createConversation({
           initial_message: currentQuery
         });
-        console.log('🔍 Full conversation response:', newConversation);
-        console.log('🔍 Response keys:', Object.keys(newConversation));
+        devLog('🔍 Full conversation response:', newConversation);
+        devLog('🔍 Response keys:', Object.keys(newConversation));
         conversationId = newConversation.conversation.conversation_id; // Access conversation_id through the conversation field
         setCurrentConversationId(conversationId);
         queryClient.invalidateQueries(['conversations']);
-        console.log('✅ Created new conversation:', conversationId);
+        devLog('✅ Created new conversation:', conversationId);
       } catch (error) {
         console.error('❌ Failed to create conversation:', error);
         setQuery(currentQuery); // Restore query on failure
@@ -920,71 +1020,15 @@ export const ChatSidebarProvider = ({ children }) => {
     setMessages(prev => [...prev, userMessage]);
     updateCurrentActivityState({ isLoading: true });
 
-    // NEWS CHAT QUICK PATH: If user asked for headlines, fetch and present as cards
-    try {
-      const lowerQ = currentQuery.toLowerCase();
-      if (lowerQ.includes('latest headlines') || lowerQ.startsWith('headlines') || lowerQ.includes('news headlines')) {
-        // Ensure conversation exists so the quick-path exchange is persisted
-        if (!conversationId) {
-          try {
-            const newConversation = await apiService.createConversation({ initial_message: currentQuery });
-            conversationId = newConversation.conversation.conversation_id;
-            setCurrentConversationId(conversationId);
-            queryClient.invalidateQueries(['conversations']);
-          } catch (error) {
-            console.error('❌ Failed to create conversation for headlines quick path:', error);
-            // Continue without persistence
-          }
-        } else {
-          // Persist the user message to the conversation if API supports it
-          try {
-            await apiService.addMessageToConversation(conversationId, { content: currentQuery, role: 'user' });
-          } catch (e) {
-            // Non-fatal
-          }
-        }
-
-        const resp = await apiService.get('/api/news/headlines');
-        const headlines = (resp && resp.headlines) || [];
-        const newsMsg = {
-          id: Date.now() + 2,
-          role: 'assistant',
-          type: 'assistant',
-          content: '**Latest Headlines**',
-          news_results: headlines,
-          timestamp: new Date().toISOString(),
-        };
-
-        // Persist assistant message if conversation exists
-        if (conversationId) {
-          try {
-            await apiService.addMessageToConversation(conversationId, {
-              content: newsMsg.content,
-              role: 'assistant',
-              metadata: { news_results: headlines }
-            });
-          } catch (e) {
-            // Non-fatal
-          }
-        }
-
-        setMessages(prev => [...prev, newsMsg]);
-        updateCurrentActivityState({ isLoading: false });
-        return;
-      }
-    } catch (e) {
-      // fall through to normal flow
-    }
-
     // LangGraph is the only system - always use it
       // Use LangGraph system
       try {
-        console.log('🔄 Using LangGraph system');
+        devLog('🔄 Using LangGraph system');
         
         // User message already added above, no need to add again
         
         // 🌊 STREAMING-FIRST POLICY: Stream everything for optimal UX!
-        console.log('🌊 Using streaming for ALL queries');
+        devLog('🌊 Using streaming for ALL queries');
         
         // Use streaming endpoint for ALL real-time responses
         await handleStreamingResponse(currentQuery, conversationId, sessionId);
@@ -1009,14 +1053,12 @@ export const ChatSidebarProvider = ({ children }) => {
   // Handle streaming response from orchestrator
   const handleStreamingResponse = async (query, conversationId, sessionId, streamOptions = {}) => {
     const { isBranchResend, branchMessageId } = streamOptions;
-    console.log('🌊 Starting streaming response for:', query);
+    devLog('🌊 Starting streaming response for:', query);
     
     try {
-      // ROOSEVELT'S CANCEL BUTTON FIX: Create streaming job ID for cancel functionality
-      const streamingJobId = `streaming_${Date.now()}`;
-      updateCurrentActivityState({ currentJobId: streamingJobId });
-      
-      // Add streaming message placeholder
+      updateCurrentActivityState({ currentJobId: null });
+
+      // Add streaming message placeholder (server assigns run_id in first SSE run_started)
       const streamingMessage = {
         id: Date.now() + 1,
         role: 'assistant',
@@ -1024,24 +1066,24 @@ export const ChatSidebarProvider = ({ children }) => {
         content: '',
         timestamp: new Date().toISOString(),
         isStreaming: true,
-        jobId: streamingJobId,
+        jobId: null,
         metadata: {
           streaming: true,
-          job_id: streamingJobId,
           agent_type: null
         }
       };
       
       setMessages(prev => [...prev, streamingMessage]);
-      
+      activeStreamMessageIdRef.current = streamingMessage.id;
+
       // Track if we've notified for this message to avoid multiple notifications during streaming
       let hasNotified = false;
       
       // Create EventSource for Server-Sent Events  
       const token = localStorage.getItem('auth_token'); // Match apiService token key
-      console.log('🔑 Using auth_token for streaming:', token ? 'TOKEN_PRESENT' : 'NO_TOKEN');
+      devLog('🔑 Using auth_token for streaming:', token ? 'TOKEN_PRESENT' : 'NO_TOKEN');
       
-      // Attach active_editor when preference is not ignore and cache shows an open editable .md/.org with content.
+      // Attach active_editor when preference is not ignore and cache shows an open doc with content (.md/.org editable, or .txt/.pdf/.docx read-only).
       // EditorProvider is a child of ChatSidebarProvider, so we read editor_ctx_cache from localStorage.
       let activeEditorPayload = null;
       
@@ -1073,7 +1115,7 @@ export const ChatSidebarProvider = ({ children }) => {
           const editorCtx = JSON.parse(localStorage.getItem('editor_ctx_cache') || 'null');
           
           // DEBUG: Log what we got from localStorage
-          console.log('🔍 EDITOR_CTX_CACHE DEBUG:', {
+          devLog('🔍 EDITOR_CTX_CACHE DEBUG:', {
             exists: !!editorCtx,
             isEditable: editorCtx?.isEditable,
             filename: editorCtx?.filename,
@@ -1088,29 +1130,56 @@ export const ChatSidebarProvider = ({ children }) => {
           });
           
           // DEBUG: Log the raw cache value
-          console.log('🔍 RAW EDITOR_CTX_CACHE:', localStorage.getItem('editor_ctx_cache'));
+          devLog('🔍 RAW EDITOR_CTX_CACHE:', localStorage.getItem('editor_ctx_cache'));
           
-          // Transport checks only: open editable .md/.org with content. How to use it is Agent Factory / orchestrator.
+          // Transport: editable .md/.org, or read-only .txt/.pdf/.docx with non-empty content.
           const filenameLower = editorCtx?.filename?.toLowerCase() || '';
-          const hasValidEditorState = editorCtx && 
-                                      editorCtx.isEditable === true && 
-                                      editorCtx.filename && 
-                                      (filenameLower.endsWith('.md') || filenameLower.endsWith('.org')) &&
-                                      editorCtx.content &&
-                                      editorCtx.content.trim().length > 0;
-          
-          console.log('🔍 EDITOR STATE VALIDATION:', {
+          const hasContent = !!(editorCtx?.content && editorCtx.content.trim().length > 0);
+          const EDITABLE_EXTENSIONS = ['.md', '.org'];
+          const READONLY_TEXT_EXTENSIONS = ['.txt', '.pdf', '.docx', '.srt', '.vtt'];
+          const isEditableEditorState =
+            editorCtx &&
+            editorCtx.isEditable === true &&
+            editorCtx.filename &&
+            EDITABLE_EXTENSIONS.some((ext) => filenameLower.endsWith(ext)) &&
+            hasContent;
+          const isReadonlyEditorState =
+            editorCtx &&
+            editorCtx.isEditable === false &&
+            editorCtx.filename &&
+            READONLY_TEXT_EXTENSIONS.some((ext) => filenameLower.endsWith(ext)) &&
+            hasContent;
+          const hasValidEditorState = isEditableEditorState || isReadonlyEditorState;
+
+          devLog('🔍 EDITOR STATE VALIDATION:', {
             hasValidEditorState,
+            isEditableEditorState,
+            isReadonlyEditorState,
             passedCheck1_editorCtxExists: !!editorCtx,
-            passedCheck2_isEditableTrue: editorCtx?.isEditable === true,
-            passedCheck3_filenameEndsMdOrOrg: filenameLower.endsWith('.md') || filenameLower.endsWith('.org'),
-            passedCheck4_hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0)
+            passedCheck2_hasContent: hasContent,
+            filename: editorCtx?.filename,
           });
-          
+
           if (hasValidEditorState) {
-            const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
+            const language =
+              editorCtx.language ||
+              (filenameLower.endsWith('.org')
+                ? 'org'
+                : filenameLower.endsWith('.md')
+                  ? 'markdown'
+                  : filenameLower.endsWith('.txt')
+                    ? 'plaintext'
+                    : filenameLower.endsWith('.pdf')
+                      ? 'pdf'
+                      : filenameLower.endsWith('.docx')
+                        ? 'docx'
+                        : filenameLower.endsWith('.srt')
+                          ? 'srt'
+                          : filenameLower.endsWith('.vtt')
+                            ? 'vtt'
+                            : 'markdown');
             activeEditorPayload = {
-              is_editable: true,
+              is_editable: editorCtx.isEditable === true,
               filename: editorCtx.filename,
               language: language,
               content: editorCtx.content,
@@ -1123,17 +1192,30 @@ export const ChatSidebarProvider = ({ children }) => {
               document_id: editorCtx.documentId || null,
               folder_id: editorCtx.folderId || null,
             };
-            console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
+            devLog(
+              '✅ Editor context — sending active_editor:',
+              editorCtx.filename,
+              editorCtx.isEditable === true ? '(editable)' : '(read-only)'
+            );
           } else {
-            // Editor is NOT open or NOT editable - be very explicit about why
             if (!editorCtx) {
-              console.log('🚫 NO EDITOR STATE IN CACHE - no editor tab is open');
-            } else if (editorCtx.isEditable !== true) {
-              console.log('🚫 EDITOR NOT EDITABLE (isEditable=' + editorCtx.isEditable + ') - viewing PDF or document, not editing');
-            } else if (!editorCtx.filename || (!editorCtx.filename.toLowerCase().endsWith('.md') && !editorCtx.filename.toLowerCase().endsWith('.org'))) {
-              console.log('🚫 NO VALID MARKDOWN OR ORG FILE - filename:', editorCtx.filename);
-            } else if (!editorCtx.content || !editorCtx.content.trim()) {
-              console.log('🚫 NO EDITOR CONTENT - editor state exists but content is empty');
+              devLog('🚫 NO EDITOR STATE IN CACHE - no editor tab is open');
+            } else if (!editorCtx.filename) {
+              devLog('🚫 NO FILENAME in editor cache');
+            } else if (!hasContent) {
+              devLog('🚫 NO EDITOR CONTENT - editor state exists but content is empty');
+            } else if (editorCtx.isEditable === true) {
+              devLog(
+                '🚫 EDITABLE PATH NOT MET - expected .md/.org with content; filename:',
+                editorCtx.filename
+              );
+            } else if (editorCtx.isEditable === false) {
+              devLog(
+                '🚫 READ-ONLY PATH NOT MET - expected .txt/.pdf/.docx with content; filename:',
+                editorCtx.filename
+              );
+            } else {
+              devLog('🚫 EDITOR CACHE isEditable not true/false - filename:', editorCtx.filename);
             }
             // CRITICAL: Explicitly set to null - never send stale data
             activeEditorPayload = null;
@@ -1144,8 +1226,19 @@ export const ChatSidebarProvider = ({ children }) => {
           activeEditorPayload = null;
         }
       } else {
-        console.log('🚫 Editor preference is "ignore" - not sending editor context');
+        devLog('🚫 Editor preference is "ignore" - not sending editor context');
         activeEditorPayload = null;
+      }
+
+      let codeWorkspaceIdPayload = null;
+      try {
+        const cw = JSON.parse(localStorage.getItem('code_workspace_ctx_cache') || 'null');
+        if (cw && cw.code_workspace_id) {
+          const s = String(cw.code_workspace_id).trim();
+          codeWorkspaceIdPayload = s || null;
+        }
+      } catch (e) {
+        codeWorkspaceIdPayload = null;
       }
 
       let activeDataWorkspacePayload = null;
@@ -1173,12 +1266,26 @@ export const ChatSidebarProvider = ({ children }) => {
         }
       }
 
+      let activeArtifactPayload = null;
+      if (activeArtifact && activeArtifact.code) {
+        activeArtifactPayload = {
+          artifact_type: activeArtifact.artifact_type || activeArtifact.type || '',
+          title: activeArtifact.title || '',
+          code: activeArtifact.code,
+          language: activeArtifact.language || null,
+        };
+      }
+
+      const streamAbort = new AbortController();
+      streamAbortControllerRef.current = streamAbort;
+
       const response = await fetch('/api/async/orchestrator/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
+        signal: streamAbort.signal,
         body: JSON.stringify({
           query: query,
           conversation_id: conversationId,
@@ -1187,9 +1294,11 @@ export const ChatSidebarProvider = ({ children }) => {
           editor_preference: editorPreference,
           active_data_workspace: activeDataWorkspacePayload,
           data_workspace_preference: dataWorkspacePreference,
+          active_artifact: activeArtifactPayload,
           user_chat_model: selectedModel || undefined,
           is_branch_resend: !!isBranchResend,
           branch_message_id: branchMessageId || undefined,
+          code_workspace_id: codeWorkspaceIdPayload || undefined,
         })
       });
 
@@ -1213,12 +1322,49 @@ export const ChatSidebarProvider = ({ children }) => {
             if (line.startsWith('data: ')) {
               try {
                 const data = JSON.parse(line.slice(6));
-                console.log('🌊 Stream data:', data);
+                devLog('🌊 Stream data:', data);
 
-                if (data.type === 'title') {
+                if (data.type === 'run_started' && data.run_id) {
+                  updateCurrentActivityState({ currentJobId: data.run_id });
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === streamingMessage.id
+                        ? {
+                            ...msg,
+                            jobId: data.run_id,
+                            metadata: {
+                              ...(msg.metadata || {}),
+                              job_id: data.run_id,
+                              streaming: true,
+                            },
+                          }
+                        : msg
+                    )
+                  );
+                } else if (data.type === 'cancelled') {
+                  setMessages((prev) =>
+                    prev.map((msg) =>
+                      msg.id === streamingMessage.id
+                        ? {
+                            ...msg,
+                            content: msg.content?.trim()
+                              ? `${msg.content}\n\n_(Stopped)_`
+                              : '_(Stopped)_',
+                            isStreaming: false,
+                            isCancelled: true,
+                          }
+                        : msg
+                    )
+                  );
+                  updateCurrentActivityState({ currentJobId: null, isLoading: false });
+                  streamAbortControllerRef.current = null;
+                  queryClient.invalidateQueries(['conversationMessages', conversationId]);
+                  window.dispatchEvent(new CustomEvent('agentStreamComplete'));
+                  break;
+                } else if (data.type === 'title') {
                   // Handle conversation title update - update immediately in UI
                   if (data.message && conversationId) {
-                    console.log('🔤 Received title update:', data.message);
+                    devLog('🔤 Received title update:', data.message);
                     // Optimistically update the conversation title in React Query cache
                     // Update both the specific conversation query and the conversations list
                     queryClient.setQueryData(['conversation', conversationId], (old) => {
@@ -1253,6 +1399,12 @@ export const ChatSidebarProvider = ({ children }) => {
                       }
                       if (data.agent_display_name) {
                         updateData.metadata = { ...(updateData.metadata || currentMetadata), agent_display_name: data.agent_display_name };
+                      }
+                      if (data.persona_ai_name) {
+                        updateData.metadata = {
+                          ...(updateData.metadata || currentMetadata),
+                          persona_ai_name: data.persona_ai_name,
+                        };
                       }
                       return { ...msg, ...updateData };
                     }
@@ -1326,21 +1478,24 @@ export const ChatSidebarProvider = ({ children }) => {
                       if (data.agent_display_name) {
                         updated.metadata = { ...(msg.metadata || {}), agent_display_name: data.agent_display_name };
                       }
+                      if (data.persona_ai_name) {
+                        updated.metadata = { ...(updated.metadata || msg.metadata || {}), persona_ai_name: data.persona_ai_name };
+                      }
                       return updated;
                     }
                     return msg;
                   }));
                 } else if (data.type === 'citations') {
                   // **ROOSEVELT'S CITATION CAVALRY**: Capture citations from research agent!
-                  console.log('🔗 Citations received:', data.citations);
-                  console.log('🔗 streamingMessage.id:', streamingMessage.id);
-                  console.log('🔗 Current messages count:', messages.length);
+                  devLog('🔗 Citations received:', data.citations);
+                  devLog('🔗 streamingMessage.id:', streamingMessage.id);
+                  devLog('🔗 Current messages count:', messages.length);
                   const citations = Array.isArray(data.citations) ? data.citations : [];
                   setMessages(prev => {
-                    console.log('🔗 Updating messages, looking for id:', streamingMessage.id);
+                    devLog('🔗 Updating messages, looking for id:', streamingMessage.id);
                     const updated = prev.map(msg => {
                       if (msg.id === streamingMessage.id) {
-                        console.log('✅ FOUND streaming message, adding citations!');
+                        devLog('✅ FOUND streaming message, adding citations!');
                         return { 
                           ...msg, 
                           citations: citations,
@@ -1352,13 +1507,13 @@ export const ChatSidebarProvider = ({ children }) => {
                       }
                       return msg;
                     });
-                    console.log('🔗 Messages after citation update:', updated.map(m => ({ id: m.id, hasCitations: !!m.citations, citationCount: m.citations?.length })));
+                    devLog('🔗 Messages after citation update:', updated.map(m => ({ id: m.id, hasCitations: !!m.citations, citationCount: m.citations?.length })));
                     return updated;
                   });
-                  console.log(`✅ Added ${citations.length} citations to streaming message`);
+                  devLog(`✅ Added ${citations.length} citations to streaming message`);
                 } else if (data.type === 'permission_request') {
                   // ROOSEVELT'S HITL: Permission request detected
-                  console.log('🛡️ Permission request received:', data);
+                  devLog('🛡️ Permission request received:', data);
                   
                   setMessages(prev => prev.map(msg => 
                     msg.id === streamingMessage.id 
@@ -1374,11 +1529,11 @@ export const ChatSidebarProvider = ({ children }) => {
                       : msg
                   ));
                   
-                  console.log('✅ Permission request message updated');
+                  devLog('✅ Permission request message updated');
                   
                 } else if (data.type === 'notification') {
                   // Signal Corps: Spontaneous notification/alert
-                  console.log('📢 Notification received:', data);
+                  devLog('📢 Notification received:', data);
                   
                   const notification = {
                     id: `note_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -1416,11 +1571,11 @@ export const ChatSidebarProvider = ({ children }) => {
                     }, 10000);
                   }
                   
-                  console.log('✅ Notification added to messages');
+                  devLog('✅ Notification added to messages');
                   
                 } else if (data.type === 'complete_hitl') {
                   // HITL completion - awaiting user permission response
-                  console.log('🛡️ HITL completion - awaiting permission response');
+                  devLog('🛡️ HITL completion - awaiting permission response');
                   
                   // Don't clear job ID yet - we're waiting for user input
                   updateCurrentActivityState({ isLoading: false });
@@ -1449,18 +1604,50 @@ export const ChatSidebarProvider = ({ children }) => {
                           }
                         : msg
                     );
-                    console.log('✅ Streaming completed - final message state:', 
+                    devLog('✅ Streaming completed - final message state:', 
                       updated.find(m => m.id === streamingMessage.id)?.citations ? 
                         `HAS ${updated.find(m => m.id === streamingMessage.id)?.citations?.length} CITATIONS` : 
                         'NO CITATIONS'
                     );
                     return updated;
                   });
+
+                  if (data.metadata?.artifact || data.metadata?.artifacts) {
+                    let parsed = null;
+                    const rawList = data.metadata.artifacts;
+                    if (rawList) {
+                      let list = rawList;
+                      if (typeof list === 'string') {
+                        try {
+                          list = JSON.parse(list);
+                        } catch {
+                          list = null;
+                        }
+                      }
+                      if (Array.isArray(list) && list.length > 0 && list[0]?.artifact_type) {
+                        parsed = list[0];
+                      }
+                    }
+                    if (!parsed && data.metadata?.artifact) {
+                      parsed = data.metadata.artifact;
+                      if (typeof parsed === 'string') {
+                        try {
+                          parsed = JSON.parse(parsed);
+                        } catch {
+                          parsed = null;
+                        }
+                      }
+                    }
+                    if (parsed && typeof parsed === 'object' && parsed.artifact_type) {
+                      dispatchArtifactDrawer({ type: 'open', payload: parsed });
+                    }
+                  }
                   
-                  console.log('✅ Streaming completed successfully');
+                  devLog('✅ Streaming completed successfully');
                   
-                  // ROOSEVELT'S CANCEL BUTTON FIX: Clear job ID when streaming completes
                   updateCurrentActivityState({ currentJobId: null });
+                  streamAbortControllerRef.current = null;
+                  activeStreamMessageIdRef.current = null;
                   
                   // Refresh conversations - title may have been updated from "New Conversation"
                   // Force a refetch to ensure we get the latest title
@@ -1477,6 +1664,8 @@ export const ChatSidebarProvider = ({ children }) => {
                   window.dispatchEvent(new CustomEvent('agentStreamComplete'));
                   break;
                 } else if (data.type === 'done') {
+                  streamAbortControllerRef.current = null;
+                  activeStreamMessageIdRef.current = null;
                   if (data.active_line_id) {
                     setActiveLineRouting({
                       id: data.active_line_id,
@@ -1485,7 +1674,7 @@ export const ChatSidebarProvider = ({ children }) => {
                   }
                   // Streaming complete - check if conversation was updated (title generation)
                   if (data.conversation_updated) {
-                    console.log('🔄 Conversation updated - refreshing to get new title');
+                    devLog('🔄 Conversation updated - refreshing to get new title');
                     // Invalidate and refetch conversations to get updated title
                     queryClient.invalidateQueries(['conversations']);
                     queryClient.invalidateQueries(['conversation', conversationId]);
@@ -1509,13 +1698,21 @@ export const ChatSidebarProvider = ({ children }) => {
         }
       } finally {
         reader.releaseLock();
+        streamAbortControllerRef.current = null;
       }
       
     } catch (error) {
+      streamAbortControllerRef.current = null;
+      activeStreamMessageIdRef.current = null;
+      if (error?.name === 'AbortError') {
+        updateCurrentActivityState({ currentJobId: null, isLoading: false });
+        return;
+      }
       console.error('❌ Streaming failed:', error);
       
       // Update message to show error
       updateCurrentActivityState({ currentJobId: null });
+      activeStreamMessageIdRef.current = null;
       setMessages(prev => prev.map(msg => 
         msg.isStreaming 
           ? { 
@@ -1595,55 +1792,48 @@ export const ChatSidebarProvider = ({ children }) => {
   };
 
   const cancelCurrentJob = async () => {
-    if (!currentJobId) return;
-    
+    const runId = currentJobId;
+    const streamMid = activeStreamMessageIdRef.current;
+    const isUuidRun =
+      typeof runId === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        runId.trim()
+      );
+
     try {
-      console.log('🛑 Cancelling job:', currentJobId);
-      await apiService.cancelUnifiedJob(currentJobId);
-      
-      // Update the pending message to show cancellation
-      setMessages(prev => prev.map(msg => 
-        msg.jobId === currentJobId 
-          ? { ...msg, content: '❌ **Cancelled by user**', isCancelled: true }
-          : msg
-      ));
-      
-      updateCurrentActivityState({ currentJobId: null, isLoading: false });
-      
-      console.log('✅ Job cancelled successfully');
+      if (isUuidRun) {
+        devLog('Stopping stream run_id:', runId);
+        await apiService.cancelUnifiedJob(runId.trim());
+      }
     } catch (error) {
-      console.error('❌ Failed to cancel job:', error);
+      console.error('Failed to cancel stream run:', error);
     }
+
+    streamAbortControllerRef.current?.abort();
+    streamAbortControllerRef.current = null;
+
+    if (streamMid != null) {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === streamMid && msg.isStreaming
+            ? {
+                ...msg,
+                content: (msg.content || '').trim()
+                  ? `${msg.content}\n\n_(Stopped)_`
+                  : '_(Stopped)_',
+                isCancelled: true,
+                isStreaming: false,
+              }
+            : msg
+        )
+      );
+    }
+
+    updateCurrentActivityState({ currentJobId: null, isLoading: false });
+    activeStreamMessageIdRef.current = null;
   };
 
-  const value = {
-    // State
-    isCollapsed,
-    sidebarWidth,
-    setSidebarWidth, // Export setSidebarWidth for resize functionality
-    isFullWidth,
-    setIsFullWidth,
-    isResizing,
-    setIsResizing,
-    currentConversationId,
-    messages,
-    allMessages,
-    currentNodeId,
-    messageTree,
-    setMessages,
-    query,
-    setQuery,
-    replyToMessage,
-    setReplyToMessage,
-    isLoading,
-    selectedModel,
-    setSelectedModel,
-    backgroundJobService,
-    sessionId,
-    executingPlans,
-    currentJobId, // Add current job ID for cancellation
-
-    // Actions
+  chatSidebarActionsRef.current = {
     toggleSidebar,
     selectConversation,
     createNewConversation,
@@ -1651,22 +1841,139 @@ export const ChatSidebarProvider = ({ children }) => {
     clearChat,
     editAndResendMessage,
     switchBranch,
-
-    cancelCurrentJob, // Add cancellation function
-
-    // **ROOSEVELT**: Editor preference (active = sent to backend, user = checkbox state)
-    editorPreference, // Active preference sent to backend (context-aware)
-    setEditorPreference: setUserEditorPreference, // UI checkboxes modify user preference
-    handleEditorPreferenceChange, // Handler that saves to conversation metadata
-
-    dataWorkspacePreference,
-    setDataWorkspacePreference,
-
-    // Conversation preference management
-    updateConversationPreference, // Save preferences to conversation metadata
-
-    activeLineRouting,
+    cancelCurrentJob,
   };
+
+  const stableToggleSidebar = useCallback(() => {
+    chatSidebarActionsRef.current.toggleSidebar();
+  }, []);
+  const stableSelectConversation = useCallback((conversationId) => {
+    chatSidebarActionsRef.current.selectConversation(conversationId);
+  }, []);
+  const stableCreateNewConversation = useCallback(() => {
+    chatSidebarActionsRef.current.createNewConversation();
+  }, []);
+  const stableSendMessage = useCallback((executionMode, overrideQuery) => {
+    return chatSidebarActionsRef.current.sendMessage(executionMode, overrideQuery);
+  }, []);
+  const stableClearChat = useCallback(() => {
+    chatSidebarActionsRef.current.clearChat();
+  }, []);
+  const stableEditAndResendMessage = useCallback((messageId, newContent) => {
+    return chatSidebarActionsRef.current.editAndResendMessage(messageId, newContent);
+  }, []);
+  const stableSwitchBranch = useCallback((messageId, direction) => {
+    return chatSidebarActionsRef.current.switchBranch(messageId, direction);
+  }, []);
+  const stableCancelCurrentJob = useCallback(() => {
+    return chatSidebarActionsRef.current.cancelCurrentJob();
+  }, []);
+
+  const value = useMemo(
+    () => ({
+      // State
+      isCollapsed,
+      sidebarWidth,
+      setSidebarWidth, // Export setSidebarWidth for resize functionality
+      isFullWidth,
+      setIsFullWidth,
+      isResizing,
+      setIsResizing,
+      currentConversationId,
+      messages,
+      allMessages,
+      currentNodeId,
+      messageTree,
+      setMessages,
+      query,
+      setQuery,
+      replyToMessage,
+      setReplyToMessage,
+      isLoading,
+      selectedModel,
+      setSelectedModel,
+      backgroundJobService,
+      sessionId,
+      executingPlans,
+      currentJobId, // Add current job ID for cancellation
+
+      // Actions (stable wrappers delegate to latest implementations)
+      toggleSidebar: stableToggleSidebar,
+      selectConversation: stableSelectConversation,
+      createNewConversation: stableCreateNewConversation,
+      sendMessage: stableSendMessage,
+      clearChat: stableClearChat,
+      editAndResendMessage: stableEditAndResendMessage,
+      switchBranch: stableSwitchBranch,
+
+      cancelCurrentJob: stableCancelCurrentJob, // Add cancellation function
+
+      // **ROOSEVELT**: Editor preference (active = sent to backend, user = checkbox state)
+      editorPreference, // Active preference sent to backend (context-aware)
+      setEditorPreference: setUserEditorPreference, // UI checkboxes modify user preference
+      handleEditorPreferenceChange, // Handler that saves to conversation metadata
+
+      dataWorkspacePreference,
+      setDataWorkspacePreference,
+
+      // Conversation preference management
+      updateConversationPreference, // Save preferences to conversation metadata
+
+      activeLineRouting,
+
+      activeArtifact,
+      setActiveArtifact,
+      artifactHistory,
+      openArtifact,
+      revertArtifact,
+      artifactCollapsed,
+      setArtifactCollapsed,
+
+      /** True while GET /conversations/:id/messages is in flight (for empty-state UI). */
+      conversationMessagesLoading: messagesLoading,
+    }),
+    [
+      isCollapsed,
+      sidebarWidth,
+      isFullWidth,
+      isResizing,
+      currentConversationId,
+      messages,
+      allMessages,
+      currentNodeId,
+      messageTree,
+      query,
+      replyToMessage,
+      isLoading,
+      selectedModel,
+      backgroundJobService,
+      sessionId,
+      executingPlans,
+      currentJobId,
+      editorPreference,
+      handleEditorPreferenceChange,
+      dataWorkspacePreference,
+      setDataWorkspacePreference,
+      updateConversationPreference,
+      activeLineRouting,
+      activeArtifact,
+      artifactHistory,
+      openArtifact,
+      revertArtifact,
+      artifactCollapsed,
+      setArtifactCollapsed,
+      messagesLoading,
+      stableToggleSidebar,
+      stableSelectConversation,
+      stableCreateNewConversation,
+      stableSendMessage,
+      stableClearChat,
+      stableEditAndResendMessage,
+      stableSwitchBranch,
+      stableCancelCurrentJob,
+      setActiveArtifact,
+    ]
+  );
 
   return (
     <ChatSidebarContext.Provider value={value}>

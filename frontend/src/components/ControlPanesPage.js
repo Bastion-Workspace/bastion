@@ -4,7 +4,7 @@ import ControlPanesSettingsTab from './settings/ControlPanesSettingsTab';
 
 const ControlPanesPage = () => {
   return (
-    <Box>
+    <Box sx={{ px: { xs: 2, sm: 3 }, py: 2 }}>
       <Typography variant="h4" gutterBottom>
         Control Panes
       </Typography>

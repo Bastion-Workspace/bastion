@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional
 from config import settings
 from models.api_models import Chunk
 from repositories.document_repository import DocumentRepository
-from services.embedding_service_wrapper import get_embedding_service
+from services.embedding_service_wrapper import get_embedding_service, SidecarEmbedItem
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,10 @@ class DocumentSidecarService:
             raise
 
     async def process_document_metadata(
-        self, file_path: str, document_info: Optional[Dict[str, Any]] = None
+        self,
+        file_path: str,
+        document_info: Optional[Dict[str, Any]] = None,
+        skip_embedding: bool = False,
     ) -> Dict[str, Any]:
         """
         Process a document metadata JSON sidecar file and sync to DB + re-embed.
@@ -211,12 +214,28 @@ class DocumentSidecarService:
                 doc_title = getattr(doc_info, "title", None) or document_filename
                 doc_author = getattr(doc_info, "author", None) or author
                 doc_category = getattr(doc_info, "category", None)
-                if hasattr(doc_category, "value"):
-                    doc_category = doc_category.value
+                doc_category_val = doc_category
+                if hasattr(doc_category_val, "value"):
+                    doc_category_val = doc_category_val.value
+                if skip_embedding:
+                    return {
+                        "success": True,
+                        "document_id": document_id,
+                        "batch_item": SidecarEmbedItem(
+                            chunk=chunk,
+                            user_id=user_id,
+                            document_category=doc_category_val,
+                            document_tags=merged_tags,
+                            document_title=doc_title,
+                            document_author=doc_author,
+                            document_filename=document_filename,
+                            is_image_sidecar=False,
+                        ),
+                    }
                 await self.embedding_manager.embed_and_store_chunks(
                     chunks=[chunk],
                     user_id=user_id,
-                    document_category=doc_category,
+                    document_category=doc_category_val,
                     document_tags=merged_tags,
                     document_title=doc_title,
                     document_author=doc_author,

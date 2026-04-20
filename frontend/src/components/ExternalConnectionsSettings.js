@@ -30,16 +30,35 @@ import {
   TextField,
   Link,
   Grid,
+  Collapse,
+  ListItemIcon,
+  Tooltip,
 } from '@mui/material';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import LinkOffIcon from '@mui/icons-material/LinkOff';
 import EmailIcon from '@mui/icons-material/Email';
 import SmartToyIcon from '@mui/icons-material/SmartToy';
 import CalendarMonthIcon from '@mui/icons-material/CalendarMonth';
 import ExtensionIcon from '@mui/icons-material/Extension';
+import HubIcon from '@mui/icons-material/Hub';
 import apiService from '../services/apiService';
 import { useAuth } from '../contexts/AuthContext';
 import DeviceTokensSettings from './DeviceTokensSettings';
+
+const M365_SERVICE_OPTIONS = [
+  { key: 'email', label: 'Email' },
+  { key: 'calendar', label: 'Calendar' },
+  { key: 'contacts', label: 'Contacts' },
+  { key: 'todo', label: 'To Do' },
+  { key: 'files', label: 'OneDrive' },
+  { key: 'onenote', label: 'OneNote' },
+  { key: 'planner', label: 'Planner' },
+  { key: 'devops', label: 'Azure DevOps' },
+];
+
+const DEFAULT_M365_SERVICES = ['email', 'calendar', 'contacts'];
 
 const ExternalConnectionsSettings = () => {
   const { user } = useAuth();
@@ -47,6 +66,7 @@ const ExternalConnectionsSettings = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [connecting, setConnecting] = useState(false);
+  const [githubConnecting, setGithubConnecting] = useState(false);
   const [refreshingId, setRefreshingId] = useState(null);
   const [disconnectingId, setDisconnectingId] = useState(null);
 
@@ -106,6 +126,12 @@ const ExternalConnectionsSettings = () => {
   const [caldavPassword, setCaldavPassword] = useState('');
   const [caldavDisplayName, setCaldavDisplayName] = useState('');
 
+  const [giteaDialogOpen, setGiteaDialogOpen] = useState(false);
+  const [giteaConnecting, setGiteaConnecting] = useState(false);
+  const [giteaApiBaseUrl, setGiteaApiBaseUrl] = useState('');
+  const [giteaPat, setGiteaPat] = useState('');
+  const [giteaDisplayName, setGiteaDisplayName] = useState('');
+
   const [mcpServers, setMcpServers] = useState([]);
   const [mcpLoading, setMcpLoading] = useState(false);
   const [mcpDialogOpen, setMcpDialogOpen] = useState(false);
@@ -119,6 +145,16 @@ const ExternalConnectionsSettings = () => {
   const [mcpEnvJson, setMcpEnvJson] = useState('{}');
   const [mcpEditingId, setMcpEditingId] = useState(null);
   const [mcpBusyId, setMcpBusyId] = useState(null);
+
+  const [m365ConnectDialogOpen, setM365ConnectDialogOpen] = useState(false);
+  const [m365ConnectSelections, setM365ConnectSelections] = useState(() => new Set(DEFAULT_M365_SERVICES));
+  const [m365ConnServices, setM365ConnServices] = useState({});
+  const [m365ServicesLoading, setM365ServicesLoading] = useState(false);
+  const [m365SavingId, setM365SavingId] = useState(null);
+  /** When true, the M365 service checkboxes for that connection id are shown (collapsed by default). */
+  const [m365ServicesExpanded, setM365ServicesExpanded] = useState({});
+  const [devopsOrgNames, setDevopsOrgNames] = useState({});
+  const [devopsOrgSaving, setDevopsOrgSaving] = useState(null);
 
   const loadConnections = async () => {
     try {
@@ -136,6 +172,66 @@ const ExternalConnectionsSettings = () => {
   useEffect(() => {
     loadConnections();
   }, []);
+
+  useEffect(() => {
+    const ms = connections.filter((c) => c.connection_type === 'email' && c.provider === 'microsoft');
+    if (ms.length === 0) {
+      setM365ConnServices({});
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      setM365ServicesLoading(true);
+      const next = {};
+      for (const c of ms) {
+        try {
+          const r = await apiService.get(`/api/connections/${c.id}/microsoft/services`);
+          if (!cancelled) {
+            next[c.id] = {
+              enabled: Array.isArray(r.enabled_services) ? [...r.enabled_services] : [],
+              available: Array.isArray(r.available_services) ? r.available_services : [],
+            };
+          }
+        } catch {
+          if (!cancelled) {
+            next[c.id] = { enabled: [...DEFAULT_M365_SERVICES], available: M365_SERVICE_OPTIONS.map((o) => o.key), error: true };
+          }
+        }
+      }
+      if (!cancelled) {
+        setM365ConnServices(next);
+        setM365ServicesLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [connections]);
+
+  useEffect(() => {
+    const ms = connections.filter((c) => c.connection_type === 'email' && c.provider === 'microsoft');
+    const next = {};
+    for (const c of ms) {
+      next[c.id] = c.devops_organization || '';
+    }
+    setDevopsOrgNames(next);
+  }, [connections]);
+
+  const saveDevopsOrg = async (connId) => {
+    try {
+      setDevopsOrgSaving(connId);
+      setError(null);
+      await apiService.post(`/api/connections/${connId}/microsoft/devops-config`, {
+        organization: devopsOrgNames[connId] || '',
+      });
+      await loadConnections();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : err.message || 'Failed to save DevOps organization');
+    } finally {
+      setDevopsOrgSaving(null);
+    }
+  };
 
   const loadMcpServers = async () => {
     try {
@@ -251,12 +347,21 @@ const ExternalConnectionsSettings = () => {
     }
   };
 
-  const handleConnectOffice365 = async () => {
+  const handleOpenM365ConnectDialog = () => {
+    setM365ConnectSelections(new Set(DEFAULT_M365_SERVICES));
+    setM365ConnectDialogOpen(true);
+  };
+
+  const handleConfirmM365Connect = async () => {
     try {
       setConnecting(true);
       setError(null);
-      const res = await apiService.get('/api/oauth/microsoft/authorize');
+      const services = Array.from(m365ConnectSelections).filter(Boolean).join(',') || DEFAULT_M365_SERVICES.join(',');
+      const res = await apiService.get('/api/oauth/microsoft/authorize', {
+        params: { services },
+      });
       if (res?.url) {
+        setM365ConnectDialogOpen(false);
         window.location.href = res.url;
         return;
       }
@@ -265,6 +370,61 @@ const ExternalConnectionsSettings = () => {
       setError(err.message || 'Failed to start OAuth');
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const toggleM365ConnService = (connId, key) => {
+    setM365ConnServices((prev) => {
+      const cur = prev[connId];
+      if (!cur) return prev;
+      const enabled = new Set(cur.enabled || []);
+      if (enabled.has(key)) enabled.delete(key);
+      else enabled.add(key);
+      return { ...prev, [connId]: { ...cur, enabled: Array.from(enabled) } };
+    });
+  };
+
+  const saveMicrosoftServices = async (connId) => {
+    const row = m365ConnServices[connId];
+    if (!row?.enabled?.length) {
+      setError('Select at least one Microsoft 365 service.');
+      return;
+    }
+    try {
+      setM365SavingId(connId);
+      setError(null);
+      const res = await apiService.post(`/api/connections/${connId}/microsoft/update-services`, {
+        services: row.enabled,
+      });
+      if (res?.reauth_required && res?.authorize_url) {
+        window.location.href = res.authorize_url;
+        return;
+      }
+      await loadConnections();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setError(typeof detail === 'string' ? detail : err.message || 'Failed to update services');
+    } finally {
+      setM365SavingId(null);
+    }
+  };
+
+  const handleConnectGitHub = async () => {
+    try {
+      setGithubConnecting(true);
+      setError(null);
+      const res = await apiService.get('/api/oauth/github/authorize');
+      if (res?.url) {
+        window.location.href = res.url;
+        return;
+      }
+      setError('No authorization URL returned');
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      const message = typeof detail === 'string' ? detail : err.message || 'Failed to start GitHub OAuth';
+      setError(message);
+    } finally {
+      setGithubConnecting(false);
     }
   };
 
@@ -331,6 +491,12 @@ const ExternalConnectionsSettings = () => {
 
   const emailConnections = connections.filter((c) => c.connection_type === 'email');
   const calendarConnections = connections.filter((c) => c.connection_type === 'calendar');
+  const githubConnections = connections.filter(
+    (c) => c.connection_type === 'code_platform' && c.provider === 'github',
+  );
+  const giteaConnections = connections.filter(
+    (c) => c.connection_type === 'code_platform' && c.provider === 'gitea',
+  );
   const chatBotConnections = connections.filter((c) => c.connection_type === 'chat_bot');
 
   const loadBotStatus = async (connectionId) => {
@@ -480,6 +646,33 @@ const ExternalConnectionsSettings = () => {
     }
   };
 
+  const handleConnectGitea = async () => {
+    if (!giteaApiBaseUrl.trim() || !giteaPat.trim()) return;
+    try {
+      setGiteaConnecting(true);
+      setError(null);
+      await apiService.post('/api/connections/gitea', {
+        api_base_url: giteaApiBaseUrl.trim(),
+        personal_access_token: giteaPat.trim(),
+        display_name: giteaDisplayName.trim() || undefined,
+      });
+      setGiteaApiBaseUrl('');
+      setGiteaPat('');
+      setGiteaDisplayName('');
+      setGiteaDialogOpen(false);
+      await loadConnections();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      const message =
+        typeof detail === 'string'
+          ? detail
+          : err.message || 'Failed to connect Gitea';
+      setError(message);
+    } finally {
+      setGiteaConnecting(false);
+    }
+  };
+
   return (
     <Box>
       <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -499,12 +692,11 @@ const ExternalConnectionsSettings = () => {
         <CardContent>
           <Button
             variant="contained"
-            onClick={handleConnectOffice365}
+            onClick={handleOpenM365ConnectDialog}
             disabled={connecting}
-            startIcon={connecting ? <CircularProgress size={20} /> : null}
             sx={{ mr: 1 }}
           >
-            {connecting ? 'Redirecting…' : 'Connect Office 365'}
+            Connect Office 365
           </Button>
           <Button
             variant="contained"
@@ -528,6 +720,8 @@ const ExternalConnectionsSettings = () => {
               {emailConnections.map((conn) => (
                 <ListItem
                   key={conn.id}
+                  alignItems="flex-start"
+                  sx={{ flexWrap: 'wrap' }}
                   secondaryAction={
                     <>
                       {conn.provider === 'microsoft' && (
@@ -559,16 +753,174 @@ const ExternalConnectionsSettings = () => {
                     </>
                   }
                 >
+                  {conn.provider === 'microsoft' && (
+                    <ListItemIcon sx={{ minWidth: 40, mt: 0.25, alignSelf: 'flex-start' }}>
+                      <Tooltip
+                        title={
+                          m365ServicesExpanded[conn.id]
+                            ? 'Hide Microsoft 365 services'
+                            : 'Manage Microsoft 365 services'
+                        }
+                      >
+                        <IconButton
+                          size="small"
+                          edge="start"
+                          aria-expanded={Boolean(m365ServicesExpanded[conn.id])}
+                          aria-controls={`m365-services-${conn.id}`}
+                          aria-label="Microsoft 365 services"
+                          onClick={() =>
+                            setM365ServicesExpanded((prev) => ({
+                              ...prev,
+                              [conn.id]: !prev[conn.id],
+                            }))
+                          }
+                        >
+                          {m365ServicesExpanded[conn.id] ? (
+                            <ExpandLessIcon fontSize="small" />
+                          ) : (
+                            <ExpandMoreIcon fontSize="small" />
+                          )}
+                        </IconButton>
+                      </Tooltip>
+                    </ListItemIcon>
+                  )}
                   <ListItemText
+                    sx={{ flex: '1 1 auto', minWidth: 0 }}
                     primary={conn.display_name || conn.account_identifier}
-                    secondary={`${conn.provider} · ${conn.account_identifier}${conn.connection_status ? ` · ${conn.connection_status}` : ''}`}
+                    secondary={
+                      <>
+                        {`${conn.provider} · ${conn.account_identifier}${
+                          conn.connection_status ? ` · ${conn.connection_status}` : ''
+                        }`}
+                        {conn.provider === 'microsoft' && Array.isArray(conn.enabled_services) && conn.enabled_services.length > 0 ? (
+                          <>
+                            <br />
+                            <Typography component="span" variant="caption" color="text.secondary">
+                              Enabled: {conn.enabled_services.join(', ')}
+                            </Typography>
+                          </>
+                        ) : null}
+                      </>
+                    }
                   />
+                  {conn.provider === 'microsoft' && (
+                    <Collapse
+                      in={Boolean(m365ServicesExpanded[conn.id])}
+                      timeout="auto"
+                      sx={{ flexBasis: '100%', width: '100%' }}
+                    >
+                      <Box
+                        id={`m365-services-${conn.id}`}
+                        sx={{ pt: 1, pb: 1, pl: { xs: 1, sm: 2 }, maxWidth: 720 }}
+                      >
+                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                          Microsoft 365 services (save applies; extra permissions may open sign-in again)
+                        </Typography>
+                        {m365ServicesLoading && !m365ConnServices[conn.id] ? (
+                          <CircularProgress size={22} />
+                        ) : (
+                          <>
+                            <Grid container spacing={0.5} sx={{ maxWidth: 720 }}>
+                              {M365_SERVICE_OPTIONS.map((opt) => {
+                                const row = m365ConnServices[conn.id];
+                                const checked = row?.enabled?.includes(opt.key) ?? false;
+                                const allowed = !row?.available?.length || row.available.includes(opt.key);
+                                return (
+                                  <Grid item xs={6} sm={4} md={3} key={opt.key}>
+                                    <FormControlLabel
+                                      control={
+                                        <Checkbox
+                                          size="small"
+                                          checked={checked}
+                                          disabled={!allowed}
+                                          onChange={() => toggleM365ConnService(conn.id, opt.key)}
+                                        />
+                                      }
+                                      label={opt.label}
+                                    />
+                                  </Grid>
+                                );
+                              })}
+                            </Grid>
+                            {(m365ConnServices[conn.id]?.enabled || []).includes('devops') && (
+                              <Box sx={{ mt: 1.5, display: 'flex', alignItems: 'center', gap: 1, maxWidth: 480 }}>
+                                <TextField
+                                  size="small"
+                                  label="Azure DevOps Organization"
+                                  placeholder="e.g. my-org"
+                                  value={devopsOrgNames[conn.id] || ''}
+                                  onChange={(e) =>
+                                    setDevopsOrgNames((prev) => ({ ...prev, [conn.id]: e.target.value }))
+                                  }
+                                  sx={{ flex: 1 }}
+                                  helperText="Your Azure DevOps organization name (from dev.azure.com/{org})"
+                                />
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  onClick={() => saveDevopsOrg(conn.id)}
+                                  disabled={devopsOrgSaving === conn.id}
+                                >
+                                  {devopsOrgSaving === conn.id ? 'Saving…' : 'Save'}
+                                </Button>
+                              </Box>
+                            )}
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              sx={{ mt: 1 }}
+                              onClick={() => saveMicrosoftServices(conn.id)}
+                              disabled={m365SavingId === conn.id}
+                            >
+                              {m365SavingId === conn.id ? 'Saving…' : 'Save services'}
+                            </Button>
+                          </>
+                        )}
+                      </Box>
+                    </Collapse>
+                  )}
                 </ListItem>
               ))}
             </List>
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={m365ConnectDialogOpen} onClose={() => !connecting && setM365ConnectDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Connect Office 365</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" paragraph>
+            Choose which Microsoft 365 services this connection may use. You can add more later by expanding the account row and editing services.
+          </Typography>
+          {M365_SERVICE_OPTIONS.map((opt) => (
+            <FormControlLabel
+              key={opt.key}
+              control={
+                <Checkbox
+                  checked={m365ConnectSelections.has(opt.key)}
+                  onChange={() => {
+                    setM365ConnectSelections((prev) => {
+                      const n = new Set(prev);
+                      if (n.has(opt.key)) n.delete(opt.key);
+                      else n.add(opt.key);
+                      return n;
+                    });
+                  }}
+                />
+              }
+              label={opt.label}
+            />
+          ))}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setM365ConnectDialogOpen(false)} disabled={connecting}>
+            Cancel
+          </Button>
+          <Button variant="contained" onClick={handleConfirmM365Connect} disabled={connecting || m365ConnectSelections.size === 0}>
+            {connecting ? 'Redirecting…' : 'Continue to Microsoft'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Divider sx={{ my: 2 }} />
       <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -614,6 +966,111 @@ const ExternalConnectionsSettings = () => {
                   <ListItemText
                     primary={conn.display_name || conn.account_identifier}
                     secondary={`${conn.provider} · ${conn.account_identifier}`}
+                  />
+                </ListItem>
+              ))}
+            </List>
+          )}
+        </CardContent>
+      </Card>
+
+      <Divider sx={{ my: 2 }} />
+      <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <HubIcon /> GitHub
+      </Typography>
+      <Typography variant="body2" color="text.secondary" paragraph>
+        Connect GitHub so agents can read repositories, pull requests, issues, and code via the GitHub API. Bind accounts in Agent
+        Factory to grant specific agents access. Configure GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET on the server.
+      </Typography>
+      <Card sx={{ mb: 2 }}>
+        <CardContent>
+          <Button
+            variant="contained"
+            onClick={handleConnectGitHub}
+            disabled={githubConnecting}
+            startIcon={githubConnecting ? <CircularProgress size={20} /> : null}
+          >
+            {githubConnecting ? 'Redirecting…' : 'Connect GitHub'}
+          </Button>
+          {loading ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body2">Loading…</Typography>
+            </Box>
+          ) : githubConnections.length === 0 ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              No GitHub accounts connected yet.
+            </Typography>
+          ) : (
+            <List dense sx={{ mt: 2 }}>
+              {githubConnections.map((conn) => (
+                <ListItem
+                  key={conn.id}
+                  secondaryAction={
+                    <IconButton
+                      edge="end"
+                      aria-label="Disconnect"
+                      onClick={() => handleDisconnect(conn.id)}
+                      disabled={disconnectingId === conn.id}
+                    >
+                      {disconnectingId === conn.id ? <CircularProgress size={20} /> : <LinkOffIcon />}
+                    </IconButton>
+                  }
+                >
+                  <ListItemText
+                    primary={conn.display_name || conn.account_identifier}
+                    secondary={`@${conn.account_identifier}${conn.connection_status ? ` · ${conn.connection_status}` : ''}`}
+                  />
+                </ListItem>
+              ))}
+            </List>
+          )}
+        </CardContent>
+      </Card>
+
+      <Divider sx={{ my: 2 }} />
+      <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <HubIcon /> Gitea
+      </Typography>
+      <Typography variant="body2" color="text.secondary" paragraph>
+        Connect a self-hosted Gitea instance with a personal access token. Use your server URL (for example{' '}
+        <Box component="span" sx={{ fontFamily: 'monospace', fontSize: '0.85em' }}>https://git.example.com</Box>
+        ); <Box component="span" sx={{ fontFamily: 'monospace', fontSize: '0.85em' }}>/api/v1</Box> is added if omitted. Bind the
+        Gitea tool pack in Agent Factory and select this connection.
+      </Typography>
+      <Card sx={{ mb: 2 }}>
+        <CardContent>
+          <Button variant="contained" onClick={() => setGiteaDialogOpen(true)} disabled={giteaConnecting}>
+            Connect Gitea
+          </Button>
+          {loading ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body2">Loading…</Typography>
+            </Box>
+          ) : giteaConnections.length === 0 ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
+              No Gitea instances connected yet.
+            </Typography>
+          ) : (
+            <List dense sx={{ mt: 2 }}>
+              {giteaConnections.map((conn) => (
+                <ListItem
+                  key={conn.id}
+                  secondaryAction={
+                    <IconButton
+                      edge="end"
+                      aria-label="Disconnect"
+                      onClick={() => handleDisconnect(conn.id)}
+                      disabled={disconnectingId === conn.id}
+                    >
+                      {disconnectingId === conn.id ? <CircularProgress size={20} /> : <LinkOffIcon />}
+                    </IconButton>
+                  }
+                >
+                  <ListItemText
+                    primary={conn.display_name || conn.account_identifier}
+                    secondary={`${conn.account_identifier}${conn.connection_status ? ` · ${conn.connection_status}` : ''}`}
                   />
                 </ListItem>
               ))}
@@ -1051,6 +1508,51 @@ const ExternalConnectionsSettings = () => {
           <Button onClick={() => setCaldavDialogOpen(false)} disabled={caldavConnecting}>Cancel</Button>
           <Button onClick={handleConnectCaldav} variant="contained" disabled={caldavConnecting || !caldavUrl.trim() || !caldavUsername.trim() || !caldavPassword}>
             {caldavConnecting ? 'Connecting…' : 'Connect'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={giteaDialogOpen} onClose={() => !giteaConnecting && setGiteaDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Connect Gitea</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" paragraph>
+            Create a personal access token in Gitea (Settings → Applications). Grant at least read access to repositories as needed.
+          </Typography>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Gitea server URL"
+            fullWidth
+            value={giteaApiBaseUrl}
+            onChange={(e) => setGiteaApiBaseUrl(e.target.value)}
+            placeholder="https://git.example.com"
+          />
+          <TextField
+            margin="dense"
+            label="Personal access token"
+            type="password"
+            fullWidth
+            value={giteaPat}
+            onChange={(e) => setGiteaPat(e.target.value)}
+          />
+          <TextField
+            margin="dense"
+            label="Display name (optional)"
+            fullWidth
+            value={giteaDisplayName}
+            onChange={(e) => setGiteaDisplayName(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setGiteaDialogOpen(false)} disabled={giteaConnecting}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleConnectGitea}
+            variant="contained"
+            disabled={giteaConnecting || !giteaApiBaseUrl.trim() || !giteaPat.trim()}
+          >
+            {giteaConnecting ? 'Connecting…' : 'Connect'}
           </Button>
         </DialogActions>
       </Dialog>

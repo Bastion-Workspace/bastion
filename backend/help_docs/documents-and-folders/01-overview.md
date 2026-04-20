@@ -66,6 +66,7 @@ Uploaded files appear in that folder. Supported types (e.g. `.md`, `.org`, `.txt
 - **New Markdown** / **New Org-Mode** — Create a new file in this folder.
 - **Add RSS Feed** — (Only in RSS sections) Add a feed to the list.
 - **Rename** / **Move** / **Delete** — For non-root, non-team-root folders.
+- **Sharing…** — (User-owned folders) Open sharing to grant read or write access to specific users.
 - **Search** — Submenu: **Exempt from search**, **Include in search**, or **Use parent setting** (whether files in this folder are indexed for search).
 - On **Global Documents** root (admins only): **New Global Folder**. On **My Documents** root: **New User Folder**.
 
@@ -75,9 +76,21 @@ Uploaded files appear in that folder. Supported types (e.g. `.md`, `.org`, `.txt
 - **Re-process Document** — Re-run processing (e.g. indexing) for this file.
 - **Edit Metadata** — (Non-images) Edit document metadata (admins for global files).
 - **Rename** / **Move** / **Delete** — Change name, move to another folder, or remove the file.
+- **Sharing…** — (User-owned files) Grant or revoke read/write access for individual users.
 - **Search** — Submenu: **Exempt from search** or **Include in search** (include or exclude this file from search indexing).
 
 Details and permissions (e.g. who can delete team folders or edit global metadata) are in **Folders**.
+
+---
+
+## Shared with me
+
+When another user shares a file or folder with you, it appears in **Shared with me** in the Document Library sidebar:
+
+- Items are grouped by the person who shared them.
+- You see whether each item is **Read only** or **Can edit**.
+- Shared folders can be expanded to browse and open files inside.
+- Your available actions depend on the access level the owner granted.
 
 ---
 
@@ -87,6 +100,12 @@ The library supports **Markdown** (`.md`) and **Org Mode** (`.org`) as first-cla
 
 - **Markdown** — Simple formatting, headers, lists, and links. Good for notes, docs, and wikis. See **Markdown files**.
 - **Org Mode** — Headings, TODOs, schedules, contacts, and tags. TODOs and other structures are cataloged and available in the **All TODOs** view and in tools (e.g. list todos, toggle state). See **Org Mode files** and **File types: Markdown and Org Mode**.
+
+---
+
+## Password-protecting files (encryption)
+
+For sensitive **Markdown, plain text, or Org** files, you can **encrypt** them from the folder tree (right‑click → **Encrypt file…**). Encrypted files stay out of search until you unlock them in the editor, and each file has its own password. See the Help topic **Document encryption** for sessions, multiple tabs, lock behavior, and limitations (collaboration, PDF download, etc.).
 
 ---
 

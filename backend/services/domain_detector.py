@@ -1,5 +1,5 @@
 """
-Domain Detector Service - Roosevelt's "Domain Intelligence" 
+Domain detector for query routing
 Detects which domain(s) a document belongs to based on tags and category
 """
 
@@ -32,7 +32,7 @@ class DomainDetector:
     """
     Detects document domains and identifies when domain changes occur
     
-    **BULLY!** Extensible for entertainment, business, research, and future domains!
+    Pluggable domain classifiers for query routing.
     """
     
     def __init__(self):

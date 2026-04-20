@@ -10,6 +10,7 @@ from typing import Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 
 from services.celery_app import celery_app
+from services.stream_run_cancel import is_stream_run_id, set_stream_cancel_requested
 from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
 
 
@@ -26,24 +27,27 @@ async def cancel_unified_job(
 ) -> Dict[str, Any]:
     """Cancel a unified chat job.
 
-    Frontend issues requests to `/api/v2/chat/unified/job/{job_id}/cancel` for both
-    streaming and background jobs. We handle both forms here:
-
-    - Streaming jobs typically have IDs like `streaming_<timestamp>`; client disconnect
-      cancels server streaming naturally, so we acknowledge cancellation.
-    - Background jobs (Celery task IDs) are revoked via Celery control.
+    - Interactive chat streaming: ``job_id`` is a server-issued UUID (``run_started`` SSE).
+      Sets a Redis flag consumed by the gRPC stream proxy to cancel the orchestrator RPC.
+    - Background jobs: non-UUID task ids are revoked via Celery control.
     """
     try:
         logger.info(f"🛑 Unified job cancel requested by user {current_user.user_id}: {job_id}")
 
-        # Heuristic: streaming jobs use a `streaming_` prefix from the frontend
-        if job_id.startswith("streaming_"):
-            logger.info("🔌 Streaming job cancellation acknowledged (client will disconnect stream)")
+        if is_stream_run_id(job_id):
+            ok = await set_stream_cancel_requested(job_id)
+            if ok:
+                return {
+                    "success": True,
+                    "job_id": job_id,
+                    "status": "CANCELLED",
+                    "message": "Stream cancellation requested",
+                }
             return {
-                "success": True,
+                "success": False,
                 "job_id": job_id,
-                "status": "CANCELLED",
-                "message": "Streaming job cancellation acknowledged"
+                "status": "ERROR",
+                "message": "Could not record stream cancellation (Redis unavailable)",
             }
 
         # Attempt to revoke as a Celery task

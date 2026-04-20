@@ -19,18 +19,6 @@ from services.prompt_service import prompt_service
 logger = logging.getLogger(__name__)
 
 
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Cosine similarity between two vectors. Returns 0 if either has zero norm."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a <= 0 or norm_b <= 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
 async def _build_user_memory_for_prompt(user_id: str, grpc_request) -> str:
     """
     Single USER MEMORY block: facts + episodic activity, one query embedding when pruning.
@@ -64,41 +52,21 @@ async def _build_user_memory_for_prompt(user_id: str, grpc_request) -> str:
     if total > 15 and query:
         try:
             from services.embedding_service_wrapper import get_embedding_service
+            from services.fact_theme_service import (
+                load_themes_for_user,
+                select_episodes_for_query,
+                select_facts_for_query,
+            )
 
             emb_svc = await get_embedding_service()
             query_embeddings = await emb_svc.generate_embeddings([query])
             qvec = query_embeddings[0] if query_embeddings else None
             if qvec:
-                ranked: List[tuple] = []
-                for f in facts:
-                    emb = f.get("embedding")
-                    if emb:
-                        s = _cosine_similarity(emb, qvec)
-                        if s >= 0.32:
-                            ranked.append(("fact", f, s))
-                for e in episodes:
-                    emb = e.get("embedding")
-                    if emb:
-                        s = _cosine_similarity(emb, qvec)
-                        if e.get("is_aged"):
-                            s *= 0.88
-                        if s >= 0.28:
-                            ranked.append(("episode", e, s))
-                ranked.sort(key=lambda x: -x[2])
-                facts_sel = []
-                episodes_sel = []
-                max_f, max_e = 12, 6
-                for kind, obj, _s in ranked:
-                    if kind == "fact" and len(facts_sel) < max_f and obj not in facts_sel:
-                        facts_sel.append(obj)
-                    elif kind == "episode" and len(episodes_sel) < max_e and obj not in episodes_sel:
-                        episodes_sel.append(obj)
-                for f in facts:
-                    if not f.get("embedding") and f not in facts_sel:
-                        facts_sel.append(f)
-                for e in episodes:
-                    if not e.get("embedding") and e not in episodes_sel:
-                        episodes_sel.append(e)
+                themes = await load_themes_for_user(user_id)
+                facts_sel = select_facts_for_query(
+                    facts, themes, qvec, use_themed_memory=True
+                )
+                episodes_sel = select_episodes_for_query(episodes, qvec)
         except Exception as emb_err:
             logger.warning("USER MEMORY: relevance filter failed, using full lists: %s", emb_err)
 
@@ -163,21 +131,23 @@ async def _inject_line_capability_metadata(
     line_id: str,
     member_agent_profile_id: str,
 ) -> None:
-    """Inject team tool packs, reference config, and membership additional_tools for a line member."""
+    """Inject team skill IDs, reference config, and membership additional_tools for a line member."""
     import json as _json
 
     try:
         from services.database_manager.database_helpers import fetch_one
-        from services.agent_line_service import _normalize_pack_entries
 
         team_row = await fetch_one(
             "SELECT team_tool_packs, team_skill_ids, reference_config, data_workspace_config FROM agent_lines WHERE id = $1",
             str(line_id),
         )
         if team_row:
-            raw = team_row.get("team_tool_packs") or []
-            grpc_request.metadata["team_tool_packs"] = _json.dumps(_normalize_pack_entries(raw))
             grpc_request.metadata["team_skill_ids"] = _json.dumps(team_row.get("team_skill_ids") or [])
+            # Backward compat: still send team_tool_packs for old orchestrator builds
+            if team_row.get("team_tool_packs"):
+                from services.agent_line_service import _normalize_pack_entries
+                raw = team_row.get("team_tool_packs") or []
+                grpc_request.metadata["team_tool_packs"] = _json.dumps(_normalize_pack_entries(raw))
             ref_cfg = team_row.get("reference_config") or {}
             if isinstance(ref_cfg, str):
                 try:
@@ -256,7 +226,7 @@ async def _apply_profile_model_preference(
                 requested_model=requested,
                 effective_model=effective,
             )
-        logger.info("CONTEXT: Using Agent Factory profile model (soft retarget): %s", effective)
+        logger.debug("CONTEXT: Using Agent Factory profile model (soft retarget): %s", effective)
         return
 
     await persist_agent_profile_model_preference(user_id, profile_id, None)
@@ -395,7 +365,7 @@ class GRPCContextGatherer:
             Fully populated ChatRequest proto message
         """
         try:
-            logger.info(f"🔧 CONTEXT GATHERER: Building gRPC request for user {user_id}")
+            logger.debug(f"🔧 CONTEXT GATHERER: Building gRPC request for user {user_id}")
             
             # Create base request with core fields
             grpc_request = orchestrator_pb2.ChatRequest(
@@ -409,19 +379,60 @@ class GRPCContextGatherer:
             # Add routing control if specified
             if agent_type:
                 grpc_request.agent_type = agent_type
-                logger.info(f"🎯 CONTEXT GATHERER: Explicit routing to {agent_type}")
+                logger.debug(f"🎯 CONTEXT GATHERER: Explicit routing to {agent_type}")
 
             if routing_reason:
                 grpc_request.routing_reason = routing_reason
 
             # Initialize request context if not provided
             request_context = request_context or {}
+            _client_run_id = str(request_context.get("client_run_id") or "").strip()
+            if _client_run_id:
+                grpc_request.metadata["client_run_id"] = _client_run_id
             # Canonical key for agent line UUID is line_id; accept legacy team_id from older callers.
             _line = request_context.get("line_id") or request_context.get("team_id")
             if _line:
                 _line = str(_line).strip()
                 request_context["line_id"] = _line
                 request_context["team_id"] = _line  # mirror for legacy metadata consumers
+
+            cw_id = (request_context.get("code_workspace_id") or "").strip()
+            if cw_id:
+                try:
+                    from services.database_manager.database_helpers import fetch_one
+
+                    cw_row = await fetch_one(
+                        """
+                        SELECT settings, workspace_path, device_id
+                        FROM code_workspaces
+                        WHERE id = $1::uuid AND user_id = $2
+                        """,
+                        cw_id,
+                        user_id,
+                        rls_context={"user_id": user_id, "user_role": "user"},
+                    )
+                    if cw_row:
+                        grpc_request.metadata["code_workspace_id"] = cw_id
+                        cw_settings = cw_row.get("settings") or {}
+                        if isinstance(cw_settings, str):
+                            try:
+                                cw_settings = json.loads(cw_settings)
+                            except (TypeError, ValueError):
+                                cw_settings = {}
+                        if not isinstance(cw_settings, dict):
+                            cw_settings = {}
+                        cw_rules = (cw_settings.get("rules_text") or "").strip()
+                        if cw_rules:
+                            grpc_request.metadata["code_workspace_rules"] = cw_rules
+                        cw_path = (cw_row.get("workspace_path") or "").strip()
+                        if cw_path:
+                            grpc_request.metadata["code_workspace_path"] = cw_path
+                        cw_dev = (cw_row.get("device_id") or "").strip()
+                        if cw_dev:
+                            grpc_request.metadata["code_workspace_device_id"] = cw_dev
+                except Exception as e:
+                    if "column" not in str(e).lower() and "does not exist" not in str(e).lower():
+                        logger.warning("Failed to load code workspace context: %s", e)
 
             # Check if models are properly configured
             models_configured = request_context.get("models_configured", True)  # Default to True for backward compatibility
@@ -486,10 +497,10 @@ class GRPCContextGatherer:
                     if profile_row:
                         if profile_row.get("chat_history_enabled") and profile_row.get("chat_history_lookback") is not None:
                             context_limit = int(profile_row["chat_history_lookback"])
-                            logger.info("CONTEXT: Using custom agent chat_history_lookback: %s", context_limit)
+                            logger.debug("CONTEXT: Using custom agent chat_history_lookback: %s", context_limit)
                         elif profile_row.get("chat_history_enabled") is False:
                             context_limit = 0
-                            logger.info("CONTEXT: Agent profile has chat_history_enabled=False, sending no history")
+                            logger.debug("CONTEXT: Agent profile has chat_history_enabled=False, sending no history")
                 except Exception as e:
                     if "does not exist" not in str(e).lower() and "relation" not in str(e).lower():
                         logger.warning("Failed to load agent profile chat_history_lookback: %s", e)
@@ -525,10 +536,11 @@ class GRPCContextGatherer:
                             str(line_id),
                         )
                         if team_row:
-                            from services.agent_line_service import _normalize_pack_entries
-                            raw = team_row.get("team_tool_packs") or []
-                            grpc_request.metadata["team_tool_packs"] = _json.dumps(_normalize_pack_entries(raw))
                             grpc_request.metadata["team_skill_ids"] = _json.dumps(team_row.get("team_skill_ids") or [])
+                            if team_row.get("team_tool_packs"):
+                                from services.agent_line_service import _normalize_pack_entries
+                                raw = team_row.get("team_tool_packs") or []
+                                grpc_request.metadata["team_tool_packs"] = _json.dumps(_normalize_pack_entries(raw))
                             ref_cfg = team_row.get("reference_config") or {}
                             if isinstance(ref_cfg, str):
                                 try:
@@ -618,7 +630,7 @@ class GRPCContextGatherer:
                             clear_agent_profile_id=True,
                             clear_active_line=True,
                         )
-                        logger.info("CONTEXT GATHERER: @auto cleared sticky agent and line routing for conversation %s", grpc_request.conversation_id)
+                        logger.debug("CONTEXT GATHERER: @auto cleared sticky agent and line routing for conversation %s", grpc_request.conversation_id)
                     except Exception as e:
                         logger.warning("Failed to clear agent routing for @auto: %s", e)
                 else:
@@ -630,7 +642,7 @@ class GRPCContextGatherer:
                             grpc_request.metadata["agent_profile_id"] = profile_id
                             grpc_request.metadata["resolved_agent_handle"] = handle
                             grpc_request.query = query_stripped[mention_match.end() :].strip()
-                            logger.info("CONTEXT GATHERER: Resolved @%s to agent_profile_id=%s", handle, profile_id)
+                            logger.debug("CONTEXT GATHERER: Resolved @%s to agent_profile_id=%s", handle, profile_id)
                             try:
                                 from services.database_manager.database_helpers import fetch_all
                                 import json as _json
@@ -676,11 +688,11 @@ class GRPCContextGatherer:
                                     if profile_row.get("chat_history_enabled") and profile_row.get("chat_history_lookback") is not None:
                                         context_limit = int(profile_row["chat_history_lookback"])
                                         grpc_request.metadata["context_window_size"] = str(context_limit)
-                                        logger.info("CONTEXT: Using custom agent chat_history_lookback (from @mention): %s", context_limit)
+                                        logger.debug("CONTEXT: Using custom agent chat_history_lookback (from @mention): %s", context_limit)
                                     elif profile_row.get("chat_history_enabled") is False:
                                         context_limit = 0
                                         grpc_request.metadata["context_window_size"] = "0"
-                                        logger.info("CONTEXT: @mention profile has chat_history_enabled=False, sending no history")
+                                        logger.debug("CONTEXT: @mention profile has chat_history_enabled=False, sending no history")
                             except Exception as e:
                                 if "does not exist" not in str(e).lower() and "relation" not in str(e).lower():
                                     logger.warning("Failed to load agent profile chat_history_lookback: %s", e)
@@ -697,11 +709,19 @@ class GRPCContextGatherer:
                                 except Exception as e:
                                     logger.warning("Failed to load team chat context for @%s: %s", handle, e)
                                     grpc_request.metadata["team_chat_context"] = "Team context unavailable."
-                                logger.info("CONTEXT GATHERER: Resolved @%s to team_context_id=%s", handle, team_id)
+                                logger.debug("CONTEXT GATHERER: Resolved @%s to team_context_id=%s", handle, team_id)
                                 ceo = await agent_line_service.get_ceo_agent_for_heartbeat(team_id)
                                 if ceo and ceo.get("agent_profile_id"):
                                     grpc_request.metadata["line_dispatch_mode"] = "true"
                                     grpc_request.metadata["ceo_profile_id"] = str(ceo["agent_profile_id"])
+                                    try:
+                                        gmode = await agent_line_service.get_line_dispatch_mode(
+                                            str(team_id), user_id
+                                        )
+                                        grpc_request.metadata["line_governance_mode"] = gmode
+                                    except Exception as gm_err:
+                                        logger.debug("line_governance_mode: %s", gm_err)
+                                        grpc_request.metadata["line_governance_mode"] = "hierarchical"
                                     grpc_request.metadata["line_id"] = str(team_id)
                                     grpc_request.metadata["team_id"] = str(team_id)
                                     await _inject_line_capability_metadata(
@@ -749,8 +769,32 @@ class GRPCContextGatherer:
                                             _build_heartbeat_context,
                                         )
 
+                                        line_row = await agent_line_service.get_line(str(team_id), user_id)
+                                        gmode = agent_line_service.normalize_governance_mode(
+                                            (line_row or {}).get("governance_mode")
+                                        )
+                                        gov = (line_row or {}).get("governance_policy") or {}
+                                        if not isinstance(gov, dict):
+                                            gov = {}
+                                        ridx = None
+                                        qpct = None
+                                        if gmode == "round_robin":
+                                            try:
+                                                ridx = int(gov.get("current_leader_idx") or 0)
+                                            except (TypeError, ValueError):
+                                                ridx = 0
+                                        if gmode == "consensus" and gov.get("quorum_pct") is not None:
+                                            try:
+                                                qpct = int(gov.get("quorum_pct"))
+                                            except (TypeError, ValueError):
+                                                qpct = None
                                         hb = await _build_heartbeat_context(
-                                            str(team_id), user_id, str(ceo["agent_profile_id"])
+                                            str(team_id),
+                                            user_id,
+                                            str(ceo["agent_profile_id"]),
+                                            governance_mode=gmode,
+                                            rotation_cycle_index=ridx,
+                                            quorum_pct=qpct,
                                         )
                                         grpc_request.metadata["line_dispatch_briefing"] = hb
                                         grpc_request.metadata["line_dispatch_tool_rules"] = TEAM_TOOL_IDS_RULE
@@ -788,7 +832,7 @@ class GRPCContextGatherer:
             messages_data: Optional[Dict[str, Any]] = None
             if request_context.get("active_path_messages") is not None:
                 messages_data = {"messages": list(request_context["active_path_messages"])}
-                logger.info(
+                logger.debug(
                     "CONTEXT: Using active_path_messages override (%s messages) for conversation %s",
                     len(messages_data["messages"]),
                     conversation_id,
@@ -806,7 +850,7 @@ class GRPCContextGatherer:
                         most_recent=True,
                     )
                     if messages_data and messages_data.get("messages"):
-                        logger.info(
+                        logger.debug(
                             "CONTEXT: Loaded %s messages from database for conversation %s",
                             len(messages_data["messages"]),
                             conversation_id,
@@ -856,7 +900,7 @@ class GRPCContextGatherer:
             
             # === PRIMARY AGENT SELECTED (for conversation continuity) ===
             await self._add_primary_agent_selected(grpc_request, state)
-            
+
             # Log summary
             self._log_context_summary(grpc_request)
             
@@ -889,7 +933,7 @@ class GRPCContextGatherer:
                 messages = state["messages"]
             elif messages_data and "messages" in messages_data:
                 messages = self._parse_message_dicts_to_langchain(messages_data["messages"])
-                logger.info("CONTEXT: Added %s messages to history (from shared messages_data)", len(messages))
+                logger.debug("CONTEXT: Added %s messages to history (from shared messages_data)", len(messages))
             else:
                 try:
                     from services.conversation_service import ConversationService
@@ -904,7 +948,7 @@ class GRPCContextGatherer:
                     )
                     if loaded and "messages" in loaded:
                         messages = self._parse_message_dicts_to_langchain(loaded["messages"])
-                        logger.info("CONTEXT: Loaded %s messages from database for conversation %s", len(messages), conversation_id)
+                        logger.debug("CONTEXT: Loaded %s messages from database for conversation %s", len(messages), conversation_id)
                 except Exception as db_error:
                     logger.warning("CONTEXT: Failed to load conversation history from database: %s", db_error)
 
@@ -916,10 +960,7 @@ class GRPCContextGatherer:
                 recent_messages = messages
 
             self._append_langchain_messages_to_proto(grpc_request, recent_messages)
-            
-            if len(grpc_request.conversation_history) > 0:
-                logger.info(f"✅ CONTEXT: Added {len(grpc_request.conversation_history)} messages to history")
-            
+
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add conversation history: {e}")
     
@@ -944,7 +985,7 @@ class GRPCContextGatherer:
                 attached_images = [{"data": a.get("base64_data"), "base64": a.get("base64_data")} for a in attachments if a.get("base64_data")]
                 if attached_images:
                     grpc_request.metadata["attached_images"] = json.dumps(attached_images)
-                logger.info(f"✅ CONTEXT: Added {len(attachments)} attachment(s) from latest message")
+                logger.debug(f"✅ CONTEXT: Added {len(attachments)} attachment(s) from latest message")
             else:
                 logger.debug("📎 CONTEXT: No attachments found in latest message")
                 
@@ -1034,7 +1075,7 @@ class GRPCContextGatherer:
                 logger.debug(f"message_attachments table not available or query failed: {e}")
 
             if attachments:
-                logger.info(f"Found {len(attachments)} attachment(s) from conversation_message_attachments")
+                logger.debug(f"Found {len(attachments)} attachment(s) from conversation_message_attachments")
                 return attachments
 
             metadata_json = None
@@ -1074,12 +1115,71 @@ class GRPCContextGatherer:
                     "base64_data": base64_data,
                     "uploaded_at": att.get("uploaded_at", ""),
                 })
-            logger.info(f"Found {len(result)} attachment(s) in latest user message metadata")
+            logger.debug(f"Found {len(result)} attachment(s) in latest user message metadata")
             return result
 
         except Exception as e:
             logger.warning(f"Failed to extract attachments from latest message: {e}")
             return []
+
+    async def _apply_agent_profile_persona_override(
+        self,
+        grpc_request: orchestrator_pb2.ChatRequest,
+        user_id: str,
+        timezone: str,
+    ) -> None:
+        """If the effective agent profile uses a specific persona, override request.persona."""
+        try:
+            md = dict(grpc_request.metadata or {})
+            effective_pid = (md.get("agent_profile_id") or md.get("default_agent_profile_id") or "").strip()
+            if not effective_pid:
+                return
+            from services.database_manager.database_helpers import fetch_one
+            from services.settings_service import settings_service
+
+            prow = await fetch_one(
+                """
+                SELECT persona_mode, persona_id FROM agent_profiles
+                WHERE id = $1::uuid AND user_id = $2
+                LIMIT 1
+                """,
+                effective_pid,
+                user_id,
+            )
+            if not prow:
+                return
+            mode = (prow.get("persona_mode") or "none").strip().lower()
+            if mode != "specific" or not prow.get("persona_id"):
+                return
+            sp = await settings_service.get_persona_by_id(str(prow["persona_id"]), user_id)
+            if not sp:
+                logger.warning(
+                    "CONTEXT: agent profile %s references persona_id %s but persona not found; keeping prior persona",
+                    effective_pid,
+                    prow.get("persona_id"),
+                )
+                return
+            tz = timezone or "UTC"
+            grpc_request.persona.ai_name = sp.get("ai_name") or "Alex"
+            grpc_request.persona.persona_style = (
+                (sp.get("name") or "professional").replace(" ", "_").lower()[:50]
+            )
+            grpc_request.persona.political_bias = sp.get("political_bias") or "neutral"
+            grpc_request.persona.timezone = tz
+            try:
+                grpc_request.persona.custom_preferences.clear()
+            except Exception:
+                pass
+            style_instruction = sp.get("style_instruction")
+            if style_instruction:
+                grpc_request.persona.custom_preferences["style_instruction"] = style_instruction
+            logger.debug(
+                "CONTEXT: Applied agent profile %s specific persona (ai_name=%s)",
+                effective_pid,
+                sp.get("ai_name"),
+            )
+        except Exception as e:
+            logger.warning("CONTEXT: agent profile persona override failed: %s", e)
     
     async def _add_user_persona(
         self,
@@ -1093,6 +1193,106 @@ class GRPCContextGatherer:
             from services.settings_service import settings_service
             timezone = await settings_service.get_user_timezone(user_id)
             grpc_request.metadata["user_timezone"] = timezone or "UTC"
+            try:
+                from services.database_manager.database_helpers import fetch_all
+
+                conn_rows = await fetch_all(
+                    """
+                    SELECT id, provider, connection_type, account_identifier,
+                           display_name, provider_metadata
+                    FROM external_connections
+                    WHERE user_id = $1 AND is_active = true
+                    ORDER BY connection_type, id
+                    """,
+                    user_id,
+                )
+                from services.provider_capability_registry import expand_row_into_cmap_keys
+
+                cmap: Dict[str, List[Dict[str, Any]]] = {}
+                for r in conn_rows or []:
+                    ct = (r.get("connection_type") or "").strip()
+                    if not ct:
+                        continue
+                    prov = (r.get("provider") or "").strip()
+                    label = (
+                        (r.get("display_name") or r.get("account_identifier") or "").strip()
+                        or str(r.get("account_identifier") or "")
+                    )
+                    entry: Dict[str, Any] = {"id": int(r["id"]), "label": label}
+                    if ct == "code_platform":
+                        entry["provider"] = prov
+                    cmap.setdefault(ct, []).append(entry)
+                    meta = r.get("provider_metadata")
+                    parsed_meta: Dict[str, Any] = {}
+                    if isinstance(meta, dict):
+                        parsed_meta = meta
+                    elif isinstance(meta, str) and meta.strip():
+                        try:
+                            _pm = json.loads(meta)
+                            if isinstance(_pm, dict):
+                                parsed_meta = _pm
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    for extra_key in expand_row_into_cmap_keys(prov, ct, meta):
+                        enriched_entry = dict(entry)
+                        if extra_key == "devops":
+                            devops_org = (parsed_meta.get("devops_organization") or "").strip()
+                            if devops_org:
+                                enriched_entry["label"] = f"{label} (org: {devops_org})"
+                        cmap.setdefault(extra_key, []).append(enriched_entry)
+
+                def _dedupe_conn_entries(
+                    entries: List[Dict[str, Any]],
+                ) -> List[Dict[str, Any]]:
+                    seen_ids: set = set()
+                    out: List[Dict[str, Any]] = []
+                    for ent in entries or []:
+                        eid = ent.get("id")
+                        if eid is None or eid in seen_ids:
+                            continue
+                        seen_ids.add(eid)
+                        out.append(ent)
+                    return out
+
+                for _k in list(cmap.keys()):
+                    if cmap.get(_k):
+                        cmap[_k] = _dedupe_conn_entries(cmap[_k])
+                grpc_request.metadata["active_connections_map"] = json.dumps(cmap)
+                _db_row_ct = len(conn_rows or [])
+                if not cmap:
+                    logger.debug(
+                        "CONTEXT: active_connections_map empty (is_active rows from external_connections=%s)",
+                        _db_row_ct,
+                    )
+                else:
+                    _parts: List[str] = []
+                    for _ctype in sorted(cmap.keys()):
+                        _entries = [e for e in (cmap.get(_ctype) or []) if isinstance(e, dict)]
+                        if _ctype == "code_platform":
+                            _details = [
+                                f"id={e.get('id')},provider={(e.get('provider') or '?').strip() or '?'}"
+                                for e in _entries
+                            ]
+                            _parts.append(
+                                f"{_ctype}({len(_entries)}): [{', '.join(_details)}]"
+                            )
+                        else:
+                            _ids = [
+                                str(e.get("id"))
+                                for e in _entries
+                                if e.get("id") is not None
+                            ]
+                            _parts.append(
+                                f"{_ctype}({len(_entries)}): ids={','.join(_ids) if _ids else 'none'}"
+                            )
+                    logger.debug(
+                        "CONTEXT: active_connections_map (external_connections rows=%s): %s",
+                        _db_row_ct,
+                        "; ".join(_parts),
+                    )
+            except Exception as cmap_err:
+                if "does not exist" not in str(cmap_err).lower() and "relation" not in str(cmap_err).lower():
+                    logger.warning("CONTEXT: active_connections_map failed: %s", cmap_err)
             persona = await settings_service.get_default_persona(user_id)
             if persona:
                 grpc_request.persona.ai_name = persona.get("ai_name") or "Alex"
@@ -1102,20 +1302,24 @@ class GRPCContextGatherer:
                 style_instruction = persona.get("style_instruction")
                 if style_instruction:
                     grpc_request.persona.custom_preferences["style_instruction"] = style_instruction
-                logger.info(f"CONTEXT: Added persona (ai_name={persona.get('ai_name')})")
+                logger.debug(f"CONTEXT: Added persona (ai_name={persona.get('ai_name')})")
+
+            await self._apply_agent_profile_persona_override(
+                grpc_request, user_id, timezone or "UTC"
+            )
             
             preferred_name = await settings_service.get_user_preferred_name(user_id, fallback_to_display=True)
             birthday = await settings_service.get_user_birthday(user_id)
             ai_context = await settings_service.get_user_ai_context(user_id)
             if preferred_name:
                 grpc_request.metadata["user_preferred_name"] = preferred_name
-                logger.info(f"CONTEXT: Added preferred name: {preferred_name}")
+                logger.debug(f"CONTEXT: Added preferred name: {preferred_name}")
             if birthday:
                 grpc_request.metadata["user_birthday"] = birthday
-                logger.info("CONTEXT: Added user birthday")
+                logger.debug("CONTEXT: Added user birthday")
             if ai_context:
                 grpc_request.metadata["user_ai_context"] = ai_context
-                logger.info(f"CONTEXT: Added AI context ({len(ai_context)} chars)")
+                logger.debug(f"CONTEXT: Added AI context ({len(ai_context)} chars)")
         except Exception as e:
             logger.warning(f"CONTEXT: Failed to add user context: {e}")
 
@@ -1123,7 +1327,7 @@ class GRPCContextGatherer:
             mem = await _build_user_memory_for_prompt(user_id, grpc_request)
             if mem.strip():
                 grpc_request.metadata["user_memory"] = mem
-                logger.info("CONTEXT: Added unified user memory (%s chars)", len(mem))
+                logger.debug("CONTEXT: Added unified user memory (%s chars)", len(mem))
         except Exception as e:
             logger.warning("CONTEXT: Failed to add user memory: %s", e)
         
@@ -1224,13 +1428,12 @@ class GRPCContextGatherer:
 
             if chat_model:
                 grpc_request.metadata["user_chat_model"] = chat_model
-                logger.info("SENDING TO ORCHESTRATOR: user_chat_model = %s", chat_model)
             if fast_model:
                 grpc_request.metadata["user_fast_model"] = fast_model
             if image_model:
                 grpc_request.metadata["user_image_model"] = image_model
 
-            logger.info(
+            logger.debug(
                 "CONTEXT: Added model preferences (chat=%s, fast=%s, image=%s)",
                 chat_model,
                 fast_model,
@@ -1245,7 +1448,7 @@ class GRPCContextGatherer:
                     grpc_request.metadata["user_llm_base_url"] = llm_ctx["base_url"]
                     if llm_ctx.get("provider_type"):
                         grpc_request.metadata["user_llm_provider_type"] = llm_ctx["provider_type"]
-                    logger.info(
+                    logger.debug(
                         "CONTEXT: Injected credentials for chat model=%s",
                         llm_ctx.get("real_model_id", chat_model),
                     )
@@ -1272,7 +1475,7 @@ class GRPCContextGatherer:
             user_timezone = await settings_service.get_user_timezone(user_id)
             if user_timezone:
                 grpc_request.metadata["user_timezone"] = user_timezone
-                logger.info(f"CONTEXT: Added user timezone to metadata: {user_timezone}")
+                logger.debug(f"CONTEXT: Added user timezone to metadata: {user_timezone}")
         except Exception as e:
             logger.warning(f"CONTEXT: Failed to add user timezone: {e}")
 
@@ -1280,7 +1483,7 @@ class GRPCContextGatherer:
             user_zip = await settings_service.get_user_zip_code(user_id)
             if user_zip:
                 grpc_request.metadata["user_weather_location"] = user_zip
-                logger.info(f"CONTEXT: Added user_weather_location to metadata: {user_zip}")
+                logger.debug(f"CONTEXT: Added user_weather_location to metadata: {user_zip}")
         except Exception as e:
             logger.warning(f"CONTEXT: Failed to add user_weather_location: {e}")
 
@@ -1294,22 +1497,22 @@ class GRPCContextGatherer:
             active_editor = request_context.get("active_editor")
             editor_preference = request_context.get("editor_preference", "prefer")
             
-            logger.info(f"🔍 EDITOR CONTEXT CHECK: request_context keys={list(request_context.keys())}, active_editor={active_editor is not None}, editor_preference={editor_preference}")
+            logger.debug(f"🔍 EDITOR CONTEXT CHECK: request_context keys={list(request_context.keys())}, active_editor={active_editor is not None}, editor_preference={editor_preference}")
             
             # CRITICAL: Always send editor_preference in metadata, even when active_editor is not sent
             # This ensures the orchestrator can block editor-gated agents when preference is 'ignore'
             if editor_preference:
                 grpc_request.metadata["editor_preference"] = editor_preference
-                logger.info(f"📝 EDITOR PREFERENCE: Added to metadata = '{editor_preference}'")
+                logger.debug(f"📝 EDITOR PREFERENCE: Added to metadata = '{editor_preference}'")
             
             # Skip if user said to ignore editor (don't send active_editor, but editor_preference is already in metadata)
             if editor_preference == "ignore":
-                logger.info(f"⚠️ EDITOR CONTEXT: Skipping active_editor - editor_preference is 'ignore' (but editor_preference sent in metadata)")
+                logger.debug(f"⚠️ EDITOR CONTEXT: Skipping active_editor - editor_preference is 'ignore' (but editor_preference sent in metadata)")
                 return
             
             # Skip if no editor context
             if not active_editor:
-                logger.info(f"⚠️ EDITOR CONTEXT: Skipping - no active_editor in request_context")
+                logger.debug(f"⚠️ EDITOR CONTEXT: Skipping - no active_editor in request_context")
                 return
             
             # Validate editor context
@@ -1317,21 +1520,26 @@ class GRPCContextGatherer:
                 logger.warning(f"⚠️ EDITOR CONTEXT: Skipping - active_editor is not a dict (type={type(active_editor)})")
                 return
             
-            # CRITICAL: Reject if is_editable is False or missing - this ensures stale editor data is cleared
-            # EXCEPTION: Reference documents (type: reference) should ALWAYS be sent even if not editable
-            # because reference_agent needs to READ them (journals, logs, etc.)
+            # is_editable distinguishes markdown/org editing vs read-only viewer text (PDF, DocX, TXT).
+            # Reference-type frontmatter on non-editable docs is still supported alongside read-only payloads.
             is_editable = active_editor.get("is_editable")
             frontmatter_type = active_editor.get("frontmatter", {}).get("type", "").strip().lower()
-            
-            if (not is_editable or is_editable is False) and frontmatter_type != "reference":
-                logger.info(f"⚠️ EDITOR CONTEXT: Skipping - active_editor.is_editable is False or missing (editor tab likely closed)")
-                return
-            elif frontmatter_type == "reference" and not is_editable:
-                logger.info(f"📚 EDITOR CONTEXT: Including reference document even though not editable (reference_agent needs to read it)")
-            
+            if frontmatter_type == "reference" and not is_editable:
+                logger.debug(
+                    "📚 EDITOR CONTEXT: reference document (not editable); including for reference_agent"
+                )
+
             filename = active_editor.get("filename", "")
-            if not (filename.endswith(".md") or filename.endswith(".org")):
-                logger.warning(f"⚠️ EDITOR CONTEXT: Skipping - filename '{filename}' does not end with .md or .org")
+            allowed_editor_suffixes = (".md", ".org", ".txt", ".pdf", ".docx", ".srt", ".vtt")
+            if not filename or not any(filename.endswith(ext) for ext in allowed_editor_suffixes):
+                logger.warning(
+                    f"⚠️ EDITOR CONTEXT: Skipping - filename '{filename}' is not an allowed editor type"
+                )
+                return
+
+            content_str = (active_editor.get("content") or "").strip()
+            if not content_str:
+                logger.debug("⚠️ EDITOR CONTEXT: Skipping - empty content")
                 return
             
             # Parse frontmatter
@@ -1355,16 +1563,16 @@ class GRPCContextGatherer:
                     frontmatter.custom_fields[key] = str(value)
                     custom_fields_added.append(key)
                     if key in ["files", "components", "protocols", "schematics", "specifications"]:
-                        logger.info(f"🔍 ADDING CUSTOM FIELD: {key} = {str(value)[:200]} (original type: {type(value).__name__})")
+                        logger.debug(f"🔍 ADDING CUSTOM FIELD: {key} = {str(value)[:200]} (original type: {type(value).__name__})")
             if custom_fields_added:
-                logger.info(f"✅ CONTEXT: Added {len(custom_fields_added)} custom frontmatter field(s): {custom_fields_added}")
+                logger.debug(f"✅ CONTEXT: Added {len(custom_fields_added)} custom frontmatter field(s): {custom_fields_added}")
             else:
-                logger.info(f"⚠️ CONTEXT: No custom frontmatter fields found (frontmatter keys: {list(frontmatter_data.keys())})")
+                logger.debug(f"⚠️ CONTEXT: No custom frontmatter fields found (frontmatter keys: {list(frontmatter_data.keys())})")
             
             # Build editor message
             canonical_path = active_editor.get("canonical_path") or active_editor.get("canonicalPath") or ""
             if canonical_path:
-                logger.info(f"✅ CONTEXT: Active editor canonical_path: {canonical_path}")
+                logger.debug(f"✅ CONTEXT: Active editor canonical_path: {canonical_path}")
             else:
                 logger.warning(f"⚠️ CONTEXT: Active editor has no canonical_path - relative references may fail!")
             
@@ -1380,9 +1588,9 @@ class GRPCContextGatherer:
             
             # Log cursor state for debugging
             if cursor_offset >= 0:
-                logger.info(f"✅ CONTEXT: Cursor detected at offset {cursor_offset}")
+                logger.debug(f"✅ CONTEXT: Cursor detected at offset {cursor_offset}")
             if selection_start >= 0 and selection_end > selection_start:
-                logger.info(f"✅ CONTEXT: Selection detected from {selection_start} to {selection_end}")
+                logger.debug(f"✅ CONTEXT: Selection detected from {selection_start} to {selection_end}")
             
             grpc_request.active_editor.CopyFrom(
                 orchestrator_pb2.ActiveEditor(
@@ -1403,10 +1611,43 @@ class GRPCContextGatherer:
                 )
             )
             
-            logger.info(f"✅ CONTEXT: Added editor context (file={filename}, type={frontmatter.type}, {len(active_editor.get('content', ''))} chars)")
+            logger.debug(f"✅ CONTEXT: Added editor context (file={filename}, type={frontmatter.type}, {len(active_editor.get('content', ''))} chars)")
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add editor context: {e}")
+
+    async def _add_artifact_context(
+        self,
+        grpc_request: orchestrator_pb2.ChatRequest,
+        request_context: Dict[str, Any],
+    ) -> None:
+        """Add active chat artifact context when the user has an artifact open in the drawer."""
+        try:
+            active_artifact = request_context.get("active_artifact")
+            if not active_artifact or not isinstance(active_artifact, dict):
+                return
+            code = active_artifact.get("code", "")
+            if not code or not isinstance(code, str):
+                return
+            lang = active_artifact.get("language")
+            if lang is not None and not isinstance(lang, str):
+                lang = str(lang) if lang else ""
+            grpc_request.active_artifact.CopyFrom(
+                orchestrator_pb2.ActiveArtifact(
+                    artifact_type=str(active_artifact.get("artifact_type", "") or ""),
+                    title=str(active_artifact.get("title", "") or ""),
+                    code=code,
+                    language=(lang or "").strip() if lang else "",
+                )
+            )
+            logger.debug(
+                "CONTEXT: Added active artifact context (type=%s, title=%s, %d chars)",
+                active_artifact.get("artifact_type"),
+                active_artifact.get("title"),
+                len(code),
+            )
+        except Exception as e:
+            logger.warning("CONTEXT: Failed to add artifact context: %s", e)
 
     def _add_data_workspace_context(
         self,
@@ -1455,7 +1696,7 @@ class GRPCContextGatherer:
                     visible_row_count=int(active_data_workspace.get("visible_row_count", 0))
                 )
             )
-            logger.info(f"CONTEXT: Added data workspace context (table={active_data_workspace.get('table_name', '')}, {len(columns)} columns, {len(visible_rows)} visible rows)")
+            logger.debug(f"CONTEXT: Added data workspace context (table={active_data_workspace.get('table_name', '')}, {len(columns)} columns, {len(visible_rows)} visible rows)")
         except Exception as e:
             logger.warning(f"CONTEXT: Failed to add data workspace context: {e}")
     
@@ -1486,7 +1727,7 @@ class GRPCContextGatherer:
                 )
             )
             
-            logger.info(f"✅ CONTEXT: Added pipeline context (id={active_pipeline_id})")
+            logger.debug(f"✅ CONTEXT: Added pipeline context (id={active_pipeline_id})")
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add pipeline context: {e}")
@@ -1525,7 +1766,7 @@ class GRPCContextGatherer:
             )
             
             granted = [k.replace("_permission", "") for k, v in shared_memory.items() if k.endswith("_permission") and v]
-            logger.info(f"✅ CONTEXT: Added permission grants ({', '.join(granted)})")
+            logger.debug(f"✅ CONTEXT: Added permission grants ({', '.join(granted)})")
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add permission grants: {e}")
@@ -1560,7 +1801,7 @@ class GRPCContextGatherer:
                     )
                 )
             
-            logger.info(f"✅ CONTEXT: Added {len(grpc_request.pending_operations)} pending operations")
+            logger.debug(f"✅ CONTEXT: Added {len(grpc_request.pending_operations)} pending operations")
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add pending operations: {e}")
@@ -1583,7 +1824,7 @@ class GRPCContextGatherer:
             
             if locked_agent:
                 grpc_request.locked_agent = locked_agent
-                logger.info(f"✅ CONTEXT: Added routing lock (agent={locked_agent})")
+                logger.debug(f"✅ CONTEXT: Added routing lock (agent={locked_agent})")
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add routing lock: {e}")
@@ -1599,12 +1840,12 @@ class GRPCContextGatherer:
 
             if base_checkpoint_id:
                 grpc_request.base_checkpoint_id = base_checkpoint_id
-                logger.info(f"✅ CONTEXT: Added checkpoint branching (checkpoint={base_checkpoint_id})")
+                logger.debug(f"✅ CONTEXT: Added checkpoint branching (checkpoint={base_checkpoint_id})")
 
             branch_suffix = request_context.get("branch_thread_suffix")
             if branch_suffix:
                 grpc_request.metadata["branch_thread_suffix"] = str(branch_suffix)
-                logger.info("CONTEXT: Added branch_thread_suffix for isolated LangGraph checkpoint")
+                logger.debug("CONTEXT: Added branch_thread_suffix for isolated LangGraph checkpoint")
 
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add checkpoint info: {e}")
@@ -1620,10 +1861,10 @@ class GRPCContextGatherer:
             image_analysis_model = request_context.get("image_analysis_model")
             if image_base64:
                 grpc_request.metadata["image_base64"] = image_base64
-                logger.info("CONTEXT: Added image_base64 for image description")
+                logger.debug("CONTEXT: Added image_base64 for image description")
             if image_analysis_model:
                 grpc_request.metadata["image_analysis_model"] = image_analysis_model
-                logger.info(f"CONTEXT: Added image_analysis_model = {image_analysis_model}")
+                logger.debug(f"CONTEXT: Added image_analysis_model = {image_analysis_model}")
         except Exception as e:
             logger.warning(f"CONTEXT: Failed to add image description context: {e}")
 
@@ -1638,10 +1879,10 @@ class GRPCContextGatherer:
             document_analysis_model = request_context.get("document_analysis_model") or request_context.get("image_analysis_model")
             if document_content is not None:
                 grpc_request.metadata["document_content"] = document_content
-                logger.info("CONTEXT: Added document_content for document description")
+                logger.debug("CONTEXT: Added document_content for document description")
             if document_analysis_model:
                 grpc_request.metadata["document_analysis_model"] = document_analysis_model
-                logger.info(f"CONTEXT: Added document_analysis_model = {document_analysis_model}")
+                logger.debug(f"CONTEXT: Added document_analysis_model = {document_analysis_model}")
         except Exception as e:
             logger.warning(f"CONTEXT: Failed to add document description context: {e}")
     
@@ -1676,7 +1917,7 @@ class GRPCContextGatherer:
 
                 if primary_agent:
                     grpc_request.metadata["primary_agent_selected"] = primary_agent
-                    logger.info(f"📋 CONTEXT: Loaded primary_agent_selected from backend DB: {primary_agent}")
+                    logger.debug(f"📋 CONTEXT: Loaded primary_agent_selected from backend DB: {primary_agent}")
 
                 if last_agent:
                     grpc_request.metadata["last_agent"] = last_agent
@@ -1694,6 +1935,14 @@ class GRPCContextGatherer:
                     if ceo and ceo.get("agent_profile_id"):
                         grpc_request.metadata["line_dispatch_mode"] = "true"
                         grpc_request.metadata["ceo_profile_id"] = str(ceo["agent_profile_id"])
+                        try:
+                            gmode = await agent_line_service.get_line_dispatch_mode(
+                                str(sticky_line_id), grpc_request.user_id
+                            )
+                            grpc_request.metadata["line_governance_mode"] = gmode
+                        except Exception as gm_err:
+                            logger.debug("sticky line_governance_mode: %s", gm_err)
+                            grpc_request.metadata["line_governance_mode"] = "hierarchical"
                         grpc_request.metadata["line_id"] = str(sticky_line_id)
                         grpc_request.metadata["team_id"] = str(sticky_line_id)
                         grpc_request.metadata["team_context_id"] = str(sticky_line_id)
@@ -1735,10 +1984,34 @@ class GRPCContextGatherer:
                                 _build_heartbeat_context,
                             )
 
+                            line_row = await agent_line_service.get_line(
+                                str(sticky_line_id), grpc_request.user_id
+                            )
+                            gmode = agent_line_service.normalize_governance_mode(
+                                (line_row or {}).get("governance_mode")
+                            )
+                            gov = (line_row or {}).get("governance_policy") or {}
+                            if not isinstance(gov, dict):
+                                gov = {}
+                            ridx = None
+                            qpct = None
+                            if gmode == "round_robin":
+                                try:
+                                    ridx = int(gov.get("current_leader_idx") or 0)
+                                except (TypeError, ValueError):
+                                    ridx = 0
+                            if gmode == "consensus" and gov.get("quorum_pct") is not None:
+                                try:
+                                    qpct = int(gov.get("quorum_pct"))
+                                except (TypeError, ValueError):
+                                    qpct = None
                             hb = await _build_heartbeat_context(
                                 str(sticky_line_id),
                                 grpc_request.user_id,
                                 str(ceo["agent_profile_id"]),
+                                governance_mode=gmode,
+                                rotation_cycle_index=ridx,
+                                quorum_pct=qpct,
                             )
                             grpc_request.metadata["line_dispatch_briefing"] = hb
                             grpc_request.metadata["line_dispatch_tool_rules"] = TEAM_TOOL_IDS_RULE
@@ -1748,7 +2021,7 @@ class GRPCContextGatherer:
                                 grpc_request.metadata.get("team_chat_context") or ""
                             )
                             grpc_request.metadata["line_dispatch_tool_rules"] = ""
-                        logger.info(
+                        logger.debug(
                             "📋 CONTEXT: Sticky line dispatch line_id=%s ceo=%s",
                             sticky_line_id,
                             ceo["agent_profile_id"],
@@ -1758,7 +2031,7 @@ class GRPCContextGatherer:
                 elif saved_profile_id and "agent_profile_id" not in grpc_request.metadata:
                     if grpc_request.metadata.get("line_dispatch_mode") != "true":
                         grpc_request.metadata["agent_profile_id"] = saved_profile_id
-                        logger.info("📋 CONTEXT: Loaded agent_profile_id from backend DB (sticky routing): %s", saved_profile_id)
+                        logger.debug("📋 CONTEXT: Loaded agent_profile_id from backend DB (sticky routing): %s", saved_profile_id)
             else:
                 logger.debug(f"📋 CONTEXT: No agent metadata in backend DB (new conversation or first request)")
             
@@ -1777,7 +2050,10 @@ class GRPCContextGatherer:
         
         if grpc_request.HasField("active_editor"):
             context_items.append(f"editor({grpc_request.active_editor.filename})")
-        
+
+        if grpc_request.HasField("active_artifact"):
+            context_items.append(f"artifact({grpc_request.active_artifact.artifact_type})")
+
         if grpc_request.HasField("pipeline_context"):
             context_items.append("pipeline")
         
@@ -1793,7 +2069,7 @@ class GRPCContextGatherer:
         if grpc_request.agent_type:
             context_items.append(f"route({grpc_request.agent_type})")
         
-        logger.info(f"📦 CONTEXT SUMMARY: {', '.join(context_items) if context_items else 'minimal'}")
+        logger.debug(f"📦 CONTEXT SUMMARY: {', '.join(context_items) if context_items else 'minimal'}")
 
 
 # Singleton instance

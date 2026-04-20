@@ -1,4 +1,4 @@
-import { createTheme } from '@mui/material/styles';
+import { createTheme, alpha } from '@mui/material/styles';
 
 /**
  * Accent palettes: primary (and optional secondary) per mode.
@@ -228,31 +228,49 @@ export const createAppTheme = (darkMode, accentId = 'blue') => {
       MuiAppBar: {
         styleOverrides: {
           root: ({ theme }) => ({
-            backgroundColor: darkMode ? '#1e1e1e' : theme.palette.primary.main,
+            backgroundColor: darkMode
+              ? alpha('#1e1e1e', 0.92)
+              : theme.palette.primary.main,
             color: darkMode ? '#ffffff' : '#ffffff',
             boxShadow: darkMode
               ? '0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12)'
               : '0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12)',
+            '@media (prefers-reduced-transparency: no-preference)': {
+              ...(darkMode
+                ? {
+                    backdropFilter: 'blur(10px)',
+                    WebkitBackdropFilter: 'blur(10px)',
+                  }
+                : {}),
+            },
           }),
         },
       },
       MuiCard: {
         styleOverrides: {
-          root: {
-            backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+          root: ({ theme }) => ({
+            backgroundColor: theme.palette.background.paper,
             border: darkMode ? '1px solid #424242' : '1px solid #e0e0e0',
             boxShadow: darkMode 
               ? '0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12)'
               : '0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12)',
-          },
+            '@media (prefers-reduced-transparency: no-preference)': {
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+            },
+          }),
         },
       },
       MuiPaper: {
         styleOverrides: {
-          root: {
-            backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+          root: ({ theme }) => ({
+            backgroundColor: theme.palette.background.paper,
             border: darkMode ? '1px solid #424242' : '1px solid #e0e0e0',
-          },
+            '@media (prefers-reduced-transparency: no-preference)': {
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+            },
+          }),
         },
       },
       MuiButton: {
@@ -273,7 +291,7 @@ export const createAppTheme = (darkMode, accentId = 'blue') => {
         styleOverrides: {
           root: ({ theme }) => ({
             '& .MuiOutlinedInput-root': {
-              backgroundColor: darkMode ? '#2d2d2d' : '#ffffff',
+              backgroundColor: darkMode ? alpha('#2d2d2d', 0.92) : alpha('#ffffff', 0.95),
               '& fieldset': {
                 borderColor: darkMode ? '#424242' : '#e0e0e0',
               },
@@ -289,12 +307,13 @@ export const createAppTheme = (darkMode, accentId = 'blue') => {
       },
       MuiInputBase: {
         styleOverrides: {
-          root: {
-            backgroundColor: darkMode ? '#2d2d2d' : '#ffffff',
+          root: ({ theme }) => ({
+            backgroundColor:
+              theme.palette.mode === 'dark' ? alpha('#2d2d2d', 0.92) : alpha('#ffffff', 0.95),
             '& .MuiInputBase-input': {
               color: darkMode ? '#ffffff' : '#212121',
             },
-          },
+          }),
         },
       },
       MuiChip: {
@@ -314,13 +333,17 @@ export const createAppTheme = (darkMode, accentId = 'blue') => {
       },
       MuiMenu: {
         styleOverrides: {
-          paper: {
-            backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+          paper: ({ theme }) => ({
+            backgroundColor: theme.palette.background.paper,
             border: darkMode ? '1px solid #424242' : '1px solid #e0e0e0',
             boxShadow: darkMode 
               ? '0px 5px 5px -3px rgba(0,0,0,0.2), 0px 8px 10px 1px rgba(0,0,0,0.14), 0px 3px 14px 2px rgba(0,0,0,0.12)'
               : '0px 5px 5px -3px rgba(0,0,0,0.2), 0px 8px 10px 1px rgba(0,0,0,0.14), 0px 3px 14px 2px rgba(0,0,0,0.12)',
-          },
+            '@media (prefers-reduced-transparency: no-preference)': {
+              backdropFilter: 'blur(10px)',
+              WebkitBackdropFilter: 'blur(10px)',
+            },
+          }),
         },
       },
       MuiMenuItem: {
@@ -334,9 +357,9 @@ export const createAppTheme = (darkMode, accentId = 'blue') => {
       },
       MuiTableHead: {
         styleOverrides: {
-          root: {
-            backgroundColor: darkMode ? '#2d2d2d' : '#f5f5f5',
-          },
+          root: ({ theme }) => ({
+            backgroundColor: theme.palette.background.secondary,
+          }),
         },
       },
       MuiTableCell: {
@@ -348,18 +371,26 @@ export const createAppTheme = (darkMode, accentId = 'blue') => {
       },
       MuiDialog: {
         styleOverrides: {
-          paper: {
-            backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+          paper: ({ theme }) => ({
+            backgroundColor: theme.palette.background.paper,
             border: darkMode ? '1px solid #424242' : '1px solid #e0e0e0',
-          },
+            '@media (prefers-reduced-transparency: no-preference)': {
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
+            },
+          }),
         },
       },
       MuiDrawer: {
         styleOverrides: {
-          paper: {
-            backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+          paper: ({ theme }) => ({
+            backgroundColor: theme.palette.background.paper,
             border: darkMode ? '1px solid #424242' : '1px solid #e0e0e0',
-          },
+            '@media (prefers-reduced-transparency: no-preference)': {
+              backdropFilter: 'blur(10px)',
+              WebkitBackdropFilter: 'blur(10px)',
+            },
+          }),
         },
       },
     },

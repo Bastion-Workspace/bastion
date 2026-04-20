@@ -61,7 +61,7 @@ class ChatService:
                 logger.debug("✅ Embedding service wrapper initialized")
         
         async def init_knowledge_graph():
-            # ROOSEVELT FIX: Use shared knowledge graph service if provided
+            # Use injected knowledge graph service when provided
             if shared_kg_service:
                 self.kg_service = shared_kg_service
                 logger.debug("✅ Using shared knowledge graph service")
@@ -114,12 +114,12 @@ class ChatService:
                     retrieval_count=0
                 )
             
-            logger.info(f"🔍 Processing intelligent query: {query[:100]}...")
+            logger.debug(f"🔍 Processing intelligent query: {query[:100]}...")
             
             # Step 0: Preprocess temporal queries
             expanded_query = self._expand_temporal_query(query)
             if expanded_query != query:
-                logger.info(f"🕒 Expanded temporal query: {expanded_query}")
+                logger.debug(f"🕒 Expanded temporal query: {expanded_query}")
                 query = expanded_query
             
             # Step 1: Check if this is a collection analysis query
@@ -136,13 +136,13 @@ class ChatService:
             
             # Filter and validate entities
             entity_names = self._filter_and_validate_entities(raw_entity_names, query)
-            logger.info(f"🔍 Raw entities: {raw_entity_names}")
-            logger.info(f"🔍 Filtered entities: {entity_names}")
+            logger.debug(f"🔍 Raw entities: {raw_entity_names}")
+            logger.debug(f"🔍 Filtered entities: {entity_names}")
             
             # Step 3: Phase 1 - Always start with chunk-based retrieval
-            logger.info("🔍 Phase 1: Starting with chunk-based retrieval")
+            logger.debug("🔍 Phase 1: Starting with chunk-based retrieval")
             relevant_chunks = await self._hybrid_retrieval(query, entity_names)
-            logger.info(f"📚 Retrieved {len(relevant_chunks)} relevant chunks")
+            logger.debug(f"📚 Retrieved {len(relevant_chunks)} relevant chunks")
             
             # Step 4: Phase 2 - Enhanced LLM assessment with document selection capability
             assessment_result = await self._assess_chunk_sufficiency_with_document_selection(query, relevant_chunks)
@@ -150,43 +150,43 @@ class ChatService:
             requested_documents = assessment_result.get("requested_documents", [])
             reasoning = assessment_result.get("reasoning", "")
             
-            logger.info(f"🧠 Enhanced chunk assessment: {chunk_sufficiency}")
+            logger.debug(f"🧠 Enhanced chunk assessment: {chunk_sufficiency}")
             if reasoning:
-                logger.info(f"🧠 LLM reasoning: {reasoning}")
+                logger.debug(f"🧠 LLM reasoning: {reasoning}")
             if requested_documents:
-                logger.info(f"🧠 LLM requested documents: {requested_documents}")
+                logger.debug(f"🧠 LLM requested documents: {requested_documents}")
             
             # Step 5: Handle insufficient chunks with LLM-guided document selection
             if chunk_sufficiency == "INSUFFICIENT":
                 if requested_documents:
-                    logger.info(f"📚 Using LLM-guided document selection: {len(requested_documents)} documents requested")
+                    logger.debug(f"📚 Using LLM-guided document selection: {len(requested_documents)} documents requested")
                     full_doc_chunks, is_iterative = await self._intelligent_document_retrieval_with_llm_selection(
                         query, relevant_chunks, requested_documents, entity_names
                     )
                     
                     if is_iterative:
-                        logger.info("📚 Using iterative analysis for LLM-selected documents")
+                        logger.debug("📚 Using iterative analysis for LLM-selected documents")
                         return await self._iterative_document_analysis(query, full_doc_chunks, session_id, entity_names)
                     else:
                         relevant_chunks = full_doc_chunks
-                        logger.info(f"📚 Using {len(relevant_chunks)} chunks from LLM-selected documents")
+                        logger.debug(f"📚 Using {len(relevant_chunks)} chunks from LLM-selected documents")
                 else:
                     # Special handling for headline queries - use targeted headline retrieval instead of full document processing
                     query_lower = query.lower()
                     if any(pattern in query_lower for pattern in ['headline', 'headlines', 'top stories', 'news summary']):
-                        logger.info("📰 Using targeted headline retrieval instead of full document processing")
+                        logger.debug("📰 Using targeted headline retrieval instead of full document processing")
                         headline_chunks = await self._targeted_headline_retrieval(query, entity_names)
                         relevant_chunks = headline_chunks
-                        logger.info(f"📰 Retrieved {len(relevant_chunks)} headline-focused chunks")
+                        logger.debug(f"📰 Retrieved {len(relevant_chunks)} headline-focused chunks")
                     else:
-                        logger.info("📚 Falling back to automatic document retrieval (no specific documents requested)")
+                        logger.debug("📚 Falling back to automatic document retrieval (no specific documents requested)")
                         full_doc_chunks, is_iterative = await self._intelligent_full_document_retrieval(query, entity_names)
                         if is_iterative:
-                            logger.info("📚 Using iterative analysis for automatically selected documents")
+                            logger.debug("📚 Using iterative analysis for automatically selected documents")
                             return await self._iterative_document_analysis(query, full_doc_chunks, session_id, entity_names)
                         else:
                             relevant_chunks = full_doc_chunks
-                            logger.info(f"📚 Upgraded to {len(relevant_chunks)} chunks via automatic document retrieval")
+                            logger.debug(f"📚 Upgraded to {len(relevant_chunks)} chunks via automatic document retrieval")
             
             # Step 4: Prepare context with entity information
             context_parts = []
@@ -256,7 +256,7 @@ class ChatService:
             # Store in conversation history (both Redis and persistent)
             await self._store_query_history(session_id, query, response, conversation_id)
             
-            logger.info(f"✅ Hybrid query completed in {query_time:.2f}s")
+            logger.debug(f"✅ Hybrid query completed in {query_time:.2f}s")
             return response
             
         except Exception as e:
@@ -334,11 +334,11 @@ class ChatService:
             self._models_cache_timestamp is not None and
             (current_time - self._models_cache_timestamp) < CACHE_DURATION):
             cache_age = int(current_time - self._models_cache_timestamp)
-            logger.info(f"📋 Using cached models ({len(self._available_models_cache)} models, {cache_age}s old)")
+            logger.debug(f"📋 Using cached models ({len(self._available_models_cache)} models, {cache_age}s old)")
             return self._available_models_cache
 
         try:
-            logger.info("🔍 Fetching fresh models from OpenRouter API...")
+            logger.debug("🔍 Fetching fresh models from OpenRouter API...")
 
             # Call OpenRouter models API
             import httpx
@@ -414,9 +414,6 @@ class ChatService:
                 # Update cache with fresh data
                 self._available_models_cache = models
                 self._models_cache_timestamp = current_time
-                logger.info(f"💾 Cached {len(models)} models for future use")
-
-                logger.info(f"✅ Successfully parsed {len(models)} models")
                 return models
                 
         except Exception as e:
@@ -430,7 +427,7 @@ class ChatService:
 
     async def refresh_available_models(self) -> List[ModelInfo]:
         """Force refresh the cached available models from OpenRouter API"""
-        logger.info("🔄 Forcing refresh of available models cache...")
+        logger.debug("🔄 Forcing refresh of available models cache...")
         self._available_models_cache = None
         self._models_cache_timestamp = None
         return await self.get_available_models()
@@ -439,7 +436,7 @@ class ChatService:
         """
         Get context window size for a specific model
         
-        **ROOSEVELT'S CENTRALIZED MODEL INTELLIGENCE**: Single source of truth for all agents!
+        Centralized model configuration for agents
         
         This method:
         - Queries OpenRouter API for authoritative model specs
@@ -460,18 +457,18 @@ class ChatService:
             # Find exact match first
             for model in available_models:
                 if model.id == model_name and model.context_length > 0:
-                    logger.info(f"🎯 MODEL CONTEXT: {model_name} → {model.context_length:,} tokens (OpenRouter)")
+                    logger.debug(f"🎯 MODEL CONTEXT: {model_name} → {model.context_length:,} tokens (OpenRouter)")
                     return model.context_length
             
             # Try partial match (e.g., "claude-sonnet-4.5" matches "anthropic/claude-sonnet-4.5")
             model_name_lower = model_name.lower()
             for model in available_models:
                 if model.id.lower().endswith(model_name_lower) and model.context_length > 0:
-                    logger.info(f"🎯 MODEL CONTEXT: {model_name} → {model.context_length:,} tokens (matched {model.id})")
+                    logger.debug(f"🎯 MODEL CONTEXT: {model_name} → {model.context_length:,} tokens (matched {model.id})")
                     return model.context_length
                 # Also check if model_name contains the model id
                 if model.id.lower() in model_name_lower and model.context_length > 0:
-                    logger.info(f"🎯 MODEL CONTEXT: {model_name} → {model.context_length:,} tokens (contains {model.id})")
+                    logger.debug(f"🎯 MODEL CONTEXT: {model_name} → {model.context_length:,} tokens (contains {model.id})")
                     return model.context_length
             
             logger.warning(f"⚠️ MODEL CONTEXT: {model_name} not found in OpenRouter, using fallback estimate")
@@ -497,7 +494,7 @@ class ChatService:
         model_name_lower = model_name.lower()
         for keyword, context_size in fallback_contexts.items():
             if keyword in model_name_lower:
-                logger.info(f"🎯 MODEL CONTEXT: {model_name} → {context_size:,} tokens (fallback: matched '{keyword}')")
+                logger.debug(f"🎯 MODEL CONTEXT: {model_name} → {context_size:,} tokens (fallback: matched '{keyword}')")
                 return context_size
         
         # Ultimate fallback: very conservative
@@ -682,7 +679,7 @@ class ChatService:
                 return False
             
             if self.current_model and self.current_model in selectable:
-                logger.info("Model already selected and valid: %s", self.current_model)
+                logger.debug("Model already selected and valid: %s", self.current_model)
                 return True
             
             saved_model = await settings_service.get_llm_model()
@@ -705,7 +702,7 @@ class ChatService:
         start_time = time.time()
         
         try:
-            logger.info(f"📄 Starting full document summarization for: {document_id}")
+            logger.debug(f"📄 Starting full document summarization for: {document_id}")
             
             # Get all chunks for the document
             all_chunks = await self.embedding_manager.get_all_document_chunks(document_id)
@@ -719,7 +716,7 @@ class ChatService:
                     retrieval_count=0
                 )
             
-            logger.info(f"📚 Retrieved {len(all_chunks)} chunks for summarization")
+            logger.debug(f"📚 Retrieved {len(all_chunks)} chunks for summarization")
             
             # Combine all chunks in order
             full_content = "\n\n".join([chunk['content'] for chunk in all_chunks])
@@ -754,7 +751,7 @@ class ChatService:
             # Store in conversation history
             await self._store_query_history(session_id, f"Summarize document {document_id}", response)
             
-            logger.info(f"✅ Document summarization completed in {query_time:.2f}s")
+            logger.debug(f"✅ Document summarization completed in {query_time:.2f}s")
             return response
             
         except Exception as e:
@@ -795,7 +792,7 @@ Structure your summary with clear sections and use markdown formatting for reada
             # Truncate content if it's too long for the model
             max_content_length = 50000  # Adjust based on model limits
             if len(full_content) > max_content_length:
-                logger.info(f"📄 Truncating document content from {len(full_content)} to {max_content_length} characters")
+                logger.debug(f"📄 Truncating document content from {len(full_content)} to {max_content_length} characters")
                 full_content = full_content[:max_content_length] + "\n\n[Content truncated due to length...]"
 
             user_prompt = f"""Please provide a comprehensive summary of the following document:
@@ -812,8 +809,8 @@ Please create a detailed summary that captures all the important information, th
             ]
             
             # Call the LLM with longer timeout for comprehensive summaries
-            logger.info(f"🤖 Generating document summary with model: {self.current_model}")
-            logger.info(f"🤖 Content length: {len(full_content)} characters")
+            logger.debug(f"🤖 Generating document summary with model: {self.current_model}")
+            logger.debug(f"🤖 Content length: {len(full_content)} characters")
             
             try:
                 # Reasoning automatically added by OpenRouterClient wrapper
@@ -826,13 +823,11 @@ Please create a detailed summary that captures all the important information, th
                     ),
                     timeout=900.0  # Increased to 15 minutes for large document processing
                 )
-                
-                logger.info(f"🤖 Document summary generated successfully")
-                
+
                 if response.choices and len(response.choices) > 0:
                     summary = response.choices[0].message.content
                     if summary:
-                        logger.info(f"🤖 Generated summary with {len(summary)} characters")
+                        logger.debug(f"🤖 Generated summary with {len(summary)} characters")
                         return summary
                     else:
                         logger.error(f"❌ LLM returned empty summary")
@@ -897,14 +892,13 @@ Please let me know that no relevant documents were found and suggest that the us
             messages.append({"role": "user", "content": user_prompt})
             
             # Call the LLM
-            logger.info(f"🤖 Calling LLM with model: {self.current_model}")
-            logger.info(f"🤖 Message count: {len(messages)}")
-            logger.info(f"🤖 Context length: {len(context)} characters")
+            logger.debug(f"🤖 Calling LLM with model: {self.current_model}")
+            logger.debug(f"🤖 Message count: {len(messages)}")
+            logger.debug(f"🤖 Context length: {len(context)} characters")
             
             try:
                 # Reasoning automatically added by OpenRouterClient wrapper
                 # Add generous timeout for comprehensive processing
-                logger.info(f"🤖 Starting LLM API call...")
                 response = await asyncio.wait_for(
                     self.openai_client.chat.completions.create(
                         model=self.current_model,
@@ -914,13 +908,11 @@ Please let me know that no relevant documents were found and suggest that the us
                     ),
                     timeout=900.0  # Increased to 15 minutes for large documents
                 )
-                
-                logger.info(f"🤖 LLM response received successfully")
-                
+
                 if response.choices and len(response.choices) > 0:
                     answer = response.choices[0].message.content
                     if answer:
-                        logger.info(f"🤖 Generated response with {len(answer)} characters")
+                        logger.debug(f"🤖 Generated response with {len(answer)} characters")
                         return answer
                     else:
                         logger.error(f"❌ LLM returned empty content")
@@ -928,7 +920,7 @@ Please let me know that no relevant documents were found and suggest that the us
                 else:
                     logger.error(f"❌ LLM returned no choices")
                     return "I apologize, but the AI model didn't provide a response. Please try again."
-                    
+
             except asyncio.TimeoutError:
                 logger.error(f"❌ LLM call timed out after 60 seconds")
                 return "I apologize, but the response took too long to generate. Please try a simpler question or try again later."
@@ -1095,11 +1087,11 @@ Please let me know that no relevant documents were found and suggest that the us
     async def _standard_retrieval(self, query: str) -> List[Dict[str, Any]]:
         """Enhanced multi-stage retrieval with intelligent ranking"""
         try:
-            logger.info(f"🔍 Starting enhanced multi-stage retrieval for: {query[:100]}...")
+            logger.debug(f"🔍 Starting enhanced multi-stage retrieval for: {query[:100]}...")
             
             # Step 1: Detect query type for specialized handling
             query_type = self._detect_query_type(query)
-            logger.info(f"🔍 Query type detected: {query_type}")
+            logger.debug(f"🔍 Query type detected: {query_type}")
             
             # Step 2: Multi-stage retrieval based on query type
             if query_type == 'metadata':
@@ -1123,7 +1115,7 @@ Please let me know that no relevant documents were found and suggest that the us
     async def _enhanced_procedural_retrieval(self, query: str) -> List[Dict[str, Any]]:
         """Enhanced retrieval strategy with optimized LLM-guided second pass"""
         try:
-            logger.info("🔧 Using enhanced procedural retrieval with LLM guidance")
+            logger.debug("🔧 Using enhanced procedural retrieval with LLM guidance")
             
             # Step 1: Primary search with original query
             primary_chunks = await self.embedding_manager.search_similar(
@@ -1132,7 +1124,7 @@ Please let me know that no relevant documents were found and suggest that the us
                 score_threshold=0.25,
             )
             
-            logger.info(f"🔧 Primary search found {len(primary_chunks)} chunks")
+            logger.debug(f"🔧 Primary search found {len(primary_chunks)} chunks")
             
             # Step 2: Generate related procedural terms (reduced set)
             procedural_terms = self._extract_procedural_terms(query)[:5]  # Limit to 5 terms
@@ -1165,7 +1157,7 @@ Please let me know that no relevant documents were found and suggest that the us
                             all_chunks.append(chunk)
                             seen_chunk_ids.add(chunk['chunk_id'])
             
-            logger.info(f"🔧 After procedural terms: {len(all_chunks)} chunks")
+            logger.debug(f"🔧 After procedural terms: {len(all_chunks)} chunks")
             
             # Step 4: Conditional LLM-guided retrieval (only if we have good initial results)
             if len(all_chunks) >= 8:  # Only do LLM guidance if we have sufficient initial results
@@ -1182,20 +1174,20 @@ Please let me know that no relevant documents were found and suggest that the us
                             all_chunks.append(chunk)
                             seen_chunk_ids.add(chunk['chunk_id'])
                     
-                    logger.info(f"🔧 Added {len(llm_guided_chunks)} LLM-guided chunks")
+                    logger.debug(f"🔧 Added {len(llm_guided_chunks)} LLM-guided chunks")
                     
                 except asyncio.TimeoutError:
                     logger.warning("🔧 LLM-guided retrieval timed out, proceeding without it")
                 except Exception as e:
                     logger.warning(f"🔧 LLM-guided retrieval failed: {e}")
             else:
-                logger.info("🔧 Skipping LLM guidance due to insufficient initial results")
+                logger.debug("🔧 Skipping LLM guidance due to insufficient initial results")
             
             # Step 5: Sort by relevance and limit results
             all_chunks.sort(key=lambda x: x['score'], reverse=True)
             final_chunks = all_chunks[:20]  # Reduced limit for faster processing
             
-            logger.info(f"🔧 Final enhanced retrieval: {len(final_chunks)} chunks")
+            logger.debug(f"🔧 Final enhanced retrieval: {len(final_chunks)} chunks")
             return final_chunks
             
         except Exception as e:
@@ -1256,7 +1248,7 @@ Please let me know that no relevant documents were found and suggest that the us
     async def _expand_with_context_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Expand chunks with neighboring context for better procedural understanding"""
         try:
-            logger.info("📚 Expanding chunks with neighboring context")
+            logger.debug("📚 Expanding chunks with neighboring context")
             
             expanded_chunks = []
             processed_docs = set()
@@ -1325,7 +1317,7 @@ Please let me know that no relevant documents were found and suggest that the us
             final_chunks = list(unique_chunks.values())
             final_chunks.sort(key=lambda x: x['score'], reverse=True)
             
-            logger.info(f"📚 Expanded to {len(final_chunks)} unique chunks with context")
+            logger.debug(f"📚 Expanded to {len(final_chunks)} unique chunks with context")
             return final_chunks[:25]  # Limit to prevent overwhelming the LLM
             
         except Exception as e:
@@ -1449,8 +1441,8 @@ Please let me know that no relevant documents were found and suggest that the us
             messages.append({"role": "user", "content": user_prompt})
             
             # Call the LLM with enhanced settings for procedural queries
-            logger.info(f"🤖 Calling LLM with {'procedural' if is_procedural else 'standard'} prompting")
-            logger.info(f"🤖 Context length: {len(context)} characters")
+            logger.debug(f"🤖 Calling LLM with {'procedural' if is_procedural else 'standard'} prompting")
+            logger.debug(f"🤖 Context length: {len(context)} characters")
             
             try:
                 response = await asyncio.wait_for(
@@ -1462,13 +1454,11 @@ Please let me know that no relevant documents were found and suggest that the us
                     ),
                     timeout=90.0  # Longer timeout for detailed procedural responses
                 )
-                
-                logger.info(f"🤖 Enhanced response generated successfully")
-                
+
                 if response.choices and len(response.choices) > 0:
                     answer = response.choices[0].message.content
                     if answer:
-                        logger.info(f"🤖 Generated response with {len(answer)} characters")
+                        logger.debug(f"🤖 Generated response with {len(answer)} characters")
                         return answer
                     else:
                         logger.error(f"❌ LLM returned empty content")
@@ -1476,7 +1466,7 @@ Please let me know that no relevant documents were found and suggest that the us
                 else:
                     logger.error(f"❌ LLM returned no choices")
                     return "I apologize, but the AI model didn't provide a response. Please try again."
-                    
+
             except asyncio.TimeoutError:
                 logger.error(f"❌ LLM call timed out after 90 seconds")
                 return "I apologize, but the response took too long to generate. Please try a simpler question or try again later."
@@ -1491,7 +1481,7 @@ Please let me know that no relevant documents were found and suggest that the us
     async def _llm_guided_retrieval(self, original_query: str, initial_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Use LLM to analyze initial results and generate better search queries"""
         try:
-            logger.info("🧠 Starting LLM-guided retrieval analysis")
+            logger.debug("🧠 Starting LLM-guided retrieval analysis")
             
             # Prepare context from initial chunks for analysis
             initial_context = "\n\n".join([
@@ -1546,7 +1536,7 @@ Only return the JSON array, no other text."""
                     return []
                 
                 analysis_text = analysis_response.choices[0].message.content.strip()
-                logger.info(f"🧠 LLM analysis: {analysis_text[:200]}...")
+                logger.debug(f"🧠 LLM analysis: {analysis_text[:200]}...")
                 
                 # Parse JSON response
                 import json
@@ -1565,7 +1555,7 @@ Only return the JSON array, no other text."""
                         logger.warning("🧠 LLM analysis didn't return a list")
                         return []
                     
-                    logger.info(f"🧠 Generated {len(suggested_queries)} additional search queries")
+                    logger.debug(f"🧠 Generated {len(suggested_queries)} additional search queries")
                     
                 except json.JSONDecodeError as e:
                     logger.warning(f"🧠 Failed to parse LLM analysis JSON: {e}")
@@ -1587,7 +1577,7 @@ Only return the JSON array, no other text."""
                 if not suggested_query or len(suggested_query.strip()) < 3:
                     continue
                 
-                logger.info(f"🔍 LLM-guided search: {suggested_query}")
+                logger.debug(f"🔍 LLM-guided search: {suggested_query}")
                 
                 try:
                     guided_chunks = await self.embedding_manager.search_similar(
@@ -1611,7 +1601,7 @@ Only return the JSON array, no other text."""
                     logger.warning(f"🔍 LLM-guided search failed for '{suggested_query}': {e}")
                     continue
             
-            logger.info(f"🧠 LLM-guided retrieval found {len(additional_chunks)} additional chunks")
+            logger.debug(f"🧠 LLM-guided retrieval found {len(additional_chunks)} additional chunks")
             return additional_chunks
             
         except Exception as e:
@@ -1656,7 +1646,7 @@ Only return the JSON array, no other text."""
             if not analysis_info:
                 return None  # Not a collection analysis query
             
-            logger.info(f"📊 Detected collection analysis query: {analysis_info['type']}")
+            logger.debug(f"📊 Detected collection analysis query: {analysis_info['type']}")
             
             # Ensure we have the required services
             if not self.collection_analysis_service or not self.document_service:
@@ -1706,7 +1696,7 @@ Only return the JSON array, no other text."""
                     'across all', 'in all documents', 'throughout all', 'collection analysis'
                 ]
                 if not any(indicator in query_lower for indicator in collection_scope_indicators):
-                    logger.info(f"🔍 Detected specific topic query (pattern: '{pattern}'), not collection analysis")
+                    logger.debug(f"🔍 Detected specific topic query (pattern: '{pattern}'), not collection analysis")
                     return None  # This is a specific topic request, not collection analysis
         
         # Check for specific document requests (NOT collection analysis)
@@ -1814,7 +1804,7 @@ Only return the JSON array, no other text."""
         try:
             # For now, analyze all documents since we'd need more sophisticated parsing
             # to extract specific filter criteria from natural language
-            logger.info("📊 Performing filter-based analysis (defaulting to all documents)")
+            logger.debug("📊 Performing filter-based analysis (defaulting to all documents)")
             
             # Get all documents
             all_docs = await self.document_service.list_documents(0, 1000)
@@ -1849,7 +1839,7 @@ Only return the JSON array, no other text."""
         """Handle analysis based on document categories"""
         try:
             categories = analysis_info.get('categories', [])
-            logger.info(f"📊 Performing category-based analysis for: {categories}")
+            logger.debug(f"📊 Performing category-based analysis for: {categories}")
             
             # Create filter request based on detected categories
             filter_request = DocumentFilterRequest(
@@ -1893,7 +1883,7 @@ Only return the JSON array, no other text."""
         """Handle analysis based on temporal criteria"""
         try:
             temporal_terms = analysis_info.get('temporal_terms', [])
-            logger.info(f"📊 Performing temporal-based analysis for: {temporal_terms}")
+            logger.debug(f"📊 Performing temporal-based analysis for: {temporal_terms}")
             
             # Create basic temporal filter (this could be enhanced with better date parsing)
             filter_request = DocumentFilterRequest(
@@ -1934,7 +1924,7 @@ Only return the JSON array, no other text."""
     async def _handle_all_documents_analysis(self, analysis_info: Dict[str, Any], session_id: str) -> QueryResponse:
         """Handle analysis of all documents in the knowledge base"""
         try:
-            logger.info("📊 Performing comprehensive analysis of all documents")
+            logger.debug("📊 Performing comprehensive analysis of all documents")
             
             # Get all documents
             all_docs = await self.document_service.list_documents(0, 1000)
@@ -2002,7 +1992,7 @@ Only return the JSON array, no other text."""
     async def _metadata_focused_retrieval(self, query: str) -> List[Dict[str, Any]]:
         """Enhanced retrieval for metadata-based queries (like email addresses)"""
         try:
-            logger.info(f"📧 Starting metadata-focused retrieval for: {query[:100]}...")
+            logger.debug(f"📧 Starting metadata-focused retrieval for: {query[:100]}...")
             
             # Step 1: Large initial retrieval with lower threshold
             primary_results = await self.embedding_manager.search_similar(
@@ -2011,11 +2001,11 @@ Only return the JSON array, no other text."""
                 score_threshold=0.1,  # Lower threshold to catch more results
             )
             
-            logger.info(f"📧 Primary metadata search: {len(primary_results)} results")
+            logger.debug(f"📧 Primary metadata search: {len(primary_results)} results")
             
             # Step 2: Extract metadata terms from query
             metadata_terms = self._extract_metadata_terms(query)
-            logger.info(f"📧 Extracted metadata terms: {metadata_terms}")
+            logger.debug(f"📧 Extracted metadata terms: {metadata_terms}")
             
             # Step 3: Parallel searches for metadata terms
             all_results = list(primary_results)
@@ -2040,14 +2030,14 @@ Only return the JSON array, no other text."""
                     logger.warning(f"📧 Metadata term search failed for '{term}': {e}")
                     continue
             
-            logger.info(f"📧 After metadata term searches: {len(all_results)} results")
+            logger.debug(f"📧 After metadata term searches: {len(all_results)} results")
             
             # Step 4: Re-rank results based on metadata relevance
             ranked_results = self._rank_metadata_results(query, all_results)
             
             # Step 5: Return top results
             final_results = ranked_results[:settings.MAX_ENTITY_RESULTS]  # Use configurable entity limit
-            logger.info(f"📧 Final metadata-focused results: {len(final_results)}")
+            logger.debug(f"📧 Final metadata-focused results: {len(final_results)}")
             
             return final_results
             
@@ -2058,7 +2048,7 @@ Only return the JSON array, no other text."""
     async def _entity_focused_retrieval(self, query: str) -> List[Dict[str, Any]]:
         """Enhanced retrieval for entity-based queries"""
         try:
-            logger.info(f"👤 Starting entity-focused retrieval for: {query[:100]}...")
+            logger.debug(f"👤 Starting entity-focused retrieval for: {query[:100]}...")
             
             # Step 1: Primary semantic search
             primary_results = await self.embedding_manager.search_similar(
@@ -2104,7 +2094,7 @@ Only return the JSON array, no other text."""
     async def _temporal_focused_retrieval(self, query: str) -> List[Dict[str, Any]]:
         """Enhanced retrieval for temporal queries"""
         try:
-            logger.info(f"📅 Starting temporal-focused retrieval for: {query[:100]}...")
+            logger.debug(f"📅 Starting temporal-focused retrieval for: {query[:100]}...")
             
             # Step 1: Primary search
             primary_results = await self.embedding_manager.search_similar(
@@ -2150,7 +2140,7 @@ Only return the JSON array, no other text."""
     async def _semantic_focused_retrieval(self, query: str) -> List[Dict[str, Any]]:
         """Enhanced semantic retrieval for general queries"""
         try:
-            logger.info(f"🧠 Starting semantic-focused retrieval for: {query[:100]}...")
+            logger.debug(f"🧠 Starting semantic-focused retrieval for: {query[:100]}...")
             
             # Step 1: Primary search with expansion
             primary_results = await self.embedding_manager.search_similar(
@@ -2356,7 +2346,7 @@ Only return the JSON array, no other text."""
     async def _hybrid_retrieval(self, query: str, entity_names: List[str]) -> List[Dict[str, Any]]:
         """Hybrid retrieval combining vector search and knowledge graph"""
         try:
-            logger.info(f"🔍 Starting hybrid retrieval for query with {len(entity_names)} entities")
+            logger.debug(f"🔍 Starting hybrid retrieval for query with {len(entity_names)} entities")
             
             # Step 1: Get entity-filtered documents if entities found
             entity_doc_ids = []
@@ -2368,7 +2358,7 @@ Only return the JSON array, no other text."""
                 related_docs = await self.kg_service.find_related_documents_by_entities(entity_names, max_hops=1)
                 
                 entity_doc_ids = list(set(direct_docs + related_docs))
-                logger.info(f"🔍 Found {len(entity_doc_ids)} documents via entity graph")
+                logger.debug(f"🔍 Found {len(entity_doc_ids)} documents via entity graph")
             
             # Step 2: Perform vector searches
             search_tasks = []
@@ -2427,13 +2417,13 @@ Only return the JSON array, no other text."""
             # Step 5: Apply deduplication if enabled
             if settings.DEDUPLICATION_ENABLED:
                 all_chunks = await deduplication_manager.deduplicate_query_results(all_chunks, query)
-                logger.info(f"🔍 After deduplication: {len(all_chunks)} chunks")
+                logger.debug(f"🔍 After deduplication: {len(all_chunks)} chunks")
             else:
                 # Sort by final score and limit without deduplication
                 all_chunks.sort(key=lambda x: x['score'], reverse=True)
                 all_chunks = all_chunks[:settings.FINAL_RESULT_LIMIT]
             
-            logger.info(f"🔍 Hybrid retrieval completed: {len(all_chunks)} chunks")
+            logger.debug(f"🔍 Hybrid retrieval completed: {len(all_chunks)} chunks")
             return all_chunks
             
         except Exception as e:
@@ -2561,9 +2551,9 @@ Please let me know that no relevant documents were found and suggest that the us
             messages.append({"role": "user", "content": user_prompt})
             
             # Call the LLM
-            logger.info(f"🤖 Calling LLM with entity-aware prompting")
-            logger.info(f"🤖 Context length: {len(context)} characters")
-            logger.info(f"🤖 Entities: {entity_names}")
+            logger.debug(f"🤖 Calling LLM with entity-aware prompting")
+            logger.debug(f"🤖 Context length: {len(context)} characters")
+            logger.debug(f"🤖 Entities: {entity_names}")
             
             try:
                 response = await asyncio.wait_for(
@@ -2575,13 +2565,11 @@ Please let me know that no relevant documents were found and suggest that the us
                     ),
                     timeout=900.0  # Increased to 15 minutes for large documents
                 )
-                
-                logger.info(f"🤖 Entity-aware response generated successfully")
-                
+
                 if response.choices and len(response.choices) > 0:
                     answer = response.choices[0].message.content
                     if answer:
-                        logger.info(f"🤖 Generated response with {len(answer)} characters")
+                        logger.debug(f"🤖 Generated response with {len(answer)} characters")
                         return answer
                     else:
                         logger.error(f"❌ LLM returned empty content")
@@ -2589,7 +2577,7 @@ Please let me know that no relevant documents were found and suggest that the us
                 else:
                     logger.error(f"❌ LLM returned no choices")
                     return "I apologize, but the AI model didn't provide a response. Please try again."
-                    
+
             except asyncio.TimeoutError:
                 logger.error(f"❌ LLM call timed out after 60 seconds")
                 return "I apologize, but the response took too long to generate. Please try a simpler question or try again later."
@@ -2864,7 +2852,7 @@ Please let me know that no relevant documents were found and suggest that the us
         if len(raw_entities) > 3 and len(final_entities) == 0:
             logger.warning(f"🔍 All entities filtered out from: {raw_entities}")
         
-        logger.info(f"🔍 Entity filtering: {len(raw_entities)} -> {len(final_entities)}")
+        logger.debug(f"🔍 Entity filtering: {len(raw_entities)} -> {len(final_entities)}")
         return final_entities
 
     def _expand_temporal_query(self, query: str) -> str:
@@ -2919,13 +2907,13 @@ Please let me know that no relevant documents were found and suggest that the us
         """LLM assesses whether retrieved chunks are sufficient to answer the query"""
         try:
             if not chunks:
-                logger.info("🧠 No chunks retrieved, marking as INSUFFICIENT")
+                logger.debug("🧠 No chunks retrieved, marking as INSUFFICIENT")
                 return "INSUFFICIENT"
             
             # Special handling for headline queries - they should NOT trigger full document retrieval
             query_lower = query.lower()
             if any(pattern in query_lower for pattern in ['headline', 'headlines', 'top stories', 'news summary']):
-                logger.info("🧠 Headline query detected - checking for sufficient headline content")
+                logger.debug("🧠 Headline query detected - checking for sufficient headline content")
                 
                 # Check if we have headline-like content in our chunks
                 headline_chunks = 0
@@ -2935,10 +2923,10 @@ Please let me know that no relevant documents were found and suggest that the us
                         headline_chunks += 1
                 
                 if headline_chunks >= 5 or len(chunks) >= 20:
-                    logger.info(f"🧠 Found {headline_chunks} headline-like chunks out of {len(chunks)} total - marking SUFFICIENT")
+                    logger.debug(f"🧠 Found {headline_chunks} headline-like chunks out of {len(chunks)} total - marking SUFFICIENT")
                     return "SUFFICIENT"
                 else:
-                    logger.info(f"🧠 Only {headline_chunks} headline-like chunks found - will use targeted headline retrieval")
+                    logger.debug(f"🧠 Only {headline_chunks} headline-like chunks found - will use targeted headline retrieval")
                     return "INSUFFICIENT"
             
             # Prepare chunk context for LLM assessment
@@ -2977,7 +2965,7 @@ Respond with only: SUFFICIENT or INSUFFICIENT"""
                 
                 if response.choices and response.choices[0].message.content:
                     assessment = response.choices[0].message.content.strip().upper()
-                    logger.info(f"🧠 LLM chunk assessment: '{assessment}'")
+                    logger.debug(f"🧠 LLM chunk assessment: '{assessment}'")
                     
                     if "INSUFFICIENT" in assessment:
                         return "INSUFFICIENT"
@@ -3053,29 +3041,29 @@ Top chunks:
         diverse_documents = len(set(chunk['document_id'] for chunk in chunks))
         
         if needs_comprehensive:
-            logger.info(f"🧠 Fallback: Comprehensive query detected, marking INSUFFICIENT")
+            logger.debug(f"🧠 Fallback: Comprehensive query detected, marking INSUFFICIENT")
             return "INSUFFICIENT"
         elif len(high_quality_chunks) >= 3 and diverse_documents >= 1:
-            logger.info(f"🧠 Fallback: Good chunks available ({len(high_quality_chunks)} high-quality), marking SUFFICIENT")
+            logger.debug(f"🧠 Fallback: Good chunks available ({len(high_quality_chunks)} high-quality), marking SUFFICIENT")
             return "SUFFICIENT"
         else:
-            logger.info(f"🧠 Fallback: Poor chunk quality or coverage, marking INSUFFICIENT")
+            logger.debug(f"🧠 Fallback: Poor chunk quality or coverage, marking INSUFFICIENT")
             return "INSUFFICIENT"
     
     async def _intelligent_full_document_retrieval(self, query: str, entity_names: List[str]) -> tuple[List[Dict[str, Any]], bool]:
         """Intelligently retrieve full documents based on query intent"""
         try:
-            logger.info("📚 Starting intelligent full document retrieval")
+            logger.debug("📚 Starting intelligent full document retrieval")
             
             # Step 1: Find relevant documents using hybrid search
             relevant_documents = await self._find_relevant_documents_for_query(query, entity_names)
             
             if not relevant_documents:
-                logger.info("📚 No relevant documents found, falling back to chunk retrieval")
+                logger.debug("📚 No relevant documents found, falling back to chunk retrieval")
                 chunks = await self._hybrid_retrieval(query, entity_names)
                 return chunks, False
             
-            logger.info(f"📚 Found {len(relevant_documents)} relevant documents")
+            logger.debug(f"📚 Found {len(relevant_documents)} relevant documents")
             
             # Step 2: Check if documents are too large for context
             total_chunks = 0
@@ -3085,9 +3073,9 @@ Top chunks:
                 doc_chunk_counts[doc_id] = len(doc_chunks)
                 total_chunks += len(doc_chunks)
             
-            logger.info(f"📚 Total chunks across documents: {total_chunks}")
+            logger.debug(f"📚 Total chunks across documents: {total_chunks}")
             for doc_id, count in doc_chunk_counts.items():
-                logger.info(f"📚 Document {doc_id}: {count} chunks")
+                logger.debug(f"📚 Document {doc_id}: {count} chunks")
             
             # Very conservative limits for stability with large email collections
             max_chunks_for_direct = 30    # Reduced from 50
@@ -3100,7 +3088,7 @@ Top chunks:
                 chunks = await self._hybrid_retrieval(query, entity_names)
                 return chunks, False
             elif total_chunks > max_chunks_for_direct:
-                logger.info(f"📚 Documents large ({total_chunks} chunks), will use iterative analysis with strict limits")
+                logger.debug(f"📚 Documents large ({total_chunks} chunks), will use iterative analysis with strict limits")
                 # Filter out documents that are too large individually and limit total chunks
                 manageable_docs = []
                 manageable_chunks = []
@@ -3123,14 +3111,14 @@ Top chunks:
                     manageable_chunks.extend(doc_chunks)
                     total_added += len(doc_chunks)
                     
-                    logger.info(f"📚 Added document {doc_id} ({len(doc_chunks)} chunks) - total now {total_added}")
+                    logger.debug(f"📚 Added document {doc_id} ({len(doc_chunks)} chunks) - total now {total_added}")
                 
                 if not manageable_chunks:
                     logger.warning("📚 No documents small enough for iterative processing, falling back to chunk retrieval")
                     chunks = await self._hybrid_retrieval(query, entity_names)
                     return chunks, False
                 
-                logger.info(f"📚 Using {len(manageable_docs)} documents with {len(manageable_chunks)} chunks for iterative processing (limit: {max_chunks_for_iterative})")
+                logger.debug(f"📚 Using {len(manageable_docs)} documents with {len(manageable_chunks)} chunks for iterative processing (limit: {max_chunks_for_iterative})")
                 return manageable_chunks, True
             
             # Step 3: Retrieve all chunks for direct processing
@@ -3142,7 +3130,7 @@ Top chunks:
                     chunk['score'] = 1.0  # All chunks are relevant for full document analysis
                 all_chunks.extend(doc_chunks)
             
-            logger.info(f"📚 Retrieved {len(all_chunks)} chunks from {len(relevant_documents)} documents for direct processing")
+            logger.debug(f"📚 Retrieved {len(all_chunks)} chunks from {len(relevant_documents)} documents for direct processing")
             return all_chunks, False
             
         except Exception as e:
@@ -3186,7 +3174,7 @@ Top chunks:
                     document_candidates.add(chunk['document_id'])
             
             relevant_docs = list(document_candidates)[:5]  # Limit to top 5 documents
-            logger.info(f"📚 Found {len(relevant_docs)} candidate documents for full retrieval")
+            logger.debug(f"📚 Found {len(relevant_docs)} candidate documents for full retrieval")
             
             return relevant_docs
             
@@ -3198,7 +3186,7 @@ Top chunks:
         """Perform iterative memory-based analysis for large documents"""
         try:
             start_time = time.time()
-            logger.info(f"🔄 Starting iterative analysis of {len(document_chunks)} chunks")
+            logger.debug(f"🔄 Starting iterative analysis of {len(document_chunks)} chunks")
             
             # Additional safety check - if still too many chunks, fall back immediately
             if len(document_chunks) > 400:
@@ -3213,7 +3201,7 @@ Top chunks:
                     docs_chunks[doc_id] = []
                 docs_chunks[doc_id].append(chunk)
             
-            logger.info(f"🔄 Grouped into {len(docs_chunks)} documents")
+            logger.debug(f"🔄 Grouped into {len(docs_chunks)} documents")
             
             # Process each document iteratively
             analysis_memory = []
@@ -3221,7 +3209,7 @@ Top chunks:
             
             for i, (doc_id, chunks) in enumerate(docs_chunks.items()):
                 try:
-                    logger.info(f"🔄 Processing document {i+1}/{len(docs_chunks)}: {doc_id} with {len(chunks)} chunks")
+                    logger.debug(f"🔄 Processing document {i+1}/{len(docs_chunks)}: {doc_id} with {len(chunks)} chunks")
                     
                     # Safety check per document
                     if len(chunks) > 200:
@@ -3239,7 +3227,7 @@ Top chunks:
                     
                     if doc_analysis:
                         analysis_memory.append(doc_analysis)
-                        logger.info(f"🔄 Successfully processed document {doc_id}")
+                        logger.debug(f"🔄 Successfully processed document {doc_id}")
                     else:
                         logger.warning(f"🔄 No analysis generated for document {doc_id}")
                     
@@ -3268,7 +3256,7 @@ Top chunks:
                 return await self._fallback_large_document_processing(query, document_chunks[:30], session_id, entity_names)
             
             # Step 3: Final synthesis with timeout
-            logger.info(f"🔄 Synthesizing analysis from {len(analysis_memory)} documents")
+            logger.debug(f"🔄 Synthesizing analysis from {len(analysis_memory)} documents")
             try:
                 final_answer = await asyncio.wait_for(
                     self._synthesize_iterative_analysis(query, analysis_memory),
@@ -3291,7 +3279,7 @@ Top chunks:
             # Store in conversation history
             await self._store_query_history(session_id, query, response)
             
-            logger.info(f"✅ Iterative analysis completed in {query_time:.2f}s")
+            logger.debug(f"✅ Iterative analysis completed in {query_time:.2f}s")
             return response
             
         except Exception as e:
@@ -3543,20 +3531,17 @@ Your response should be comprehensive but well-structured."""
             await self.redis_client.close()
         if self.embedding_manager:
             await self.embedding_manager.close()
-        logger.info("🔄 Chat Service closed")
+        logger.debug("🔄 Chat Service closed")
 
     async def _assess_chunk_sufficiency_with_document_selection(self, query: str, chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Enhanced LLM assessment that can specify which documents it wants to see in full"""
         try:
             if not chunks:
-                logger.info("🧠 No chunks retrieved, marking as INSUFFICIENT")
                 return {"sufficiency": "INSUFFICIENT", "requested_documents": []}
-            
+
             # Special handling for headline queries - they should NOT trigger full document retrieval
             query_lower = query.lower()
             if any(pattern in query_lower for pattern in ['headline', 'headlines', 'top stories', 'news summary']):
-                logger.info("🧠 Headline query detected - checking for sufficient headline content")
-                
                 # Check if we have headline-like content in our chunks
                 headline_chunks = 0
                 for chunk in chunks:
@@ -3565,12 +3550,10 @@ Your response should be comprehensive but well-structured."""
                         headline_chunks += 1
                 
                 if headline_chunks >= 5 or len(chunks) >= 20:
-                    logger.info(f"🧠 Found {headline_chunks} headline-like chunks out of {len(chunks)} total - marking SUFFICIENT")
                     return {"sufficiency": "SUFFICIENT", "requested_documents": []}
                 else:
-                    logger.info(f"🧠 Only {headline_chunks} headline-like chunks found - will use targeted headline retrieval")
                     return {"sufficiency": "INSUFFICIENT", "requested_documents": []}
-            
+
             # Prepare chunk context for LLM assessment with document information
             chunk_summary_with_docs = self._prepare_chunk_summary_with_document_info(query, chunks)
             
@@ -3616,7 +3599,7 @@ OR
                 
                 if response.choices and response.choices[0].message.content:
                     assessment_text = response.choices[0].message.content.strip()
-                    logger.info(f"🧠 LLM enhanced assessment: {assessment_text[:500]}...")
+                    logger.debug(f"🧠 LLM enhanced assessment: {assessment_text[:500]}...")
                     
                     # Parse JSON response
                     try:
@@ -3628,7 +3611,7 @@ OR
                         
                         if json_start >= 0 and json_end > json_start:
                             json_text = assessment_text[json_start:json_end]
-                            logger.info(f"🧠 Extracted JSON: {json_text}")
+                            logger.debug(f"🧠 Extracted JSON: {json_text}")
                             assessment = json.loads(json_text)
                         else:
                             logger.warning(f"🧠 No JSON found in response: '{assessment_text}'")
@@ -3651,8 +3634,8 @@ OR
                         else:
                             valid_requested_docs = []
                         
-                        logger.info(f"🧠 Assessment: {sufficiency}, Requested docs: {valid_requested_docs}")
-                        logger.info(f"🧠 Reasoning: {reasoning}")
+                        logger.debug(f"🧠 Assessment: {sufficiency}, Requested docs: {valid_requested_docs}")
+                        logger.debug(f"🧠 Reasoning: {reasoning}")
                         
                         return {
                             "sufficiency": sufficiency,
@@ -3711,7 +3694,7 @@ OR
                         doc_title = f"Document {doc_id}"
                     else:
                         doc_title = f"Document {doc_id}"
-                except:
+                except Exception:
                     doc_title = f"Document {doc_id}"
                 
                 # Take top 3 chunks from this document for summary
@@ -3766,7 +3749,6 @@ OR
         diverse_documents = len(set(chunk['document_id'] for chunk in chunks))
         
         if needs_comprehensive:
-            logger.info(f"🧠 Fallback: Comprehensive query detected, marking INSUFFICIENT")
             # For comprehensive queries, suggest top documents
             doc_scores = {}
             for chunk in chunks:
@@ -3791,10 +3773,8 @@ OR
                 "confidence": "high"
             }
         elif len(high_quality_chunks) >= 3 and diverse_documents >= 1:
-            logger.info(f"🧠 Fallback: Good chunks available ({len(high_quality_chunks)} high-quality), marking SUFFICIENT")
             return {"sufficiency": "SUFFICIENT", "requested_documents": []}
         else:
-            logger.info(f"🧠 Fallback: Poor chunk quality or coverage, marking INSUFFICIENT")
             return {"sufficiency": "INSUFFICIENT", "requested_documents": []}
 
     async def _intelligent_document_retrieval_with_llm_selection(
@@ -3806,7 +3786,7 @@ OR
     ) -> tuple[List[Dict[str, Any]], bool]:
         """Retrieve full documents requested by LLM plus remaining chunks from other documents"""
         try:
-            logger.info(f"📚 LLM requested {len(requested_doc_ids)} documents: {requested_doc_ids}")
+            logger.debug(f"📚 LLM requested {len(requested_doc_ids)} documents: {requested_doc_ids}")
             
             # Step 1: Retrieve full content for requested documents
             requested_chunks = []
@@ -3821,7 +3801,7 @@ OR
                             chunk['retrieval_source'] = 'llm_requested_full'
                             chunk['score'] = 1.0  # High relevance since LLM specifically requested
                         requested_chunks.extend(doc_chunks)
-                        logger.info(f"📚 Retrieved {len(doc_chunks)} chunks from requested document {doc_id}")
+                        logger.debug(f"📚 Retrieved {len(doc_chunks)} chunks from requested document {doc_id}")
                     else:
                         logger.warning(f"📚 No chunks found for requested document {doc_id}")
                 except Exception as e:
@@ -3833,7 +3813,7 @@ OR
                 if chunk['document_id'] not in requested_doc_set
             ]
             
-            logger.info(f"📚 Kept {len(remaining_chunks)} chunks from other documents")
+            logger.debug(f"📚 Kept {len(remaining_chunks)} chunks from other documents")
             
             # Step 3: Combine full documents + remaining chunks
             all_chunks = requested_chunks + remaining_chunks
@@ -3843,7 +3823,7 @@ OR
             max_chunks_for_direct = 50    # Can be higher since LLM specifically chose these
             max_chunks_for_iterative = 200
             
-            logger.info(f"📚 Total chunks after LLM selection: {total_chunks}")
+            logger.debug(f"📚 Total chunks after LLM selection: {total_chunks}")
             
             if total_chunks > max_chunks_for_iterative:
                 logger.warning(f"📚 Too many chunks even with LLM selection ({total_chunks}), truncating")
@@ -3853,10 +3833,10 @@ OR
                 final_chunks = requested_chunks + remaining_chunks[:max_remaining]
                 return final_chunks, True  # Use iterative processing
             elif total_chunks > max_chunks_for_direct:
-                logger.info(f"📚 Using iterative processing for {total_chunks} chunks")
+                logger.debug(f"📚 Using iterative processing for {total_chunks} chunks")
                 return all_chunks, True  # Use iterative processing
             else:
-                logger.info(f"📚 Using direct processing for {total_chunks} chunks")
+                logger.debug(f"📚 Using direct processing for {total_chunks} chunks")
                 return all_chunks, False  # Use direct processing
             
         except Exception as e:

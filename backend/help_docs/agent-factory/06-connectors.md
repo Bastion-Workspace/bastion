@@ -1,6 +1,6 @@
 ---
 title: Data Connectors overview
-order: 6
+order: 9
 ---
 
 # Data Connectors overview

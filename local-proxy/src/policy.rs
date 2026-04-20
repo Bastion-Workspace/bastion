@@ -11,6 +11,15 @@ pub fn capability_enabled(config: &AppConfig, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the daemon should advertise this capability to the backend on register.
+pub fn capability_offered(config: &AppConfig, name: &str) -> bool {
+    if name == "create_directory" {
+        return capability_enabled(config, "create_directory")
+            || capability_enabled(config, "write_file");
+    }
+    capability_enabled(config, name)
+}
+
 #[allow(dead_code)]
 pub fn enabled_capabilities(config: &AppConfig) -> Vec<String> {
     config

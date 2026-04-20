@@ -1,9 +1,10 @@
-import React, { useMemo, useEffect, useState, useRef, forwardRef, useImperativeHandle } from 'react';
-import CodeMirror from '@uiw/react-codemirror';
+import React, { useMemo, useEffect, useLayoutEffect, useState, useRef, forwardRef, useImperativeHandle } from 'react';
+import CodeMirror, { ExternalChange } from '@uiw/react-codemirror';
 import { EditorView, keymap, Decoration, ViewPlugin } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
+import { yCollab, yUndoManagerKeymap } from 'y-codemirror.next';
 import { searchKeymap, getSearchQuery, setSearchQuery, openSearchPanel, closeSearchPanel } from '@codemirror/search';
 import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
@@ -22,6 +23,7 @@ import DictationButton from './editor/DictationButton';
 import MarkdownTableEditor from './editor/MarkdownTableEditor';
 import ResizableRightDrawer from './editor/ResizableRightDrawer';
 import { detectTableAtCursor, parseMarkdownTable, emptyTableModel } from '../utils/markdownTableUtils';
+import { devLog } from '../utils/devConsole';
 
 const createMdTheme = (darkMode, accentId = 'blue') => {
   const palette = ACCENT_PALETTES[accentId] || ACCENT_PALETTES.blue;
@@ -208,7 +210,24 @@ function buildFrontmatter(data) {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, restoreScrollAfterRefresh = null, onScrollRestored, onScrollChange, onCurrentSectionChange }, ref) => {
+const MarkdownCMEditor = forwardRef(({
+  value,
+  onChange,
+  filename,
+  canonicalPath,
+  documentId,
+  initialScrollPosition = 0,
+  restoreScrollAfterRefresh = null,
+  onScrollRestored,
+  onScrollChange,
+  onCurrentSectionChange,
+  menuContainerEl = null,
+  isCollaborative = false,
+  ytext = null,
+  awareness = null,
+  undoManager = null,
+  onCollabDocChange = null,
+}, ref) => {
   const { darkMode, accentId } = useTheme();
   const themeSignature = `${darkMode ? 'dark' : 'light'}-${accentId}`;
   const [themeRemountNonce, setThemeRemountNonce] = useState(0);
@@ -235,7 +254,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     
     const updateCount = () => {
       const count = documentDiffStore.getDiffCount(documentId);
-      console.log(`📊 MarkdownCMEditor: Diff count for ${documentId} is ${count}`);
+      devLog(`📊 MarkdownCMEditor: Diff count for ${documentId} is ${count}`);
       setDiffCount(count);
     };
     
@@ -256,6 +275,20 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   const [tableEditorModel, setTableEditorModel] = useState(() => emptyTableModel());
   const [tableEditorIsEditing, setTableEditorIsEditing] = useState(false);
   const tableReplaceRangeRef = useRef(null);
+
+  const [collabDocText, setCollabDocText] = useState('');
+  useLayoutEffect(() => {
+    if (!isCollaborative || !ytext) {
+      setCollabDocText('');
+      return undefined;
+    }
+    const bump = () => setCollabDocText(ytext.toString());
+    bump();
+    ytext.observe(bump);
+    return () => {
+      ytext.unobserve(bump);
+    };
+  }, [isCollaborative, ytext]);
 
   const insertTextAtCursor = React.useCallback((text) => {
     const view = editorViewRef.current;
@@ -301,31 +334,6 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
       setTableEditorIsEditing(false);
     }
     setTableEditorOpen(true);
-  }, []);
-
-  const handleApplyTableMarkdown = React.useCallback((md) => {
-    const view = editorViewRef.current;
-    if (!view) return;
-    const range = tableReplaceRangeRef.current;
-    if (range && typeof range.from === 'number' && typeof range.to === 'number') {
-      view.dispatch({
-        changes: { from: range.from, to: range.to, insert: md },
-        selection: { anchor: range.from + md.length },
-      });
-    } else {
-      const pos = view.state.selection.main.head;
-      let insert = md;
-      if (pos > 0) {
-        const chBefore = view.state.doc.sliceString(pos - 1, pos);
-        if (chBefore !== '\n') insert = `\n${insert}`;
-      }
-      if (!insert.endsWith('\n')) insert += '\n';
-      view.dispatch({
-        changes: { from: pos, to: pos, insert },
-        selection: { anchor: pos + insert.length },
-      });
-    }
-    tableReplaceRangeRef.current = null;
   }, []);
 
   // Expose scrollToLine and getScrollPosition to parent via ref
@@ -406,12 +414,12 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   // ✅ documentId comes from props, passed down from DocumentViewer
   const liveEditDiffExt = useMemo(() => {
     if (!documentId) {
-      console.log('🔍 MarkdownCMEditor: No documentId, skipping liveEditDiffExt');
+      devLog('🔍 MarkdownCMEditor: No documentId, skipping liveEditDiffExt');
       return [];
     }
     
     const ext = createLiveEditDiffExtension(documentId);
-    console.log('🔍 MarkdownCMEditor: Created liveEditDiffExt for document:', documentId, 'items:', ext?.length);
+    devLog('🔍 MarkdownCMEditor: Created liveEditDiffExt for document:', documentId, 'items:', ext?.length);
     return ext;
   }, [documentId]);
   // Persistent search configuration
@@ -550,27 +558,52 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     { key: 'Mod-Shift-t', run: () => { handleOpenTableEditor(); return true; } }
   ]), [handleOpenTableEditor]);
 
-  const extensions = useMemo(() => [
-    history(),
-    keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
-    fileLinkKeymap,
-    tableEditorKeymap,
-    markdown({ base: markdownLanguage }),
-    EditorView.lineWrapping,
+  const extensions = useMemo(() => {
+    const hist = isCollaborative ? [] : [history()];
+    // y-codemirror.next exports yUndoManagerKeymap as a KeyBinding[] (not a factory); yCollab wires UndoManager via facet.
+    const undoKeys =
+      isCollaborative && ytext && awareness && undoManager
+        ? yUndoManagerKeymap
+        : historyKeymap;
+    const collabExts =
+      isCollaborative && ytext && awareness && undoManager
+        ? [yCollab(ytext, awareness, { undoManager })]
+        : [];
+    return [
+      ...hist,
+      keymap.of([...defaultKeymap, ...undoKeys, ...searchKeymap]),
+      fileLinkKeymap,
+      tableEditorKeymap,
+      markdown({ base: markdownLanguage }),
+      EditorView.lineWrapping,
+      mdTheme,
+      inlineEditExt,
+      liveEditDiffExt,
+      ...persistentSearchExt,
+      ...collabExts,
+    ];
+  }, [
     mdTheme,
     inlineEditExt,
     liveEditDiffExt,
-    ...persistentSearchExt
-  ], [mdTheme, inlineEditExt, liveEditDiffExt, persistentSearchExt, fileLinkKeymap, tableEditorKeymap]);
+    persistentSearchExt,
+    fileLinkKeymap,
+    tableEditorKeymap,
+    isCollaborative,
+    ytext,
+    awareness,
+    undoManager,
+  ]);
 
   const { setEditorState } = useEditor();
   const [fmOpen, setFmOpen] = useState(false);
 
+  const fmSourceLine = isCollaborative ? collabDocText : value;
   const { data: initialData, lists: initialLists, raw: initialRaw, order: initialOrder, body: initialBody } = useMemo(() => {
-    const parsed = parseFrontmatter((value || '').replace(/\r\n/g, '\n'));
+    const parsed = parseFrontmatter((fmSourceLine || '').replace(/\r\n/g, '\n'));
     // Debug logging removed for performance - fires on every keystroke
     return parsed;
-  }, [value]);
+  }, [fmSourceLine]);
   const baseTitle = useMemo(() => (filename ? String(filename).replace(/\.[^.]+$/, '') : ''), [filename]);
   const [fmEntries, setFmEntries] = useState(() => {
     const entries = Object.entries(initialData).map(([k, v]) => ({ key: k, value: String(v ?? '') }));
@@ -606,7 +639,8 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   }, [initialData, initialLists, initialRaw, initialOrder, baseTitle]);
 
   // Restore scroll position after value changes (from diff accept/reject, or from full-document refresh after Accept All)
-  const prevValueForScrollRestoreRef = useRef(value);
+  const effectiveEditorText = isCollaborative ? collabDocText : value;
+  const prevValueForScrollRestoreRef = useRef(effectiveEditorText);
   useEffect(() => {
     if (shouldRestoreScrollRef.current && savedScrollPosRef.current !== null && editorViewRef.current) {
       // Use requestAnimationFrame to ensure DOM has updated
@@ -615,7 +649,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           const scrollDOM = editorViewRef.current.scrollDOM;
           if (scrollDOM) {
             scrollDOM.scrollTop = savedScrollPosRef.current;
-            console.log('📜 Restored scroll position:', savedScrollPosRef.current);
+            devLog('📜 Restored scroll position:', savedScrollPosRef.current);
             shouldRestoreScrollRef.current = false;
             savedScrollPosRef.current = null;
           }
@@ -624,18 +658,18 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
       return;
     }
     // Full-document refresh (e.g. Accept All): parent set restoreScrollAfterRefresh; restore when content updates
-    const valueChanged = prevValueForScrollRestoreRef.current !== value;
-    prevValueForScrollRestoreRef.current = value;
+    const valueChanged = prevValueForScrollRestoreRef.current !== effectiveEditorText;
+    prevValueForScrollRestoreRef.current = effectiveEditorText;
     if (valueChanged && typeof restoreScrollAfterRefresh === 'number' && restoreScrollAfterRefresh > 0 && editorViewRef.current) {
       requestAnimationFrame(() => {
         if (editorViewRef.current && editorViewRef.current.scrollDOM) {
           editorViewRef.current.scrollDOM.scrollTop = restoreScrollAfterRefresh;
-          console.log('📜 Restored scroll after refresh:', restoreScrollAfterRefresh);
+          devLog('📜 Restored scroll after refresh:', restoreScrollAfterRefresh);
           if (typeof onScrollRestored === 'function') onScrollRestored();
         }
       });
     }
-  }, [value, restoreScrollAfterRefresh, onScrollRestored]);
+  }, [effectiveEditorText, restoreScrollAfterRefresh, onScrollRestored]);
   
   // Restore initial scroll position on mount (for tab switching and page reload).
   // Editor view ref is set asynchronously by CodeMirror, so retry until the view exists.
@@ -717,7 +751,9 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   
   // Helper function to parse frontmatter and update cache (on-demand only)
   const refreshEditorCacheWithFrontmatter = React.useCallback((content = null) => {
-    const fullText = content !== null ? content : (value || '').replace(/\r\n/g, '\n');
+    const fullText = content !== null
+      ? String(content).replace(/\r\n/g, '\n')
+      : (isCollaborative ? (collabDocText || '') : (value || '')).replace(/\r\n/g, '\n');
     const { data, lists } = parseFrontmatter(fullText);
     const mergedFrontmatter = { ...data, ...lists };
     
@@ -737,7 +773,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
         selectionStart = sel.from;
         selectionEnd = sel.to;
         
-        console.log('📍 CURSOR POSITION DEBUG: Cache refresh captured cursor at:', {
+        devLog('📍 CURSOR POSITION DEBUG: Cache refresh captured cursor at:', {
           cursorOffset,
           selectionStart,
           selectionEnd,
@@ -776,7 +812,51 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     } catch {}
     
     return mergedFrontmatter;
-  }, [value, filename, canonicalPath, documentId, setEditorState]);
+  }, [value, collabDocText, isCollaborative, filename, canonicalPath, documentId, setEditorState]);
+
+  const handleApplyTableMarkdown = React.useCallback((md) => {
+    const view = editorViewRef.current;
+    if (!view) return;
+    const range = tableReplaceRangeRef.current;
+    // Mark as external so @uiw/react-codemirror does not treat this as debounced typing (which can
+    // queue a stale value sync and revert the edit). Collaborative mode uses onChange={() => {}},
+    // so we must push the new text to the parent explicitly.
+    const externalAnno = [ExternalChange.of(true)];
+    if (range && typeof range.from === 'number' && typeof range.to === 'number') {
+      view.dispatch({
+        changes: { from: range.from, to: range.to, insert: md },
+        selection: { anchor: range.from + md.length },
+        annotations: externalAnno,
+      });
+    } else {
+      const pos = view.state.selection.main.head;
+      let insert = md;
+      if (pos > 0) {
+        const chBefore = view.state.doc.sliceString(pos - 1, pos);
+        if (chBefore !== '\n') insert = `\n${insert}`;
+      }
+      if (!insert.endsWith('\n')) insert += '\n';
+      view.dispatch({
+        changes: { from: pos, to: pos, insert },
+        selection: { anchor: pos + insert.length },
+        annotations: externalAnno,
+      });
+    }
+    tableReplaceRangeRef.current = null;
+    const next = view.state.doc.toString();
+    if (isCollaborative && typeof onCollabDocChange === 'function') {
+      onCollabDocChange(next);
+    } else if (onChange) {
+      onChange(next);
+    }
+    queueMicrotask(() => {
+      try {
+        refreshEditorCacheWithFrontmatter(next);
+      } catch {
+        /* ignore */
+      }
+    });
+  }, [isCollaborative, onChange, onCollabDocChange, refreshEditorCacheWithFrontmatter]);
 
   // Set editor state when document changes (NOT on every value change)
   // This ensures frontmatter is correct when switching tabs
@@ -820,6 +900,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   // Watch for content changes and update cache (content only, no frontmatter parsing)
   // Debounced to avoid excessive updates during typing
   useEffect(() => {
+    if (isCollaborative) return undefined;
     const fullText = (value || '').replace(/\r\n/g, '\n');
     const cachedContent = window.__last_editor_content || '';
     const cachedFrontmatter = window.__last_editor_frontmatter || {};
@@ -867,7 +948,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
         clearTimeout(window.__editor_content_update_timer);
       }
     };
-  }, [value, filename, canonicalPath, documentId, setEditorState]);
+  }, [isCollaborative, value, filename, canonicalPath, documentId, setEditorState]);
 
   // Removed floating Accept listener; no longer needed
 
@@ -913,7 +994,6 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           return;
         }
         
-        const current = (value || '').replace(/\r\n/g, '\n');
         const doc = view.state.doc;
         const docText = doc.toString();
         
@@ -980,7 +1060,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
         }
         
         if (hasValidChanges && changes.length > 0) {
-          console.log('✅ Applying operations via CodeMirror transactions:', { 
+          devLog('✅ Applying operations via CodeMirror transactions:', { 
             originalLength: doc.length, 
             operationsCount: operations.length,
             changesCount: changes.length
@@ -990,7 +1070,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           if (view.scrollDOM) {
             savedScrollPosRef.current = view.scrollDOM.scrollTop;
             shouldRestoreScrollRef.current = true;
-            console.log('💾 Saved scroll position:', savedScrollPosRef.current);
+            devLog('💾 Saved scroll position:', savedScrollPosRef.current);
           }
           
           // Dispatch as single transaction using the changes array directly
@@ -1003,18 +1083,25 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           // Get the new document text after transaction
           const nextText = view.state.doc.toString();
           
-          // Update React state via onChange to keep it in sync
           if (onChange) {
             onChange(nextText);
-            
-            // CRITICAL: Force immediate cache update after operations (bypass debounce)
-            // This ensures chat messages sent immediately after accepting diffs use fresh content
-            // Parse frontmatter here since operations may have changed it
             try {
               refreshEditorCacheWithFrontmatter(nextText);
             } catch (err) {
               console.error('Failed to update cache after operation apply:', err);
             }
+            if (detail.emitLiveEditApplied && documentId) {
+              window.dispatchEvent(new CustomEvent('liveEditApplied', {
+                detail: { documentId, content: nextText }
+              }));
+            }
+          } else if (isCollaborative && typeof onCollabDocChange === 'function') {
+            try {
+              refreshEditorCacheWithFrontmatter(nextText);
+            } catch (err) {
+              console.error('Failed to update cache after operation apply:', err);
+            }
+            onCollabDocChange(nextText);
             if (detail.emitLiveEditApplied && documentId) {
               window.dispatchEvent(new CustomEvent('liveEditApplied', {
                 detail: { documentId, content: nextText }
@@ -1045,25 +1132,27 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     // Provide current editor content on request for diff previews
     function provideEditorContent() {
       try {
-        const current = (value || '').replace(/\r\n/g, '\n');
+        const fromView = editorViewRef.current?.state?.doc?.toString?.();
+        const current = (fromView ?? (isCollaborative ? (collabDocText || '') : (value || ''))).replace(/\r\n/g, '\n');
         window.dispatchEvent(new CustomEvent('codexProvideEditorContent', { detail: { content: current } }));
-      } catch {}
+      } catch { /* ignore */ }
     }
     window.addEventListener('codexRequestEditorContent', provideEditorContent);
     
     return () => {
       window.removeEventListener('codexApplyEditorOps', applyOperations);
+      window.removeEventListener('codexRequestEditorContent', provideEditorContent);
     };
-  }, [value, onChange]);
+  }, [value, onChange, isCollaborative, onCollabDocChange, collabDocText, refreshEditorCacheWithFrontmatter, documentId]);
 
   const applyFrontmatter = () => {
-    const fullText = (value || '').replace(/\r\n/g, '\n');
+    const fullText = (isCollaborative ? (collabDocText || '') : (value || '')).replace(/\r\n/g, '\n');
     const parsed = parseFrontmatter(fullText);
     const nextData = {};
-    fmEntries.forEach(({ key, value }) => {
+    fmEntries.forEach(({ key, value: entryVal }) => {
       const k = String(key || '').trim();
       if (!k) return;
-      nextData[k] = String(value ?? '').trim();
+      nextData[k] = String(entryVal ?? '').trim();
     });
     // Ensure title exists
     if (!nextData.title && baseTitle) {
@@ -1078,9 +1167,15 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     });
     const fmBlock = mergeFrontmatter(parsed.raw || fmRaw || '', nextData, listUpdates, parsed.order || fmOrder || []);
     const next = `${fmBlock}${parsed.body}`;
-    onChange && onChange(next);
-    
-    // Refresh cache with fresh frontmatter after applying changes
+    if (isCollaborative && ytext) {
+      ytext.doc.transact(() => {
+        ytext.delete(0, ytext.length);
+        ytext.insert(0, next);
+      });
+      if (typeof onCollabDocChange === 'function') onCollabDocChange(next);
+    } else if (onChange) {
+      onChange(next);
+    }
     setTimeout(() => {
       refreshEditorCacheWithFrontmatter(next);
     }, 0);
@@ -1093,8 +1188,8 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   // Memoize CodeMirror to avoid reconfiguring extensions on every render. Must be called unconditionally (rules of hooks).
   const codeMirrorEditor = useMemo(() => (
     <CodeMirror
-      key={`${documentId || 'no-doc'}-${themeSignature}-${themeRemountNonce}`}
-      value={value}
+      key={`${documentId || 'no-doc'}-${themeSignature}-${themeRemountNonce}${isCollaborative ? '-collab' : ''}`}
+      value={isCollaborative ? (collabDocText || value || '') : (value || '')}
       height="100%"
       basicSetup={false}
       extensions={[...extensions, frontmatterHider, ...(ghostExt || []), EditorView.updateListener.of((update) => {
@@ -1106,6 +1201,17 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           const selectionStart = sel.from;
           const selectionEnd = sel.to;
           const docText = update.state.doc.toString();
+          if (isCollaborative && update.docChanged && typeof onCollabDocChange === 'function') {
+            if (window.__collab_preview_timer) clearTimeout(window.__collab_preview_timer);
+            const view = update.view;
+            window.__collab_preview_timer = setTimeout(() => {
+              const txt = view.state.doc.toString();
+              onCollabDocChange(txt);
+              try {
+                refreshEditorCacheWithFrontmatter(txt);
+              } catch { /* ignore */ }
+            }, 120);
+          }
           if (onCurrentSectionChange && (update.selectionSet || update.docChanged)) {
             onCurrentSectionChange(docText, cursorOffset);
           }
@@ -1127,12 +1233,12 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             window.__editor_ctx_write_ts = Date.now();
             localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
           }
-        } catch {}
+        } catch { /* ignore */ }
       })]}
-      onChange={(val) => onChange && onChange(val)}
+      onChange={isCollaborative ? (() => {}) : ((val) => onChange && onChange(val))}
       style={{ height: '100%' }}
     />
-  ), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState, onCurrentSectionChange, documentId, darkMode, accentId, themeSignature, themeRemountNonce]);
+  ), [value, collabDocText, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState, onCurrentSectionChange, documentId, darkMode, accentId, themeSignature, themeRemountNonce, isCollaborative, onCollabDocChange, refreshEditorCacheWithFrontmatter]);
 
   return (
     <Box sx={{ bgcolor: 'background.paper', p: 1, borderRadius: 1, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
@@ -1157,6 +1263,9 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
             transformOrigin={{ vertical: 'top', horizontal: 'right' }}
             PaperProps={{ sx: { minWidth: 200 } }}
+            // When the editor is inside a Fullscreen API element, portals to document.body
+            // can render outside the fullscreen tree. Mount the menu inside the provided container.
+            container={menuContainerEl || undefined}
           >
             <MenuItem
               onClick={() => {
@@ -1204,7 +1313,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
         storageKey="markdownEditor_frontmatterDrawerWidth"
         ModalProps={{ keepMounted: true }}
       >
-        <Box sx={{ p: 2, maxHeight: '100vh', boxSizing: 'border-box' }} role="presentation">
+        <Box sx={{ p: 2, boxSizing: 'border-box' }} role="presentation">
           <Typography variant="h6" sx={{ mb: 1 }}>Frontmatter</Typography>
           <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: 'block' }}>
             Key: value pairs. This panel writes YAML at the very top of the file.
@@ -1333,7 +1442,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
                     if (prevDiff) {
                       plugin.jumpToPosition(prevDiff.position);
                     } else {
-                      console.log('No previous diff found');
+                      devLog('No previous diff found');
                     }
                   } else {
                     console.warn('⚠️ Cannot navigate: plugin or view not available');
@@ -1359,7 +1468,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
                     if (nextDiff) {
                       plugin.jumpToPosition(nextDiff.position);
                     } else {
-                      console.log('No next diff found');
+                      devLog('No next diff found');
                     }
                   } else {
                     console.warn('⚠️ Cannot navigate: plugin or view not available');

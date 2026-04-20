@@ -44,20 +44,26 @@ class OrgTagService:
             row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
             username = row['username'] if row else user_id
             
-            # Resolve file path
+            # Resolve file path (logical library path under UPLOAD_DIR)
             user_base_dir = self.upload_dir / "Users" / username
             file_path = user_base_dir / request.file_path
-            
-            if not file_path.exists():
+
+            from services import ds_upload_library_fs as dsf
+
+            if not await dsf.exists(user_id, file_path):
                 return OrgTagResponse(
                     success=False,
                     message=f"File not found: {request.file_path}"
                 )
-            
-            # Read file
-            with open(file_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-            
+
+            body = await dsf.read_text(user_id, file_path)
+            lines = body.splitlines(keepends=True)
+            if not lines:
+                return OrgTagResponse(
+                    success=False,
+                    message=f"Empty file: {request.file_path}",
+                )
+
             # Validate line number
             if request.line_number < 1 or request.line_number > len(lines):
                 return OrgTagResponse(
@@ -86,9 +92,7 @@ class OrgTagService:
             # Update the line
             lines[line_idx] = updated_line + '\n'
             
-            # Write file back
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+            await dsf.write_text(user_id, file_path, "".join(lines))
             
             logger.info(f"✅ TAG SUCCESS: Added tags {final_tags} to {request.file_path}:{request.line_number}")
             

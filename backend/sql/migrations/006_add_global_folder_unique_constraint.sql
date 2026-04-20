@@ -1,5 +1,5 @@
 -- Migration 006: Add unique constraint for global non-root folders
--- **ROOSEVELT'S DUPLICATE FOLDER FIX!** 🏇
+-- Unique constraint for global non-root folders
 --
 -- Problem: Global folders were being created twice (once by API, once by file watcher)
 -- because the unique constraint didn't properly handle global non-root folders
@@ -20,6 +20,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_document_folders_unique_global_with_parent
 ON document_folders(name, parent_folder_id, collection_type)
 WHERE parent_folder_id IS NOT NULL AND user_id IS NULL;
 
--- By George! Now both the API and file watcher will recognize existing folders!
+-- API and file watcher can recognize existing folders with this constraint
 -- The UPSERT will work properly and return the existing folder_id instead of creating duplicates!
 

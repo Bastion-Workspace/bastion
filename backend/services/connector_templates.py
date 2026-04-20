@@ -135,7 +135,7 @@ CONNECTOR_TEMPLATES = [
     },
     {
         "name": "GitHub REST API",
-        "description": "GitHub API. Requires personal access token.",
+        "description": "Generic GitHub REST connector (PAT in credentials). For agents, prefer Settings → GitHub OAuth and the built-in github tool pack.",
         "connector_type": "rest",
         "requires_auth": True,
         "auth_fields": [{"name": "token", "label": "Personal Access Token", "type": "password"}],

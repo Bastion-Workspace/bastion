@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import grpc
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel
 
 from config import settings
@@ -26,6 +26,10 @@ from services.grpc_context_gatherer import get_context_gatherer
 from services.settings_service import settings_service
 from services.user_settings_kv_service import get_user_setting
 from services.user_llm_provider_service import user_llm_provider_service
+from services.microphone_stt_service import (
+    MAX_TRANSCRIBE_AUDIO_BYTES,
+    transcribe_audio_bytes_for_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,8 @@ _DOCUMENT_FILE_URL_PATTERN = re.compile(
     r"^/api/documents/([a-f0-9-]{36})/file$", re.IGNORECASE
 )
 _API_IMAGES_PREFIX = "/api/images/"
+_API_WS_IMAGES_PREFIX = "/api/web-sources/images/"
+_STATIC_IMAGES_PREFIX = "/static/images/"
 
 
 def _model_display_name(model_id: str) -> str:
@@ -145,7 +151,6 @@ async def _get_document_file_bytes(
 
         container = await get_service_container()
         document_service = container.document_service
-        folder_service = container.folder_service
     except Exception as e:
         logger.warning("Internal document resolve: service container failed: %s", e)
         return None
@@ -170,7 +175,6 @@ async def _get_document_file_bytes(
         return None
 
     filename = getattr(doc_info, "filename", None)
-    folder_id = getattr(doc_info, "folder_id", None)
     if not filename:
         return None
     safe_filename = os.path.basename(filename)
@@ -178,65 +182,59 @@ async def _get_document_file_bytes(
         return None
 
     try:
-        file_path_str = await folder_service.get_document_file_path(
-            filename=filename,
-            folder_id=folder_id,
-            user_id=doc_user_id,
-            collection_type=collection_type,
-        )
-        file_path = Path(file_path_str)
+        from clients.document_service_client import get_document_service_client
+
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        chunks: List[bytes] = []
+        async for ch in dsc.download_document_stream(
+            doc_id,
+            user_id,
+            role="",
+        ):
+            if ch.data:
+                chunks.append(ch.data)
+        data = b"".join(chunks)
     except Exception as e:
-        logger.debug("Internal document resolve: path failed for %s: %s", doc_id, e)
-        file_path = None
-
-    if file_path is None or not file_path.exists():
-        upload_dir = Path(settings.UPLOAD_DIR)
-        for legacy_path in [
-            upload_dir / f"{doc_id}_{doc_info.filename}",
-            upload_dir / doc_info.filename,
-        ]:
-            if legacy_path.exists():
-                file_path = legacy_path
-                break
-        else:
-            return None
-
-    try:
-        uploads_base = Path(settings.UPLOAD_DIR).resolve()
-        if not str(file_path.resolve()).startswith(str(uploads_base)):
-            return None
-    except Exception:
+        logger.warning("Internal document resolve: DS download failed for %s: %s", doc_id, e)
         return None
 
-    try:
-        data = file_path.read_bytes()
-    except Exception as e:
-        logger.warning("Internal document resolve: read failed for %s: %s", doc_id, e)
+    if not data:
         return None
 
-    mime, _ = mimetypes.guess_type(str(file_path))
-    if not mime or not mime.startswith("image/"):
-        mime = "image/png"
+    mime, _ = mimetypes.guess_type(safe_filename)
+    if not mime:
+        mime = "application/octet-stream"
     return (data, mime)
 
 
 def _get_image_file_bytes_from_url(url: str) -> Optional[Tuple[bytes, str]]:
     """
-    Resolve /api/images/... URL to bytes for external chat (Telegram/Discord).
-    Serves from UPLOAD_DIR/web_sources/images (and subdirs). Returns (bytes, mime) or None.
+    Resolve image URLs under WEB_SOURCES_ROOT/images to bytes (external chat).
+    Accepts /api/images/, /api/web-sources/images/, and legacy /static/images/.
     """
-    if not url or not url.strip().startswith(_API_IMAGES_PREFIX):
+    if not url:
         return None
+    u = url.strip()
     from urllib.parse import unquote
 
+    if u.startswith(_API_WS_IMAGES_PREFIX):
+        prefix = _API_WS_IMAGES_PREFIX
+    elif u.startswith(_API_IMAGES_PREFIX):
+        prefix = _API_IMAGES_PREFIX
+    elif u.startswith(_STATIC_IMAGES_PREFIX):
+        prefix = _STATIC_IMAGES_PREFIX
+    else:
+        return None
+
     try:
-        relative = unquote(url.strip()[len(_API_IMAGES_PREFIX) :].lstrip("/"))
+        relative = unquote(u[len(prefix) :].lstrip("/"))
         if not relative:
             return None
         parts = Path(relative).parts
         if not parts or any(p in (".", "..") for p in parts):
             return None
-        images_base = Path(settings.UPLOAD_DIR) / "web_sources" / "images"
+        images_base = Path(settings.WEB_SOURCES_ROOT) / "images"
         image_file_path = (images_base / relative).resolve()
         if not str(image_file_path).startswith(str(images_base.resolve())):
             return None
@@ -272,6 +270,50 @@ def _strip_resolved_image_refs(text: str, resolved_urls: List[str]) -> str:
     out = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", replace_one, text)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
+
+
+@router.post("/transcribe-audio", dependencies=[Depends(verify_internal_service_key)])
+async def internal_transcribe_audio(
+    user_id: str = Form(...),
+    file: UploadFile = File(...),
+    prompt: Optional[str] = Form(None),
+) -> Dict[str, Any]:
+    """
+    Multipart STT for connections-service (Telegram/Discord/Slack voice).
+    Same provider stack as /api/audio/transcribe for the given user_id.
+    """
+    uid = (user_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="No filename provided")
+
+    audio_bytes = await file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+    if len(audio_bytes) > MAX_TRANSCRIBE_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio exceeds maximum size ({MAX_TRANSCRIBE_AUDIO_BYTES // (1024 * 1024)}MB)",
+        )
+
+    try:
+        text = await transcribe_audio_bytes_for_user(
+            uid,
+            audio_bytes,
+            file.filename,
+            content_type=file.content_type,
+            prompt=(prompt.strip() if prompt and prompt.strip() else None),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:
+        logger.error("internal transcribe-audio failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    return {"success": True, "text": text}
 
 
 @router.post("/external-chat", dependencies=[Depends(verify_internal_service_key)])
@@ -663,6 +705,14 @@ class InvokeDeviceToolRequest(BaseModel):
     timeout_seconds: int = 30
 
 
+class SetDeviceWorkspaceRequest(BaseModel):
+    """Request to set the active workspace root on a user's connected local proxy device."""
+    user_id: str
+    device_id: Optional[str] = None
+    workspace_root: str
+    timeout_seconds: int = 30
+
+
 @router.post("/invoke-device-tool", dependencies=[Depends(verify_internal_service_key)])
 async def invoke_device_tool_internal(body: InvokeDeviceToolRequest) -> Dict[str, Any]:
     """
@@ -692,6 +742,34 @@ async def invoke_device_tool_internal(body: InvokeDeviceToolRequest) -> Dict[str
         return out
     except Exception as e:
         logger.exception("invoke_device_tool_internal failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/set-device-workspace", dependencies=[Depends(verify_internal_service_key)])
+async def set_device_workspace_internal(body: SetDeviceWorkspaceRequest) -> Dict[str, Any]:
+    """
+    Set the device-side active workspace root (relative path base).
+    Returns: {success, result_json, error, formatted}.
+    """
+    try:
+        from utils.websocket_manager import get_websocket_manager
+
+        ws_manager = get_websocket_manager()
+        result = await ws_manager.set_device_workspace(
+            user_id=body.user_id,
+            workspace_root=body.workspace_root,
+            device_id=body.device_id or None,
+            timeout=body.timeout_seconds,
+        )
+        out = {
+            "success": result.get("success", False),
+            "result_json": result.get("result_json", "{}"),
+            "error": result.get("error", ""),
+            "formatted": result.get("formatted", ""),
+        }
+        return out
+    except Exception as e:
+        logger.exception("set_device_workspace_internal failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

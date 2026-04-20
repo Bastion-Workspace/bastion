@@ -634,7 +634,7 @@ async def _async_process_rss_article(
                 if user_info and user_info.role == "admin":
                     current_user_role = "admin"
                     admin_user_id = user_id
-                    logger.info(f"🔐 Confirmed admin user {user_id} for global RSS folder creation")
+                    logger.debug(f"🔐 Confirmed admin user {user_id} for global RSS folder creation")
                 else:
                     logger.warning(f"⚠️ User {user_id} is not admin but trying to import global RSS article - will attempt anyway")
                     # For global feeds, still allow creation but with admin context from system
@@ -647,9 +647,9 @@ async def _async_process_rss_article(
         
         # Use FileManager to place the RSS article with proper error handling
         try:
-            logger.info(f"📁 Initializing FileManager for RSS article placement...")
+            logger.debug(f"📁 Initializing FileManager for RSS article placement...")
             await file_manager.initialize()
-            logger.info(f"📁 FileManager initialized successfully")
+            logger.debug(f"📁 FileManager initialized successfully")
 
             placement_target_id: Optional[str] = None
             if target_folder_id:
@@ -699,7 +699,7 @@ async def _async_process_rss_article(
             document_id = placement_response.document_id
             folder_id = placement_response.folder_id
             
-            logger.info(f"📝 File placed via FileManager: {document_id} in folder {folder_id}")
+            logger.debug(f"📝 File placed via FileManager: {document_id} in folder {folder_id}")
             
         except Exception as e:
             logger.error(f"❌ Failed to place file via FileManager: {e}")
@@ -711,22 +711,11 @@ async def _async_process_rss_article(
         
         # Store document record in database
         try:
-            logger.info(f"📄 Creating document record in database: {document_id}")
-            logger.info(f"📄 Document metadata: title='{document_metadata['title']}', collection_type={document_metadata['collection_type']}")
-            # FileManager already created the document, so we don't need to create it again
-            logger.info(f"✅ Document already created by FileManager: {document_id}")
-            logger.info(f"✅ Document record created successfully: {document_id}")
-            
-            # Add a small delay to ensure the transaction is committed
+            logger.debug(f"📄 Creating document record in database: {document_id}")
+            logger.debug(f"📄 Document metadata: title='{document_metadata['title']}', collection_type={document_metadata['collection_type']}")
+            # FileManager already created the document; brief delay so the transaction is visible downstream
             await asyncio.sleep(0.1)
-            
-            # Verify the document was created successfully via FileManager
-            try:
-                # FileManager handles document creation, so we just log success
-                logger.info(f"✅ Document created successfully via FileManager: {document_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not verify document creation: {e}")
-            
+
         except Exception as e:
             logger.error(f"❌ Failed to process document via FileManager: {e}")
             raise Exception(f"FileManager document processing failed: {e}")
@@ -739,7 +728,7 @@ async def _async_process_rss_article(
                 user_id=None if collection_type == "global" else user_id, 
                 progress=0.5
             )
-            logger.info(f"✅ Document status updated to EMBEDDING: {document_id}")
+            logger.debug(f"✅ Document status updated to EMBEDDING: {document_id}")
         except Exception as e:
             logger.error(f"❌ Failed to update document status: {e}")
             # Don't raise here, continue with processing
@@ -749,16 +738,16 @@ async def _async_process_rss_article(
             # Use the parallel document service's enhanced capabilities
             if hasattr(file_manager.document_service, 'store_text_document'):
                 # The parallel document service handles all processing internally
-                logger.info(f"✅ Document processing completed by ParallelDocumentService: {document_id}")
+                logger.debug("Document processing completed for document_id=%s", document_id)
             else:
                 # Fallback to basic processing
-                logger.info(f"✅ Document processing completed by basic document service: {document_id}")
+                logger.debug(f"✅ Document processing completed by basic document service: {document_id}")
             
             # Emit WebSocket notification via FileManager
             await file_manager.websocket_notifier.notify_file_processed(
                 document_id, folder_id, 
                 user_id=None if collection_type == "global" else user_id,
-                processing_info={"chunks_processed": "completed_by_parallel_document_service"}
+                processing_info={"chunks_processed": "completed_by_document_service"},
             )
         except Exception as e:
             logger.error(f"❌ Failed to update final document status: {e}")
@@ -851,7 +840,7 @@ async def _async_extract_full_content(task, user_id: str, article_ids: List[str]
                     )
                     if success:
                         articles_successful += 1
-                        logger.info(f"✅ Successfully extracted full content for article {article.article_id}")
+                        logger.debug(f"✅ Successfully extracted full content for article {article.article_id}")
                     else:
                         logger.warning(f"⚠️ Failed to update full content for article {article.article_id}")
                 else:
@@ -889,7 +878,7 @@ async def _async_rss_health_check(task) -> Dict[str, Any]:
     try:
         update_task_progress(task, 2, 3, "Analyzing feed health metrics...")
         
-        # TODO: Implement RSS feed health analysis
+        # Future: deeper RSS health scoring from poll history (not implemented).
         # health_results = await analyze_rss_feed_health()
         
         update_task_progress(task, 3, 3, "Health check completed")
@@ -968,44 +957,4 @@ def scheduled_rss_poll_task(self) -> Dict[str, Any]:
         }
 
 
-@celery_app.task(bind=True, name="services.celery_tasks.rss_tasks.purge_old_news_task")
-def purge_old_news_task(self):
-    """Purge synthesized news articles older than retention_days."""
-    try:
-        async def _purge():
-            try:
-                from services.settings_service import settings_service
-                from services.database_manager.database_helpers import execute
-
-                if not getattr(settings_service, "_initialized", False):
-                    await settings_service.initialize()
-                days = await settings_service.get_setting("news.retention_days", 14)
-                days = int(days or 14)
-                # First fetch file paths to delete from disk
-                from services.database_manager.database_helpers import fetch_all
-                rows = await fetch_all(
-                    "SELECT file_path FROM news_articles WHERE updated_at < (NOW() - ($1 || ' days')::interval)",
-                    days,
-                )
-                import os
-                deleted_files = 0
-                for row in rows or []:
-                    p = row.get("file_path")
-                    try:
-                        if p and os.path.exists(p):
-                            os.remove(p)
-                            deleted_files += 1
-                    except Exception:
-                        pass
-                # Then delete SQL rows
-                await execute(
-                    "DELETE FROM news_articles WHERE updated_at < (NOW() - ($1 || ' days')::interval)",
-                    days,
-                )
-                return {"status": "ok", "purged": True, "retention_days": days, "files_deleted": deleted_files}
-            except Exception as e:
-                return {"status": "error", "error": str(e)}
-        return run_async(_purge())
-    except Exception as e:
-        logger.error(f"❌ PURGE NEWS TASK ERROR: {e}")
-        return {"status": "error", "error": str(e)}
+ 

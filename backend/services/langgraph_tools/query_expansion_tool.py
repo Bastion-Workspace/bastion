@@ -86,14 +86,3 @@ async def expand_query(original_query: str, num_expansions: int = 2, expansion_t
             expansion_count=0
         )
         return json.dumps(fallback_result.dict(), indent=2)
-
-
-# Global function for tool registry integration
-async def expand_query_universal(original_query: str, num_expansions: int = 2, expansion_type: str = "semantic", user_id: str = None) -> str:
-    """
-    Universal query expansion function for tool registry
-    
-    This is the entry point called by the centralized tool registry.
-    The user_id parameter is used for timezone-aware date/time context.
-    """
-    return await expand_query(original_query, num_expansions, expansion_type, user_id=user_id)

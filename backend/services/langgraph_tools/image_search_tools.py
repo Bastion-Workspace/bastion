@@ -68,7 +68,7 @@ class ImageSearchTools:
                 "type": "function",
                 "function": {
                     "name": "search_images",
-                    "description": "Search for images, comics, photos, artwork, faces, portraits, and visual content with metadata. Use instead of search_local for any visual/image query. Returns markdown-formatted results with image URLs that can be displayed in chat.",
+                    "description": "Search for images, comics, photos, artwork, faces, portraits, and visual content with metadata. Use this tool—not search_documents—for any visual or image query. Returns markdown-formatted results with image URLs that can be displayed in chat.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -344,7 +344,7 @@ class ImageSearchTools:
                                             import json
                                             try:
                                                 metadata_json = json.loads(metadata_json_raw)
-                                            except:
+                                            except Exception:
                                                 metadata_json = {}
                                     
                                     filtered_vector_results.append({
@@ -545,7 +545,7 @@ class ImageSearchTools:
                                 import json
                                 try:
                                     metadata_json = json.loads(metadata_json)
-                                except:
+                                except Exception:
                                     continue
                             
                             if metadata_json and metadata_json.get("has_searchable_metadata"):
@@ -603,7 +603,7 @@ class ImageSearchTools:
                                             import json
                                             try:
                                                 metadata_json = json.loads(metadata_json_raw)
-                                            except:
+                                            except Exception:
                                                 metadata_json = {}
                                     
                                     results.append({
@@ -848,7 +848,7 @@ class ImageSearchTools:
                             import json
                             try:
                                 postgres_metadata = json.loads(postgres_metadata)
-                            except:
+                            except Exception:
                                 postgres_metadata = {}
                         
                         # Get the actual image filename from metadata (source of truth!)
@@ -1047,7 +1047,7 @@ class ImageSearchTools:
                         import json
                         try:
                             metadata_json = json.loads(metadata_json)
-                        except:
+                        except Exception:
                             continue
                     
                     if not metadata_json.get("has_searchable_metadata"):
@@ -1078,7 +1078,7 @@ class ImageSearchTools:
                         import json
                         try:
                             metadata_json = json.loads(metadata_json)
-                        except:
+                        except Exception:
                             continue
                     
                     doc_date_str = metadata_json.get("date")
@@ -1170,7 +1170,7 @@ class ImageSearchTools:
                     import json
                     try:
                         metadata_json = json.loads(metadata_json)
-                    except:
+                    except Exception:
                         if idx < 3:
                             logger.info(f"  ⏭️ SKIP {idx}: JSON parse failed")
                         continue
@@ -1373,7 +1373,7 @@ class ImageSearchTools:
                     import json
                     try:
                         metadata_json = json.loads(metadata_json)
-                    except:
+                    except Exception:
                         metadata_json = {}
                 
                 # Get image details
@@ -1401,17 +1401,17 @@ class ImageSearchTools:
                     "image_type": image_type_str
                 })
                 
-                # Construct image_url if not present
+                # Construct image_url if not present.
+                # Comics live in UPLOAD_DIR/Global/Comics/ and are served via /api/images/
                 if not image_url and image_filename and series_name and date_str and date_str != "Unknown date":
                     try:
                         from datetime import datetime
                         date_obj = datetime.strptime(date_str, "%Y-%m-%d")
                         year = date_obj.year
                         month = date_obj.month
-                        # Assume /api/comics path structure for comics
-                        image_url = f"/api/comics/{series_name}/{year}/{month:02d}/{image_filename}"
+                        image_url = f"/api/images/Comics/{series_name}/{year}/{month:02d}/{image_filename}"
                         logger.info(f"Constructed image_url: {image_url}")
-                    except:
+                    except Exception:
                         pass
                 
                 # Embed image if URL available (use same file path logic as regular search)
@@ -1424,51 +1424,109 @@ class ImageSearchTools:
                         import base64
                         
                         image_file_path = None
-                        
-                        # Handle /api/comics/ URLs
-                        if image_url.startswith('/api/comics/'):
-                            relative_path = image_url.replace('/api/comics/', '')
-                            # Handle duplicate "Comics" in path (legacy URLs)
-                            if relative_path.startswith('Comics/'):
-                                relative_path = relative_path.replace('Comics/', '', 1)
-                            comics_root = Path(settings.UPLOAD_DIR) / "Global" / "Comics"
-                            image_file_path = comics_root / relative_path
-                            logger.info(f"🔍 Comics path: {image_file_path} (exists: {image_file_path.exists()})")
-                        
-                        # Handle /api/images/ URLs
-                        elif image_url.startswith('/api/images/'):
-                            relative_path = image_url.replace('/api/images/', '')
-                            # Try Global directory first
+                        ds_image_bytes: Optional[bytes] = None
+
+                        # Handle /api/images/ URLs (library images — stream from document-service)
+                        if image_url.startswith("/api/images/") and document_id:
+                            uid = (rls_context or {}).get("user_id") or ""
+                            role = (rls_context or {}).get("user_role") or ""
+                            try:
+                                from clients.document_service_client import (
+                                    get_document_service_client,
+                                )
+
+                                dsc = get_document_service_client()
+                                await dsc.initialize(required=True)
+                                parts: List[bytes] = []
+                                async for ch in dsc.download_document_stream(
+                                    document_id, uid, role=role
+                                ):
+                                    if ch.data:
+                                        parts.append(ch.data)
+                                ds_image_bytes = b"".join(parts)
+                            except Exception as ds_e:
+                                logger.warning(
+                                    "DS image download failed for %s: %s",
+                                    document_id,
+                                    ds_e,
+                                )
+                                ds_image_bytes = None
+
+                        if image_url.startswith("/api/images/") and not ds_image_bytes:
+                            relative_path = image_url.replace("/api/images/", "")
                             global_root = Path(settings.UPLOAD_DIR) / "Global"
                             image_file_path = global_root / relative_path
                             if not image_file_path.exists():
-                                # Fallback to web_sources/images
-                                web_images = Path(settings.UPLOAD_DIR) / "web_sources" / "images"
+                                web_images = Path(settings.WEB_SOURCES_ROOT) / "images"
                                 image_file_path = web_images / relative_path
-                        
-                        # If we have a valid file path, embed as base64
-                        if image_file_path and image_file_path.exists():
-                            with open(image_file_path, 'rb') as f:
-                                image_data = base64.b64encode(f.read()).decode('utf-8')
-                            
-                            # Detect MIME type
-                            mime_type, _ = mimetypes.guess_type(str(image_file_path))
+
+                        elif image_url.startswith("/api/web-sources/images/"):
+                            relative_path = image_url.replace("/api/web-sources/images/", "", 1)
+                            web_images = Path(settings.WEB_SOURCES_ROOT) / "images"
+                            image_file_path = web_images / relative_path
+                            if not image_file_path.exists():
+                                for subdir in web_images.iterdir() if web_images.exists() else []:
+                                    if subdir.is_dir():
+                                        candidate = subdir / Path(relative_path).name
+                                        if candidate.exists():
+                                            image_file_path = candidate
+                                            break
+
+                        elif image_url.startswith("/static/images/"):
+                            relative_path = image_url.replace("/static/images/", "", 1)
+                            web_images = Path(settings.WEB_SOURCES_ROOT) / "images"
+                            image_file_path = web_images / relative_path
+                            if not image_file_path.exists():
+                                for subdir in web_images.iterdir() if web_images.exists() else []:
+                                    if subdir.is_dir():
+                                        candidate = subdir / Path(relative_path).name
+                                        if candidate.exists():
+                                            image_file_path = candidate
+                                            break
+
+                        # Embed from document-service bytes or local web_sources path
+                        if ds_image_bytes:
+                            mime_type, _ = mimetypes.guess_type(image_filename or "")
                             if not mime_type:
-                                # Fallback based on extension
-                                ext = image_file_path.suffix.lower()
+                                ext = Path(image_filename or "").suffix.lower()
                                 mime_map = {
-                                    '.gif': 'image/gif',
-                                    '.png': 'image/png',
-                                    '.jpg': 'image/jpeg',
-                                    '.jpeg': 'image/jpeg',
-                                    '.webp': 'image/webp'
+                                    ".gif": "image/gif",
+                                    ".png": "image/png",
+                                    ".jpg": "image/jpeg",
+                                    ".jpeg": "image/jpeg",
+                                    ".webp": "image/webp",
                                 }
-                                mime_type = mime_map.get(ext, 'image/png')
-                            
-                            # Embed as data URI with empty alt text
+                                mime_type = mime_map.get(ext, "image/png")
+                            image_data = base64.b64encode(ds_image_bytes).decode("utf-8")
                             data_uri = f"data:{mime_type};base64,{image_data}"
                             formatted_results.append(f"![]({data_uri})\n")
-                            logger.info(f"✅ Embedded image as base64: {image_file_path.name} ({mime_type})")
+                            logger.info(
+                                "✅ Embedded library image from document-service (%s)",
+                                mime_type,
+                            )
+                        elif image_file_path and image_file_path.exists():
+                            with open(image_file_path, "rb") as f:
+                                image_data = base64.b64encode(f.read()).decode("utf-8")
+
+                            mime_type, _ = mimetypes.guess_type(str(image_file_path))
+                            if not mime_type:
+                                ext = image_file_path.suffix.lower()
+                                mime_map = {
+                                    ".gif": "image/gif",
+                                    ".png": "image/png",
+                                    ".jpg": "image/jpeg",
+                                    ".jpeg": "image/jpeg",
+                                    ".webp": "image/webp",
+                                }
+                                mime_type = mime_map.get(ext, "image/png")
+
+                            data_uri = f"data:{mime_type};base64,{image_data}"
+                            formatted_results.append(f"![]({data_uri})\n")
+                            logger.info(
+                                "✅ Embedded image as base64: %s (%s)",
+                                image_file_path.name,
+                                mime_type,
+                            )
                         else:
                             # Fallback to URL if file not found
                             formatted_results.append(f"![]({image_url})\n")
@@ -1502,54 +1560,3 @@ class ImageSearchTools:
                 "metadata": []
             }
 
-
-# Global instance for use by tool registry
-_image_search_instance = None
-
-
-async def _get_image_search():
-    """Get global image search instance"""
-    global _image_search_instance
-    if _image_search_instance is None:
-        _image_search_instance = ImageSearchTools()
-    return _image_search_instance
-
-
-async def search_images(
-    query: str,
-    image_type: Optional[str] = None,
-    date: Optional[str] = None,
-    author: Optional[str] = None,
-    series: Optional[str] = None,
-    limit: int = 10,
-    user_id: Optional[str] = None,
-    is_random: bool = False
-) -> Dict[str, Any]:
-    """
-    LangGraph tool function: Search for images with metadata.
-    When user_id is provided, searches both the user's collection and global (hybrid search).
-    
-    Args:
-        query: Search query for vector search
-        image_type: Optional filter by type
-        date: Optional date filter (YYYY-MM-DD)
-        author: Optional author filter
-        series: Optional series filter
-        limit: Maximum results
-        user_id: When set, run hybrid search (user + global) and apply user RLS
-        is_random: If True, return random images instead of semantic search
-        
-    Returns:
-        Dict with 'images_markdown' (base64 embedded images) and 'metadata' (list of metadata dicts)
-    """
-    instance = await _get_image_search()
-    return await instance.search_images(
-        query=query,
-        image_type=image_type,
-        date=date,
-        author=author,
-        series=series,
-        limit=limit,
-        user_id=user_id,
-        is_random=is_random
-    )

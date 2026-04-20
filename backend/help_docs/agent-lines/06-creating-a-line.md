@@ -34,8 +34,8 @@ You can later expand any member row to change **role**, **reports to**, and **ad
 
 1. In **Settings**, find the **Heartbeat** section.
 2. Turn **Enable autonomous heartbeat** on.
-3. Set **Interval (seconds)** (e.g. 900 for 15 minutes) or a **Cron expression** if you prefer a schedule.
-4. Click **Save heartbeat**. The dashboard will show **Last beat** and **Next beat** once the first heartbeat runs.
+3. Under **Periodic schedule**, pick **None**, **Every N seconds** (minimum 60), or **Cron** (with a time zone for wall-clock times). Use **Preview next runs** to validate before saving.
+4. Click **Save** in the settings header. The dashboard shows **Next beat** after save (and updates **Last beat** after each run).
 
 The CEO agent runs with a **context summary** of the team: pending tasks, goals, escalations, recent messages, and workspace entries. The CEO can delegate work, post to the timeline, or request approvals.
 

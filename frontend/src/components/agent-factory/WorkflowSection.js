@@ -1,6 +1,6 @@
 /**
  * Agent Factory Playbook section: step card stack with drag-to-reorder.
- * Wiring validation: inline warnings when step inputs reference invalid or type-incompatible upstream outputs.
+ * Playbook validation: wiring issues plus exclusive/catch-all hints for conditional steps.
  */
 
 import React, { useMemo, useState, useEffect } from 'react';
@@ -23,7 +23,12 @@ import {
   Tooltip,
 } from '@mui/material';
 import { Add, Delete, DragIndicator, Build, Psychology, SmartToy, Gavel, Repeat, Send, ViewModule, CallSplit, Lock, AccountTree, ContentCopy, ContentPaste } from '@mui/icons-material';
-import { validatePlaybookWiring, indexActionsByName, getOutputFieldsForStep } from '../../utils/agentFactoryTypeWiring';
+import {
+  validatePlaybookWiring,
+  validateExclusiveConditions,
+  indexActionsByName,
+  getOutputFieldsForStep,
+} from '../../utils/agentFactoryTypeWiring';
 import { isContiguousSortedIndices } from '../../utils/playbookStepTransfer';
 
 export default function WorkflowSection({
@@ -35,6 +40,8 @@ export default function WorkflowSection({
   onReorder,
   onStepClick,
   onAddParallelChild,
+  onReorderParallelChild,
+  onRemoveParallelChild,
   onGroupAsParallel,
   onUngroupParallel,
   onAddBranchChild,
@@ -43,14 +50,16 @@ export default function WorkflowSection({
   onCopySteps,
   onPasteRequest,
   selectionResetSignal = 0,
+  maxParallelSubsteps = 10,
 }) {
   const steps = playbook?.definition?.steps ?? [];
   const [selectedIndices, setSelectedIndices] = useState([]);
   const actionsByName = useMemo(() => indexActionsByName(actions), [actions]);
-  const wiringErrors = useMemo(
-    () => validatePlaybookWiring(steps, actionsByName),
-    [steps, actionsByName]
-  );
+  const wiringErrors = useMemo(() => {
+    const wiring = validatePlaybookWiring(steps, actionsByName);
+    const exclusive = validateExclusiveConditions(steps);
+    return [...wiring, ...exclusive];
+  }, [steps, actionsByName]);
 
   const sortedSelected = useMemo(() => [...selectedIndices].sort((a, b) => a - b), [selectedIndices]);
   const isAdjacent = sortedSelected.length < 2 || sortedSelected.every((v, i) => i === 0 || v === sortedSelected[i - 1] + 1);
@@ -85,17 +94,34 @@ export default function WorkflowSection({
   };
 
   const handleDragEnd = (result) => {
-    if (!result.destination || result.destination.index === result.source.index) return;
-    const fromIdx = result.source.index;
-    const toIdx = result.destination.index;
-    if (onReorder) {
-      onReorder(fromIdx, toIdx);
+    const { source, destination } = result;
+    if (!destination) return;
+    if (source.droppableId === destination.droppableId && source.index === destination.index) return;
+
+    if (source.droppableId === 'playbook-steps' && destination.droppableId === 'playbook-steps') {
+      const fromIdx = source.index;
+      const toIdx = destination.index;
+      if (onReorder) {
+        onReorder(fromIdx, toIdx);
+        return;
+      }
+      const next = [...steps];
+      const [removed] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, removed);
+      onPlaybookChange({ ...playbook, definition: { ...playbook.definition, steps: next } });
       return;
     }
-    const next = [...steps];
-    const [removed] = next.splice(fromIdx, 1);
-    next.splice(toIdx, 0, removed);
-    onPlaybookChange({ ...playbook, definition: { ...playbook.definition, steps: next } });
+
+    if (
+      source.droppableId.startsWith('parallel-')
+      && source.droppableId === destination.droppableId
+      && onReorderParallelChild
+    ) {
+      const parentIdx = parseInt(source.droppableId.replace('parallel-', ''), 10);
+      if (!Number.isNaN(parentIdx)) {
+        onReorderParallelChild(parentIdx, source.index, destination.index);
+      }
+    }
   };
 
   const handleRemove = (idx) => {
@@ -129,6 +155,168 @@ export default function WorkflowSection({
     return { type, Icon, label: labels[type], bg };
   };
 
+  /**
+   * Shared step card body (header row + detail captions). Wrap with Paper + stepCardPaperSx at call sites.
+   */
+  const renderStepCard = (step, {
+    indexLabel,
+    readOnly: ro,
+    showCheckbox,
+    isChecked,
+    onToggleCheckbox,
+    dragHandleProps,
+    isDragging: _isDragging,
+    onOpen,
+    onDelete,
+    parallelChildCount,
+  }) => {
+    const { Icon, label } = stepTypeInfo(step);
+    const actionName = step.action || step.name || (step.step_type || step.type) || 'step';
+    const outputKey = step.output_key || '';
+    const inputSummary = step.inputs && Object.keys(step.inputs).length > 0
+      ? Object.entries(step.inputs).map(([k, v]) => `${k}: ${String(v).slice(0, 20)}${String(v).length > 20 ? '…' : ''}`).join(', ')
+      : null;
+    const outputFields = getOutputFieldsForStep(step, actionsByName);
+    const outputSummary = outputKey
+      ? (outputFields.length > 0
+        ? `${outputKey} → ${outputFields.map((f) => f.name).join(', ')}`
+        : outputKey)
+      : null;
+    const modelSummary = (step.step_type || step.type) === 'llm_task' && step.model_override
+      ? step.model_override
+      : null;
+    const toolsSummary = (step.step_type || step.type) === 'llm_agent' && Array.isArray(step.available_tools) && step.available_tools.length > 0
+      ? `${step.available_tools.length} tool${step.available_tools.length !== 1 ? 's' : ''}`
+      : null;
+    const subagentsSummary = ['llm_agent', 'deep_agent'].includes(step.step_type || step.type)
+      && Array.isArray(step.subagents) && step.subagents.length > 0
+      ? `${step.subagents.length} subagent${step.subagents.length !== 1 ? 's' : ''}`
+      : null;
+    const phasesSummary = (step.step_type || step.type) === 'deep_agent' && Array.isArray(step.phases) && step.phases.length > 0
+      ? `${step.phases.length} phase${step.phases.length !== 1 ? 's' : ''}`
+      : null;
+    const isLoop = (step.step_type || step.type) === 'loop';
+    const isParallel = (step.step_type || step.type) === 'parallel';
+    const isBranch = (step.step_type || step.type) === 'branch';
+    const hasCondition = !!(step.condition && String(step.condition).trim());
+    const conditionLabel = hasCondition
+      ? (String(step.condition).length > 32 ? String(step.condition).slice(0, 32) + '…' : step.condition)
+      : null;
+    const pc = typeof parallelChildCount === 'number' ? parallelChildCount : (step.parallel_steps || []).length;
+
+    return (
+      <>
+        <ListItemButton
+          onClick={onOpen}
+          sx={{ py: 1.5, pr: 0 }}
+        >
+          {!ro && showCheckbox && (
+            <Checkbox
+              size="small"
+              checked={isChecked}
+              onChange={onToggleCheckbox}
+              onClick={(e) => e.stopPropagation()}
+              sx={{ p: 0.25, mr: 0.5 }}
+              aria-label="Select step"
+            />
+          )}
+          {!ro && dragHandleProps && (
+            <Box
+              {...dragHandleProps}
+              sx={{ display: 'flex', alignItems: 'center', pr: 0.5, cursor: 'grab', color: 'text.secondary' }}
+              aria-label="Drag to reorder"
+            >
+              <DragIndicator fontSize="small" />
+            </Box>
+          )}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1, minWidth: 0 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
+              <Icon sx={{ fontSize: 18, color: 'text.secondary' }} />
+              <Typography variant="caption" fontWeight={600} color="text.secondary">
+                {indexLabel}
+              </Typography>
+            </Box>
+            <Chip size="small" label={label} sx={{ fontWeight: 500 }} />
+            <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
+              {actionName}
+            </Typography>
+            {isLoop && (
+              <Chip size="small" variant="outlined" label={`max ${step.max_iterations ?? 3} iterations`} sx={{ flexShrink: 0 }} />
+            )}
+            {isParallel && (
+              <Chip size="small" variant="outlined" label={`${pc} step${pc !== 1 ? 's' : ''}`} sx={{ flexShrink: 0 }} />
+            )}
+            {isBranch && (
+              <Tooltip title={step.branch_condition || 'Set condition in config'} enterDelay={400} placement="top">
+                <Chip size="small" variant="outlined" label={step.branch_condition ? String(step.branch_condition).slice(0, 24) + (String(step.branch_condition).length > 24 ? '…' : '') : 'IF …'} sx={{ flexShrink: 0, maxWidth: 200 }} />
+              </Tooltip>
+            )}
+            {outputKey && (
+              <Chip size="small" variant="outlined" label={`→ ${outputKey}`} sx={{ flexShrink: 0 }} />
+            )}
+            {hasCondition && conditionLabel && (
+              <Tooltip title={step.condition} enterDelay={400} placement="top">
+                <Chip size="small" label={`IF ${conditionLabel}`} sx={{ flexShrink: 0, fontStyle: 'italic', maxWidth: 180 }} />
+              </Tooltip>
+            )}
+          </Box>
+          {!ro && onDelete && (
+            <IconButton size="small" onClick={(e) => { e.stopPropagation(); onDelete(); }} aria-label="Remove step">
+              <Delete />
+            </IconButton>
+          )}
+        </ListItemButton>
+        {(inputSummary || outputSummary || modelSummary || toolsSummary || subagentsSummary || phasesSummary) && (
+          <Box sx={{ px: 2, pb: 1, pt: 0, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+            {inputSummary && (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                Inputs: {inputSummary}
+              </Typography>
+            )}
+            {outputSummary && (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                Outputs: {outputSummary}
+              </Typography>
+            )}
+            {modelSummary && (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                Model: {modelSummary}
+              </Typography>
+            )}
+            {toolsSummary && (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                {toolsSummary}
+              </Typography>
+            )}
+            {subagentsSummary && (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                {subagentsSummary}
+              </Typography>
+            )}
+            {phasesSummary && (
+              <Typography variant="caption" color="text.secondary" noWrap>
+                {phasesSummary}
+              </Typography>
+            )}
+          </Box>
+        )}
+      </>
+    );
+  };
+
+  const stepCardPaperSx = (step, isDragging) => {
+    const { bg } = stepTypeInfo(step);
+    const hasCondition = !!(step.condition && String(step.condition).trim());
+    return {
+      width: '100%',
+      bgcolor: bg,
+      borderRadius: 1,
+      overflow: 'hidden',
+      boxShadow: isDragging ? 2 : 0,
+      ...(hasCondition && { borderStyle: 'dashed', borderWidth: 1.5 }),
+    };
+  };
+
   return (
     <Card variant="outlined" sx={{ mb: 2 }}>
       <CardContent>
@@ -147,7 +335,7 @@ export default function WorkflowSection({
         {wiringErrors.length > 0 && (
           <Alert severity="warning" sx={{ mb: 2 }}>
             <Typography variant="subtitle2" gutterBottom>
-              Wiring validation: {wiringErrors.length} issue{wiringErrors.length !== 1 ? 's' : ''} found
+              Playbook validation: {wiringErrors.length} issue{wiringErrors.length !== 1 ? 's' : ''} found
             </Typography>
             <Box component="ul" sx={{ m: 0, pl: 2 }}>
               {wiringErrors.slice(0, 5).map((err, i) => (
@@ -215,7 +403,7 @@ export default function WorkflowSection({
           </Paper>
         )}
         <DragDropContext onDragEnd={handleDragEnd}>
-          <Droppable droppableId="playbook-steps">
+          <Droppable droppableId="playbook-steps" type="playbook-main">
             {(provided) => (
               <List
                 ref={provided.innerRef}
@@ -224,27 +412,6 @@ export default function WorkflowSection({
                 sx={{ borderRadius: 1 }}
               >
                 {steps.map((step, idx) => {
-                  const { Icon, label, bg } = stepTypeInfo(step);
-                  const actionName = step.action || step.name || (step.step_type || step.type) || 'step';
-                  const outputKey = step.output_key || '';
-                  const inputSummary = step.inputs && Object.keys(step.inputs).length > 0
-                    ? Object.entries(step.inputs).map(([k, v]) => `${k}: ${String(v).slice(0, 20)}${String(v).length > 20 ? '…' : ''}`).join(', ')
-                    : null;
-                  const outputFields = getOutputFieldsForStep(step, actionsByName);
-                  const outputSummary = outputKey
-                    ? (outputFields.length > 0
-                      ? `${outputKey} → ${outputFields.map((f) => f.name).join(', ')}`
-                      : outputKey)
-                    : null;
-                  const modelSummary = (step.step_type || step.type) === 'llm_task' && step.model_override
-                    ? step.model_override
-                    : null;
-                  const toolsSummary = (step.step_type || step.type) === 'llm_agent' && Array.isArray(step.available_tools) && step.available_tools.length > 0
-                    ? `${step.available_tools.length} tool${step.available_tools.length !== 1 ? 's' : ''}`
-                    : null;
-                  const phasesSummary = (step.step_type || step.type) === 'deep_agent' && Array.isArray(step.phases) && step.phases.length > 0
-                    ? `${step.phases.length} phase${step.phases.length !== 1 ? 's' : ''}`
-                    : null;
                   const isLoop = (step.step_type || step.type) === 'loop';
                   const isParallel = (step.step_type || step.type) === 'parallel';
                   const isBranch = (step.step_type || step.type) === 'branch';
@@ -252,10 +419,6 @@ export default function WorkflowSection({
                   const parallelSteps = isParallel ? (step.parallel_steps || []) : [];
                   const thenSteps = isBranch ? (step.then_steps || []) : [];
                   const elseSteps = isBranch ? (step.else_steps || []) : [];
-                  const hasCondition = !!(step.condition && String(step.condition).trim());
-                  const conditionLabel = hasCondition
-                    ? (String(step.condition).length > 32 ? String(step.condition).slice(0, 32) + '…' : step.condition)
-                    : null;
                   return (
                     <Draggable key={idx} draggableId={`step-${idx}`} index={idx} isDragDisabled={readOnly}>
                       {(dragProvided, dragSnapshot) => (
@@ -265,106 +428,19 @@ export default function WorkflowSection({
                           disablePadding
                           sx={{ mb: 1, flexDirection: 'column', alignItems: 'stretch' }}
                         >
-                          <Paper
-                            variant="outlined"
-                            sx={{
-                              width: '100%',
-                              bgcolor: bg,
-                              borderRadius: 1,
-                              overflow: 'hidden',
-                              boxShadow: dragSnapshot.isDragging ? 2 : 0,
-                              ...(hasCondition && { borderStyle: 'dashed', borderWidth: 1.5 }),
-                            }}
-                          >
-                            <ListItemButton
-                              onClick={() => !readOnly && onStepClick && onStepClick(idx, step)}
-                              sx={{ py: 1.5, pr: 0 }}
-                            >
-                              {!readOnly && (
-                                <Checkbox
-                                  size="small"
-                                  checked={selectedIndices.includes(idx)}
-                                  onChange={() => handleToggleSelect(idx)}
-                                  onClick={(e) => e.stopPropagation()}
-                                  sx={{ p: 0.25, mr: 0.5 }}
-                                  aria-label="Select step"
-                                />
-                              )}
-                              {!readOnly && (
-                                <Box
-                                  {...dragProvided.dragHandleProps}
-                                  sx={{ display: 'flex', alignItems: 'center', pr: 0.5, cursor: 'grab', color: 'text.secondary' }}
-                                  aria-label="Drag to reorder"
-                                >
-                                  <DragIndicator fontSize="small" />
-                                </Box>
-                              )}
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1, minWidth: 0 }}>
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
-                                  <Icon sx={{ fontSize: 18, color: 'text.secondary' }} />
-                                  <Typography variant="caption" fontWeight={600} color="text.secondary">
-                                    {idx + 1}
-                                  </Typography>
-                                </Box>
-                                <Chip size="small" label={label} sx={{ fontWeight: 500 }} />
-                                <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
-                                  {actionName}
-                                </Typography>
-                                {isLoop && (
-                                  <Chip size="small" variant="outlined" label={`max ${step.max_iterations ?? 3} iterations`} sx={{ flexShrink: 0 }} />
-                                )}
-                                {isParallel && (
-                                  <Chip size="small" variant="outlined" label={`${parallelSteps.length} step${parallelSteps.length !== 1 ? 's' : ''}`} sx={{ flexShrink: 0 }} />
-                                )}
-                                {isBranch && (
-                                  <Tooltip title={step.branch_condition || 'Set condition in config'} enterDelay={400} placement="top">
-                                    <Chip size="small" variant="outlined" label={step.branch_condition ? String(step.branch_condition).slice(0, 24) + (String(step.branch_condition).length > 24 ? '…' : '') : 'IF …'} sx={{ flexShrink: 0, maxWidth: 200 }} />
-                                  </Tooltip>
-                                )}
-                                {outputKey && (
-                                  <Chip size="small" variant="outlined" label={`→ ${outputKey}`} sx={{ flexShrink: 0 }} />
-                                )}
-                                {hasCondition && conditionLabel && (
-                                  <Tooltip title={step.condition} enterDelay={400} placement="top">
-                                    <Chip size="small" label={`IF ${conditionLabel}`} sx={{ flexShrink: 0, fontStyle: 'italic', maxWidth: 180 }} />
-                                  </Tooltip>
-                                )}
-                              </Box>
-                              {!readOnly && (
-                                <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleRemove(idx); }} aria-label="Remove step">
-                                  <Delete />
-                                </IconButton>
-                              )}
-                            </ListItemButton>
-                            {(inputSummary || outputSummary || modelSummary || toolsSummary || phasesSummary) && (
-                              <Box sx={{ px: 2, pb: 1, pt: 0, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
-                                {inputSummary && (
-                                  <Typography variant="caption" color="text.secondary" noWrap>
-                                    Inputs: {inputSummary}
-                                  </Typography>
-                                )}
-                                {outputSummary && (
-                                  <Typography variant="caption" color="text.secondary" noWrap>
-                                    Outputs: {outputSummary}
-                                  </Typography>
-                                )}
-                                {modelSummary && (
-                                  <Typography variant="caption" color="text.secondary" noWrap>
-                                    Model: {modelSummary}
-                                  </Typography>
-                                )}
-                                {toolsSummary && (
-                                  <Typography variant="caption" color="text.secondary" noWrap>
-                                    {toolsSummary}
-                                  </Typography>
-                                )}
-                                {phasesSummary && (
-                                  <Typography variant="caption" color="text.secondary" noWrap>
-                                    {phasesSummary}
-                                  </Typography>
-                                )}
-                              </Box>
-                            )}
+                          <Paper variant="outlined" sx={stepCardPaperSx(step, dragSnapshot.isDragging)}>
+                            {renderStepCard(step, {
+                              indexLabel: String(idx + 1),
+                              readOnly,
+                              showCheckbox: true,
+                              isChecked: selectedIndices.includes(idx),
+                              onToggleCheckbox: () => handleToggleSelect(idx),
+                              dragHandleProps: readOnly ? null : dragProvided.dragHandleProps,
+                              isDragging: dragSnapshot.isDragging,
+                              onOpen: () => !readOnly && onStepClick && onStepClick(idx, step),
+                              onDelete: readOnly ? null : () => handleRemove(idx),
+                              parallelChildCount: parallelSteps.length,
+                            })}
                             {isLoop && childSteps.length > 0 && (
                               <Box sx={{ borderLeft: 2, borderColor: 'divider', ml: 2, mr: 1, mb: 1, pl: 1.5 }}>
                                 {childSteps.map((child, cIdx) => {
@@ -390,51 +466,63 @@ export default function WorkflowSection({
                               </Box>
                             )}
                             {isParallel && (
-                              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, px: 2, pb: 1.5, pt: 0 }}>
-                                {parallelSteps.map((child, cIdx) => {
-                                  const childInfo = stepTypeInfo(child);
-                                  const ChildIcon = childInfo.Icon;
-                                  const childName = child.name || child.output_key || child.action || `Step ${String.fromCharCode(65 + cIdx)}`;
-                                  return (
-                                    <Paper
-                                      key={cIdx}
-                                      variant="outlined"
-                                      sx={{
-                                        flex: '1 1 140px',
-                                        minWidth: 140,
-                                        maxWidth: 280,
-                                        overflow: 'hidden',
-                                      }}
-                                    >
-                                      <ListItemButton
-                                        onClick={() => !readOnly && onStepClick && onStepClick(cIdx, child, { parentParallelIndex: idx })}
-                                        sx={{ py: 1, px: 1.5 }}
-                                      >
-                                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, width: '100%', minWidth: 0 }}>
-                                          <ChildIcon sx={{ fontSize: 16, color: 'text.secondary', flexShrink: 0 }} />
-                                          <Chip size="small" label={childInfo.label} sx={{ fontWeight: 500, flexShrink: 0 }} />
-                                          <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
-                                            {childName}
-                                          </Typography>
-                                          {child.output_key && (
-                                            <Chip size="small" variant="outlined" label={`→ ${child.output_key}`} sx={{ flexShrink: 0, fontSize: '0.7rem' }} />
-                                          )}
-                                        </Box>
-                                      </ListItemButton>
-                                    </Paper>
-                                  );
-                                })}
-                                {!readOnly && (
-                                  <Button
-                                    size="small"
-                                    variant="outlined"
-                                    startIcon={<Add />}
-                                    onClick={() => onAddParallelChild && onAddParallelChild(idx)}
-                                    sx={{ flex: '1 1 140px', minWidth: 140, maxWidth: 280 }}
-                                  >
-                                    Add to group
-                                  </Button>
-                                )}
+                              <Box sx={{ borderLeft: 2, borderColor: 'info.main', ml: 2, mr: 1, mb: 1, pl: 1.5, pr: 1 }}>
+                                <Droppable droppableId={`parallel-${idx}`} type={`parallel-${idx}`}>
+                                  {(pDropProvided) => (
+                                    <Box ref={pDropProvided.innerRef} {...pDropProvided.droppableProps}>
+                                      {parallelSteps.map((child, cIdx) => {
+                                        const dragId = child._step_id != null
+                                          ? `par-${idx}-${child._step_id}`
+                                          : `par-${idx}-i${cIdx}`;
+                                        return (
+                                          <Draggable
+                                            key={dragId}
+                                            draggableId={dragId}
+                                            index={cIdx}
+                                            isDragDisabled={readOnly || !onReorderParallelChild}
+                                          >
+                                            {(cDragProvided, cDragSnapshot) => (
+                                              <Box
+                                                ref={cDragProvided.innerRef}
+                                                {...cDragProvided.draggableProps}
+                                                sx={{ mb: 1 }}
+                                              >
+                                                <Paper variant="outlined" sx={stepCardPaperSx(child, cDragSnapshot.isDragging)}>
+                                                  {renderStepCard(child, {
+                                                    indexLabel: String.fromCharCode(65 + cIdx),
+                                                    readOnly,
+                                                    showCheckbox: false,
+                                                    isChecked: false,
+                                                    onToggleCheckbox: () => {},
+                                                    dragHandleProps: readOnly || !onReorderParallelChild ? null : cDragProvided.dragHandleProps,
+                                                    isDragging: cDragSnapshot.isDragging,
+                                                    onOpen: () => !readOnly && onStepClick && onStepClick(cIdx, child, { parentParallelIndex: idx }),
+                                                    onDelete: readOnly || !onRemoveParallelChild ? null : () => onRemoveParallelChild(idx, cIdx),
+                                                    parallelChildCount: undefined,
+                                                  })}
+                                                </Paper>
+                                              </Box>
+                                            )}
+                                          </Draggable>
+                                        );
+                                      })}
+                                      {pDropProvided.placeholder}
+                                      {!readOnly && (
+                                        <Button
+                                          size="small"
+                                          variant="outlined"
+                                          startIcon={<Add />}
+                                          disabled={parallelSteps.length >= maxParallelSubsteps}
+                                          onClick={() => onAddParallelChild && onAddParallelChild(idx)}
+                                          sx={{ mt: 0.5 }}
+                                          fullWidth
+                                        >
+                                          Add to group
+                                        </Button>
+                                      )}
+                                    </Box>
+                                  )}
+                                </Droppable>
                               </Box>
                             )}
                             {isBranch && (

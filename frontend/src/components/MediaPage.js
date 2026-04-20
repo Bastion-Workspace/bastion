@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -40,10 +40,12 @@ import {
   Remove,
   Search,
   Clear,
+  Tv,
 } from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import apiService from '../services/apiService';
 import { useMusic } from '../contexts/MediaContext';
+import EmbyBrowseView from './video/EmbyBrowseView';
 
 const MediaPage = () => {
   // Load persisted state from localStorage on mount
@@ -93,6 +95,7 @@ const MediaPage = () => {
   const [contextMenu, setContextMenu] = useState(null); // Context menu state
   const [searchQuery, setSearchQuery] = useState(initialState.searchQuery); // Search filter
   const [itemsToShow, setItemsToShow] = useState(initialState.itemsToShow); // Pagination: show first 200 items
+  const [embyMusicMode, setEmbyMusicMode] = useState(false);
   const [trackSortField, setTrackSortField] = useState(() => {
     // Load from localStorage
     try {
@@ -144,23 +147,28 @@ const MediaPage = () => {
   const sources = sourcesData?.sources || [];
   const subsonicSource = sources.find(s => s.service_type === 'subsonic');
   const audiobookshelfSource = sources.find(s => s.service_type === 'audiobookshelf');
+  const embySource = sources.find(s => s.service_type === 'emby');
+  const hasSubsonic = !!subsonicSource;
+  const hasAudiobookshelf = !!audiobookshelfSource;
+  const hasEmby = !!embySource;
 
-  // Determine which service type to use based on active tab
-  const getServiceType = () => {
-    if (activeTab === 0) {
-      // Music tab - use SubSonic if available, otherwise fall back to first available source
-      if (subsonicSource) return 'subsonic';
-      return sources.length > 0 ? sources[0].service_type : null;
-    }
-    if (activeTab === 1 || activeTab === 2) {
-      // Audiobooks/Podcasts tabs - use Audiobookshelf if available, otherwise fall back to first available source
-      if (audiobookshelfSource) return 'audiobookshelf';
-      return sources.length > 0 ? sources[0].service_type : null;
-    }
-    return null;
-  };
+  const availableTabs = useMemo(
+    () =>
+      [
+        { label: 'Music', icon: <LibraryMusic />, enabled: hasSubsonic, serviceType: 'subsonic' },
+        { label: 'Audiobooks', icon: <Headphones />, enabled: hasAudiobookshelf, serviceType: 'audiobookshelf' },
+        { label: 'Podcasts', icon: <Podcasts />, enabled: hasAudiobookshelf, serviceType: 'audiobookshelf' },
+        { label: 'Video', icon: <Tv />, enabled: hasEmby, serviceType: 'emby', isEmby: true },
+      ].filter((t) => t.enabled),
+    [hasSubsonic, hasAudiobookshelf, hasEmby]
+  );
 
-  const serviceType = getServiceType();
+  const tabMeta = availableTabs[activeTab];
+  const isMusicTab = tabMeta?.label === 'Music';
+  const isAudiobookTab = tabMeta?.label === 'Audiobooks';
+  const isPodcastTab = tabMeta?.label === 'Podcasts';
+  const isEmbyTab = Boolean(tabMeta?.isEmby);
+  const serviceType = tabMeta?.serviceType ?? null;
 
   // Fetch library for the active tab's service
   const { data: library, isLoading: loadingLibrary, error: libraryError } = useQuery(
@@ -202,7 +210,7 @@ const MediaPage = () => {
     ['authorSeries', selectedAuthor, serviceType],
     () => apiService.music.getSeriesByAuthor(selectedAuthor, serviceType),
     {
-      enabled: !!selectedAuthor && !!serviceType && activeTab === 1, // Only for Audiobooks tab
+      enabled: !!selectedAuthor && !!serviceType && isAudiobookTab,
       refetchOnWindowFocus: false,
     }
   );
@@ -212,7 +220,7 @@ const MediaPage = () => {
     ['authorBooks', selectedAuthor, serviceType],
     () => apiService.music.getAlbumsByArtist(selectedAuthor, serviceType),
     {
-      enabled: !!selectedAuthor && !!serviceType && activeTab === 1 && !selectedSeries,
+      enabled: !!selectedAuthor && !!serviceType && isAudiobookTab && !selectedSeries,
       refetchOnWindowFocus: false,
     }
   );
@@ -221,7 +229,7 @@ const MediaPage = () => {
   const { data: artistAlbumsData, isLoading: loadingArtistAlbums } = useQuery(
     ['artistAlbums', selectedArtist, selectedSeries, selectedAuthor, serviceType],
     () => {
-      if (activeTab === 1 && selectedSeries && selectedAuthor) {
+      if (isAudiobookTab && selectedSeries && selectedAuthor) {
         // For Audiobooks, if series is selected, get books in that series
         const author = library?.artists?.find(a => a.id === selectedAuthor);
         return apiService.music.getAlbumsBySeries(selectedSeries, author?.name || '', serviceType);
@@ -259,19 +267,16 @@ const MediaPage = () => {
   };
 
   const handleItemClick = (item, type) => {
-    // Clear selected tracks when changing items
     setSelectedTracks(new Set());
-    
+
     if (type === 'artist') {
-      if (activeTab === 1) {
-        // For Audiobooks, show series for the author
+      if (isAudiobookTab) {
         setSelectedAuthor(item.id);
         setSelectedSeries(null);
         setSelectedArtist(null);
         setSelectedItem(null);
         setSelectedItemType(null);
       } else {
-        // For Music, show albums for the artist
         setSelectedArtist(item.id);
         setSelectedItem(null);
         setSelectedItemType(null);
@@ -279,7 +284,6 @@ const MediaPage = () => {
         setSelectedAuthor(null);
       }
     } else {
-      // For albums and playlists, show tracks
       setSelectedItem(item.id);
       setSelectedItemType(type);
       setSelectedArtist(null);
@@ -322,16 +326,20 @@ const MediaPage = () => {
 
   const handleTabChange = (event, newValue) => {
     setActiveTab(newValue);
+    setEmbyMusicMode(false);
     setSelectedItem(null);
     setSelectedItemType(null);
     setSelectedArtist(null);
-    // Reset view based on tab
-    if (newValue === 0) {
-      setSelectedView('albums'); // Music: albums
-    } else if (newValue === 1) {
-      setSelectedView('albums'); // Audiobooks: books (as albums)
-    } else {
-      setSelectedView('playlists'); // Podcasts: playlists
+    setSelectedSeries(null);
+    setSelectedAuthor(null);
+    const tab = availableTabs[newValue];
+    if (!tab) return;
+    if (tab.label === 'Music' || tab.isEmby) {
+      setSelectedView('albums');
+    } else if (tab.label === 'Audiobooks') {
+      setSelectedView('albums');
+    } else if (tab.label === 'Podcasts') {
+      setSelectedView('playlists');
     }
   };
 
@@ -446,16 +454,17 @@ const MediaPage = () => {
     }
 
     if (!library || (!library.albums?.length && !library.artists?.length && !library.playlists?.length)) {
-      const serviceName = activeTab === 0 ? 'SubSonic' : activeTab === 1 ? 'Audiobookshelf' : 'Audiobookshelf';
+      const serviceName = isMusicTab ? 'SubSonic' : isAudiobookTab || isPodcastTab ? 'Audiobookshelf' : 'Emby';
+      const kind = isMusicTab ? 'music' : isAudiobookTab ? 'audiobook' : isPodcastTab ? 'podcast' : 'media';
       return (
         <Alert severity="info" sx={{ m: 2 }}>
-          No {activeTab === 0 ? 'music' : activeTab === 1 ? 'audiobook' : 'podcast'} library found. Configure your {serviceName} server in Settings > Media and refresh the cache.
+          No {kind} library found. Configure your {serviceName} server in Settings &gt; Media and refresh the cache.
         </Alert>
       );
     }
 
     // If an author is selected in Audiobooks, show their books and optional series
-    if (activeTab === 1 && selectedAuthor && !selectedSeries) {
+    if (isAudiobookTab && selectedAuthor && !selectedSeries) {
       const author = library?.artists?.find(a => a.id === selectedAuthor);
       const series = seriesData?.series || [];
       const authorBooks = authorBooksData?.albums ?? [];
@@ -567,7 +576,7 @@ const MediaPage = () => {
     }
 
     // If a series is selected in Audiobooks, show books in that series
-    if (activeTab === 1 && selectedSeries && selectedAuthor) {
+    if (isAudiobookTab && selectedSeries && selectedAuthor) {
       const author = library?.artists?.find(a => a.id === selectedAuthor);
       const albums = artistAlbumsData?.albums || [];
       
@@ -649,8 +658,8 @@ const MediaPage = () => {
       );
     }
 
-    // If an artist is selected (Music tab), show their albums
-    if (selectedArtist && activeTab === 0) {
+    // If an artist is selected (Music or Emby music mode), show their albums
+    if (selectedArtist && (isMusicTab || (isEmbyTab && embyMusicMode))) {
       const artist = library?.artists?.find(a => a.id === selectedArtist);
       return (
         <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
@@ -729,7 +738,7 @@ const MediaPage = () => {
     let navItems = [];
     let items = {};
     
-    if (activeTab === 0) {
+    if (isMusicTab || (isEmbyTab && embyMusicMode)) {
       // Music tab - Albums, Artists, Playlists
       navItems = [
         { key: 'albums', label: 'Albums', icon: <Album /> },
@@ -741,7 +750,7 @@ const MediaPage = () => {
         artists: library.artists || [],
         playlists: library.playlists || [],
       };
-    } else if (activeTab === 1) {
+    } else if (isAudiobookTab) {
       // Audiobooks tab - Books (albums), Authors (artists)
       navItems = [
         { key: 'albums', label: 'Books', icon: <Album /> },
@@ -941,7 +950,7 @@ const MediaPage = () => {
     }
 
     const isInPlaylist = selectedItemType === 'playlist';
-    const isPodcast = activeTab === 2; // Podcasts tab
+    const isPodcast = isPodcastTab;
     const allSelected = selectedTracks.size === tracksData.tracks.length && tracksData.tracks.length > 0;
 
     // Sort tracks
@@ -1109,17 +1118,6 @@ const MediaPage = () => {
     );
   };
 
-  // Check if sources are configured
-  const hasSubsonic = !!subsonicSource;
-  const hasAudiobookshelf = !!audiobookshelfSource;
-
-  // Filter available tabs based on configured sources
-  const availableTabs = [
-    { label: 'Music', icon: <LibraryMusic />, enabled: hasSubsonic },
-    { label: 'Audiobooks', icon: <Headphones />, enabled: hasAudiobookshelf },
-    { label: 'Podcasts', icon: <Podcasts />, enabled: hasAudiobookshelf },
-  ].filter(tab => tab.enabled);
-
   // Adjust activeTab if current tab is not available
   React.useEffect(() => {
     if (availableTabs.length === 0) {
@@ -1158,6 +1156,16 @@ const MediaPage = () => {
           borderColor: 'divider',
         }}
       >
+        {isEmbyTab && embyMusicMode && (
+          <Button
+            size="small"
+            variant="outlined"
+            sx={{ mr: 1, flexShrink: 0 }}
+            onClick={() => setEmbyMusicMode(false)}
+          >
+            Video library
+          </Button>
+        )}
         <Tabs
           value={activeTab}
           onChange={handleTabChange}
@@ -1207,7 +1215,7 @@ const MediaPage = () => {
         >
           {availableTabs.map((tab, index) => (
             <Tab
-              key={index}
+              key={tab.label}
               label={tab.label}
               icon={tab.icon}
               iconPosition="start"
@@ -1217,76 +1225,84 @@ const MediaPage = () => {
         </Tabs>
       </Box>
 
-      <Box sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-        {/* Sidebar */}
-        <Box
-          sx={{
-            width: 250,
-            borderRight: 1,
-            borderColor: 'divider',
-            flexShrink: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-            minHeight: 0,
-            height: '100%',
-          }}
-        >
-          {renderSidebar()}
-        </Box>
-
-        {/* Main Content */}
-        <Box 
-          sx={{ 
-            flexGrow: 1, 
-            overflow: 'hidden',
-            display: 'flex',
-            flexDirection: 'column',
-            minHeight: 0,
-            position: 'relative',
-          }}
-        >
-          <Box sx={{ px: 2, pt: 0.5, pb: 0.5, flexShrink: 0, borderBottom: 1, borderColor: 'divider' }}>
-            <Typography variant="h6" sx={{ fontWeight: 500, my: 0 }}>
-              {selectedArtist
-                ? library?.artists?.find((a) => a.id === selectedArtist)?.name || (activeTab === 1 ? 'Author' : 'Artist')
-                : selectedItem
-                ? selectedView === 'albums'
-                  ? library?.albums?.find((a) => a.id === selectedItem)?.title || (activeTab === 1 ? 'Book' : 'Album')
-                  : selectedView === 'playlists'
-                  ? library?.playlists?.find((p) => p.id === selectedItem)?.name || (activeTab === 2 ? 'Show' : 'Playlist')
-                  : 'Tracks'
-                : activeTab === 0
-                ? 'Music Library'
-                : activeTab === 1
-                ? 'Audiobooks'
-                : 'Podcasts'}
-            </Typography>
-          </Box>
-          <Box 
-            sx={{ 
-              flexGrow: 1, 
-              overflow: 'auto',
-              overflowX: 'hidden',
-              minHeight: 0, // Important for flex scrolling
-              p: 2, 
-              pt: 0,
-              '&::-webkit-scrollbar': {
-                width: '8px',
-              },
-              '&::-webkit-scrollbar-track': {
-                backgroundColor: 'transparent',
-              },
-              '&::-webkit-scrollbar-thumb': {
-                backgroundColor: 'rgba(0,0,0,0.2)',
-                borderRadius: '4px',
-              },
+      {isEmbyTab && !embyMusicMode ? (
+        <EmbyBrowseView onOpenMusicLibrary={() => setEmbyMusicMode(true)} />
+      ) : (
+        <Box sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+          {/* Sidebar */}
+          <Box
+            sx={{
+              width: 250,
+              borderRight: 1,
+              borderColor: 'divider',
+              flexShrink: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+              minHeight: 0,
+              height: '100%',
             }}
           >
-            {renderTrackList()}
+            {renderSidebar()}
+          </Box>
+
+          {/* Main Content */}
+          <Box
+            sx={{
+              flexGrow: 1,
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+              minHeight: 0,
+              position: 'relative',
+            }}
+          >
+            <Box sx={{ px: 2, pt: 0.5, pb: 0.5, flexShrink: 0, borderBottom: 1, borderColor: 'divider' }}>
+              <Typography variant="h6" sx={{ fontWeight: 500, my: 0 }}>
+                {selectedArtist
+                  ? library?.artists?.find((a) => a.id === selectedArtist)?.name || (isAudiobookTab ? 'Author' : 'Artist')
+                  : selectedItem
+                  ? selectedView === 'albums'
+                    ? library?.albums?.find((a) => a.id === selectedItem)?.title || (isAudiobookTab ? 'Book' : 'Album')
+                    : selectedView === 'playlists'
+                    ? library?.playlists?.find((p) => p.id === selectedItem)?.name || (isPodcastTab ? 'Show' : 'Playlist')
+                    : 'Tracks'
+                  : isMusicTab
+                  ? 'Music Library'
+                  : isEmbyTab && embyMusicMode
+                  ? 'Emby music'
+                  : isAudiobookTab
+                  ? 'Audiobooks'
+                  : isPodcastTab
+                  ? 'Podcasts'
+                  : 'Media'}
+              </Typography>
+            </Box>
+            <Box
+              sx={{
+                flexGrow: 1,
+                overflow: 'auto',
+                overflowX: 'hidden',
+                minHeight: 0,
+                p: 2,
+                pt: 0,
+                '&::-webkit-scrollbar': {
+                  width: '8px',
+                },
+                '&::-webkit-scrollbar-track': {
+                  backgroundColor: 'transparent',
+                },
+                '&::-webkit-scrollbar-thumb': {
+                  backgroundColor: 'rgba(0,0,0,0.2)',
+                  borderRadius: '4px',
+                },
+              }}
+            >
+              {renderTrackList()}
+            </Box>
           </Box>
         </Box>
-      </Box>
+      )}
     </Box>
   );
 };

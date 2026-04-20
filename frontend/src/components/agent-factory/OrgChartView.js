@@ -23,11 +23,12 @@ function normalizeId(value) {
   return s || null;
 }
 
-function treeToNodesAndEdges(orgChart, activeAgentProfileId) {
+function treeToNodesAndEdges(orgChart, activeAgentProfileId, highlightProfileIds = []) {
   const roots = Array.isArray(orgChart) ? orgChart : [];
   const nodes = [];
   const edges = [];
   const activeId = normalizeId(activeAgentProfileId);
+  const highlightSet = new Set((highlightProfileIds || []).map((x) => normalizeId(x)).filter(Boolean));
 
   const collect = (nodeList) => {
     for (const n of nodeList || []) {
@@ -36,6 +37,7 @@ function treeToNodesAndEdges(orgChart, activeAgentProfileId) {
       const profileId = normalizeId(n.agent_profile_id);
       const isActive =
         activeId != null && profileId != null && activeId === profileId;
+      const isHighlight = profileId != null && highlightSet.has(profileId);
 
       nodes.push({
         id,
@@ -47,6 +49,7 @@ function treeToNodesAndEdges(orgChart, activeAgentProfileId) {
         color: n.color || '#1976d2',
         labelLength: Math.min(30, (n.agent_name || n.agent_handle || 'Agent').length),
         isActive,
+        isHighlight,
       });
       collect(n.children || []);
     }
@@ -54,6 +57,12 @@ function treeToNodesAndEdges(orgChart, activeAgentProfileId) {
   collect(roots);
   addEdges(roots, edges);
   return { nodes, edges };
+}
+
+/** Flat peer list + no edges — circle layout for committee / round-robin / consensus. */
+function peerNodesAndEdges(orgChart, activeAgentProfileId, highlightProfileIds = []) {
+  const { nodes: treeNodes } = treeToNodesAndEdges(orgChart, activeAgentProfileId, highlightProfileIds);
+  return { nodes: treeNodes, edges: [] };
 }
 
 const getOrgChartStyle = (theme) => [
@@ -102,16 +111,40 @@ const getOrgChartStyle = (theme) => [
       'overlay-shape': 'round-rectangle',
     },
   },
+  {
+    selector: 'node[?isHighlight]',
+    style: {
+      'border-width': 3,
+      'border-color': theme.palette.warning.light,
+      'border-style': 'solid',
+    },
+  },
 ];
 
-export default function OrgChartView({ orgChart, activeAgentProfileId }) {
+/**
+ * @param {'tree'|'circle'} layoutMode — tree uses reporting lines; circle lays out peers in a ring.
+ * @param {string[]} highlightAgentProfileIds — optional chair / current rotation leader emphasis.
+ */
+export default function OrgChartView({
+  orgChart,
+  activeAgentProfileId,
+  layoutMode = 'tree',
+  highlightAgentProfileIds = [],
+}) {
   const theme = useTheme();
   const [anchorEl, setAnchorEl] = useState(null);
   const [popoverNode, setPopoverNode] = useState(null);
 
-  const { nodes, edges } = useMemo(
-    () => treeToNodesAndEdges(orgChart, activeAgentProfileId),
-    [orgChart, activeAgentProfileId]
+  const { nodes, edges } = useMemo(() => {
+    if (layoutMode === 'circle') {
+      return peerNodesAndEdges(orgChart, activeAgentProfileId, highlightAgentProfileIds);
+    }
+    return treeToNodesAndEdges(orgChart, activeAgentProfileId, highlightAgentProfileIds);
+  }, [orgChart, activeAgentProfileId, layoutMode, highlightAgentProfileIds]);
+
+  const layoutOptions = useMemo(
+    () => (layoutMode === 'circle' ? { name: 'circle', padding: 32 } : {}),
+    [layoutMode]
   );
 
   const chartStyle = useMemo(() => getOrgChartStyle(theme), [theme]);
@@ -144,6 +177,7 @@ export default function OrgChartView({ orgChart, activeAgentProfileId }) {
         nodes={nodes}
         edges={edges}
         style={chartStyle}
+        layoutOptions={layoutOptions}
         onNodeClick={handleNodeClick}
         theme={theme}
         sx={{ minHeight: 320, bgcolor: theme.palette.mode === 'dark' ? 'background.default' : '#f5f5f5' }}

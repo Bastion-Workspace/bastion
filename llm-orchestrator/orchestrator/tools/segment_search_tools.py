@@ -234,9 +234,7 @@ async def search_segments_across_documents_tool(
         )
         
         segments = result["segments"]
-        for segment in segments:
-            print(f"Found in {segment['filename']}: {segment['section_name']}")
-            print(f"Content: {segment['content'][:200]}...")
+        # Each item includes filename, section_name, content, relevance_score, source.
         ```
     """
     try:

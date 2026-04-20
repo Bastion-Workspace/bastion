@@ -4,6 +4,7 @@ import { useAuth } from './AuthContext';
 import teamService from '../services/teams/TeamService';
 import { useMessaging } from './MessagingContext';
 import { useNotifications } from './NotificationContext';
+import { devLog } from '../utils/devConsole';
 
 const TeamContext = createContext();
 
@@ -200,9 +201,9 @@ export const TeamProvider = ({ children }) => {
     if (!isAuthenticated) return;
     
     try {
-      console.log('📊 Loading unread counts...');
+      devLog('📊 Loading unread counts...');
       const counts = await teamService.getUnreadPostCounts();
-      console.log('📊 Unread counts loaded:', counts);
+      devLog('📊 Unread counts loaded:', counts);
       setUnreadCounts(counts || {});
     } catch (error) {
       console.error('Failed to load unread counts:', error);
@@ -221,7 +222,7 @@ export const TeamProvider = ({ children }) => {
 
   const muteTeam = useCallback(async (teamId, muted = true) => {
     try {
-      console.log(`🔔 ${muted ? 'Muting' : 'Unmuting'} team ${teamId}... (current state: ${teams.find(t => t.team_id === teamId)?.muted})`);
+      devLog(`🔔 ${muted ? 'Muting' : 'Unmuting'} team ${teamId}... (current state: ${teams.find(t => t.team_id === teamId)?.muted})`);
       
       // Update local state FIRST for immediate UI feedback
       setTeams(prev => prev.map(t => 
@@ -230,7 +231,7 @@ export const TeamProvider = ({ children }) => {
       
       // Then call the API
       await teamService.muteTeam(teamId, muted);
-      console.log(`✅ Team ${teamId} ${muted ? 'muted' : 'unmuted'} successfully`);
+      devLog(`✅ Team ${teamId} ${muted ? 'muted' : 'unmuted'} successfully`);
       
       // Reload unread counts (don't reload teams to avoid overwriting local state)
       await loadUnreadCounts();
@@ -423,7 +424,7 @@ export const TeamProvider = ({ children }) => {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('✅ Team WebSocket connected');
+        devLog('✅ Team WebSocket connected');
         reconnectAttempts = 0; // Reset on successful connection
         // Load unread counts when WebSocket connects
         loadUnreadCounts();
@@ -431,7 +432,7 @@ export const TeamProvider = ({ children }) => {
         // Start heartbeat to keep connection alive
         const heartbeatInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
-            console.log('💓 Sending WebSocket heartbeat');
+            devLog('💓 Sending WebSocket heartbeat');
             ws.send(JSON.stringify({ type: 'heartbeat' }));
           } else {
             console.warn('⚠️ WebSocket not open, clearing heartbeat interval');
@@ -446,9 +447,19 @@ export const TeamProvider = ({ children }) => {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('📨 WebSocket message received:', data.type, data);
+          devLog('📨 WebSocket message received:', data.type, data);
           
           if (data.type === 'agent_notification') {
+            if (data.subtype === 'chat_completion' && data.conversation_id) {
+              try {
+                const active = sessionStorage.getItem('bastion_ui_active_conversation_id');
+                if (active && data.conversation_id === active) {
+                  return;
+                }
+              } catch (_) {
+                /* sessionStorage unavailable */
+              }
+            }
             addNotification(data);
           } else if (data.type === 'agent_factory_updated') {
             queryClient.invalidateQueries('agentFactoryProfiles');
@@ -459,7 +470,7 @@ export const TeamProvider = ({ children }) => {
           // Handle team-related events
           if (data.type === 'team.post.created') {
             const { team_id, post } = data;
-            console.log('📝 New post created in team:', team_id, 'by user:', post?.author_id);
+            devLog('📝 New post created in team:', team_id, 'by user:', post?.author_id);
             
             // Only add post if it doesn't already exist (avoid duplicates from createPost + WebSocket)
             setTeamPosts(prev => {
@@ -467,7 +478,7 @@ export const TeamProvider = ({ children }) => {
               // Check if post already exists by post_id
               const postExists = existingPosts.some(p => p.post_id === post?.post_id);
               if (postExists) {
-                console.log('📝 Post already exists, skipping duplicate:', post?.post_id);
+                devLog('📝 Post already exists, skipping duplicate:', post?.post_id);
                 return prev;
               }
               return {
@@ -485,7 +496,7 @@ export const TeamProvider = ({ children }) => {
             // Refresh unread counts when new post is created (for other users)
             // Only refresh if the post author is not the current user
             if (post?.author_id !== user?.user_id) {
-              console.log('🔄 Reloading unread counts (new post from other user)...');
+              devLog('🔄 Reloading unread counts (new post from other user)...');
               loadUnreadCounts();
             }
           } else if (data.type === 'team.post.deleted') {
@@ -496,7 +507,7 @@ export const TeamProvider = ({ children }) => {
             }));
           } else if (data.type === 'team.post.reaction') {
             const { team_id, post_id, reaction_type, user_id, action } = data;
-            console.log('📨 Reaction event:', { team_id, post_id, reaction_type, user_id, action });
+            devLog('📨 Reaction event:', { team_id, post_id, reaction_type, user_id, action });
             
             // Update the specific post's reactions in real-time
             setTeamPosts(prev => {
@@ -617,7 +628,7 @@ export const TeamProvider = ({ children }) => {
             loadPendingInvitations();
           } else if (data.type === 'team.deleted') {
             const { team_id } = data;
-            console.log('🗑️ Team deleted:', team_id);
+            devLog('🗑️ Team deleted:', team_id);
             
             // Remove team from state
             setTeams(prev => prev.filter(t => t.team_id !== team_id));
@@ -672,7 +683,7 @@ export const TeamProvider = ({ children }) => {
       };
 
       ws.onclose = () => {
-        console.log('Team WebSocket disconnected');
+        devLog('Team WebSocket disconnected');
         
         // Clear heartbeat interval
         if (ws.heartbeatInterval) {
@@ -690,7 +701,7 @@ export const TeamProvider = ({ children }) => {
         
         // Only log reconnection attempts in development
         if (import.meta.env.DEV) {
-          console.log(`Team WebSocket disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+          devLog(`Team WebSocket disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
         }
         
         reconnectTimeout = setTimeout(connectWebSocket, delay);

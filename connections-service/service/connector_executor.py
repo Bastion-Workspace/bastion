@@ -206,6 +206,7 @@ async def execute_endpoint(
     method = (endpoint_def.get("method") or "GET").upper()
     response_list_path = endpoint_def.get("response_list_path", "")
     pagination = endpoint_def.get("pagination") or {}
+    body_template = endpoint_def.get("body_template")
 
     # Merge endpoint definition params (value/default) with request params so static params (e.g. function=GLOBAL_QUOTE) are sent
     def_params = endpoint_def.get("params") or []

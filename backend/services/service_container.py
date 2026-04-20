@@ -44,14 +44,15 @@ class ServiceContainer:
 
         self.knowledge_graph_service: Optional["KnowledgeGraphService"] = None
         self.collection_analysis_service: Optional["CollectionAnalysisService"] = None
-        self.document_service: Optional["ParallelDocumentService"] = None
+        self.document_service: Optional["DocumentServiceFacade"] = None
         self.enhanced_pdf_service: Optional["EnhancedPDFSegmentationService"] = None
         self.category_service: Optional["CategoryService"] = None
 
         self.rss_service: Optional[Any] = None
         self.file_manager: Optional[Any] = None
         self.folder_service: Optional["FolderService"] = None
-        self.news_service: Optional[Any] = None
+        self.document_sharing_service: Optional[Any] = None
+        self.collab_room_manager: Optional[Any] = None
         self.direct_search_service: Optional[Any] = None
 
         # Research plan service removed - migrated to LangGraph subgraph workflows
@@ -169,18 +170,26 @@ class ServiceContainer:
             "KnowledgeGraphService"
         )
         
-        # Document service (single instance with shared resources)
-        from services.parallel_document_service import ParallelDocumentService
-        self.document_service = ParallelDocumentService()
-        # Set WebSocket manager for real-time updates
-        self.document_service.websocket_manager = self.websocket_manager
+        # Document service facade (gRPC to document-service; shared repo/embeddings local)
+        from services.document_service_facade import DocumentServiceFacade
+
+        self.document_service = DocumentServiceFacade()
         await self._retry_with_backoff(
             lambda: self.document_service.initialize(
                 shared_document_repository=self.document_repository,
                 shared_embedding_manager=self.embedding_manager,
-                shared_kg_service=self.knowledge_graph_service
+                shared_kg_service=self.knowledge_graph_service,
+                websocket_manager=self.websocket_manager,
+                skip_incomplete_resume=True,
             ),
-            "ParallelDocumentService"
+            "DocumentServiceFacade",
+        )
+
+        from utils.document_processor import get_document_processor
+
+        await self._retry_with_backoff(
+            lambda: get_document_processor(),
+            "DocumentProcessor",
         )
         
         # Chat service (single instance with shared resources)
@@ -198,14 +207,6 @@ class ServiceContainer:
         # RSS service (migrated to tools-service)
         from tools_service.services.rss_service import get_rss_service
         self.rss_service = await get_rss_service(shared_db_pool=self.db_pool)
-
-        # News service (single instance)
-        from services.news_service import NewsService
-        self.news_service = NewsService()
-        await self._retry_with_backoff(
-            lambda: self.news_service.initialize(shared_db_pool=self.db_pool),
-            "NewsService"
-        )
         
         # Direct search service
         from services.direct_search_service import DirectSearchService
@@ -218,7 +219,13 @@ class ServiceContainer:
             self.folder_service.initialize,
             "FolderService"
         )
-        
+
+        from services.document_sharing_service import document_sharing_service as _document_sharing_service
+        self.document_sharing_service = _document_sharing_service
+
+        from services.collab_room_manager import get_collab_room_manager
+        self.collab_room_manager = get_collab_room_manager()
+
         # FileManager service will be initialized lazily to avoid circular dependency
         # It will get services from this container when it initializes itself
         self.file_manager = None  # Will be set by get_file_manager() when needed
@@ -231,7 +238,10 @@ class ServiceContainer:
         
         # Collection analysis service
         from services.collection_analysis_service import CollectionAnalysisService
-        self.collection_analysis_service = CollectionAnalysisService(self.chat_service)
+        self.collection_analysis_service = CollectionAnalysisService(
+            self.chat_service,
+            shared_kg_service=self.knowledge_graph_service,
+        )
         await self._retry_with_backoff(
             self.collection_analysis_service.initialize,
             "CollectionAnalysisService"

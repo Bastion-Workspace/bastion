@@ -6,6 +6,8 @@ CRUD operations for image metadata sidecar files
 import base64
 import json
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -22,6 +24,7 @@ from services.grpc_context_gatherer import get_context_gatherer
 from utils.auth_middleware import get_current_user, require_admin
 from config import settings
 from clients.tool_service_client import get_tool_service_client
+from clients.document_service_client import get_document_service_client
 from services.database_manager.database_helpers import fetch_all, fetch_one, execute
 from services.face_encoding_service import get_face_encoding_service
 from models.object_detection_models import (
@@ -42,6 +45,43 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["image-metadata"], prefix="")
+
+
+async def _download_document_image_to_temp(
+    document_id: str,
+    user_id: str,
+    filename: str,
+    *,
+    role: str = "",
+) -> str:
+    """
+    Stream library image bytes from document-service to a temp file.
+    Caller must os.unlink(path) when finished.
+    """
+    dsc = get_document_service_client()
+    await dsc.initialize(required=True)
+    suffix = Path(filename or "image").suffix or ".bin"
+    fd, tmp_path = tempfile.mkstemp(prefix="bastion_ds_img_", suffix=suffix)
+    os.close(fd)
+    try:
+        parts: list[bytes] = []
+        async for chunk in dsc.download_document_stream(
+            document_id, user_id or "", role=role or ""
+        ):
+            if chunk.data:
+                parts.append(chunk.data)
+        blob = b"".join(parts)
+        if not blob:
+            raise FileNotFoundError("empty download")
+        with open(tmp_path, "wb") as f:
+            f.write(blob)
+        return tmp_path
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 # Test endpoint to verify router is registered
 @router.get("/api/test-image-metadata")
@@ -242,8 +282,11 @@ async def create_image_metadata(
             collection_type=collection_type
         )
         image_path = Path(file_path_str)
-        
-        if not image_path.exists():
+
+        from services import ds_upload_library_fs as dsf
+
+        dsf_uid = current_user.user_id
+        if not await dsf.exists(dsf_uid, image_path):
             raise HTTPException(status_code=404, detail="Image file not found")
         
         # Create metadata sidecar path
@@ -299,9 +342,11 @@ async def create_image_metadata(
         if metadata.platform:
             metadata_json["platform"] = metadata.platform
         
-        # Write metadata file
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(metadata_json, f, indent=2, ensure_ascii=False)
+        await dsf.write_text(
+            dsf_uid,
+            metadata_path,
+            json.dumps(metadata_json, indent=2, ensure_ascii=False),
+        )
         
         logger.info(f"✅ Created image metadata sidecar: {metadata_path}")
         
@@ -384,20 +429,27 @@ async def get_image_metadata(
         image_path = Path(file_path_str)
         
         logger.info(f"📁 Image path: {image_path}")
+
+        from services import ds_upload_library_fs as dsf
+
+        dsf_uid = current_user.user_id
         
         # Check for metadata sidecar
         # Use stem (filename without extension) to match actual sidecar naming: image.jpg -> image.metadata.json
         metadata_path = image_path.parent / f"{image_path.stem}.metadata.json"
         logger.info(f"🔍 Looking for metadata at: {metadata_path}")
-        logger.info(f"📂 Metadata file exists: {metadata_path.exists()}")
+        meta_exists = await dsf.exists(dsf_uid, metadata_path)
+        logger.info(f"📂 Metadata file exists: {meta_exists}")
         
         # Debug: List files in the directory
-        if not metadata_path.exists():
+        if not meta_exists:
             try:
-                files_in_dir = list(image_path.parent.glob("*.metadata.json"))
-                logger.info(f"📋 Metadata files in directory: {[f.name for f in files_in_dir]}")
-                all_files = list(image_path.parent.glob(f"{image_path.stem}*"))
-                logger.info(f"📋 All files with same basename: {[f.name for f in all_files]}")
+                names = await dsf.list_dir_names(dsf_uid, image_path.parent)
+                meta_names = [n for n in names if n.endswith(".metadata.json")]
+                logger.info(f"📋 Metadata files in directory: {meta_names}")
+                stem = image_path.stem
+                same_base = [n for n in names if n.startswith(stem)]
+                logger.info(f"📋 All files with same basename: {same_base}")
             except Exception as e:
                 logger.warning(f"⚠️ Could not list directory contents: {e}")
             
@@ -416,8 +468,8 @@ async def get_image_metadata(
             }
         
         # Read and return metadata
-        with open(metadata_path, 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
+        raw_meta = await dsf.read_text(dsf_uid, metadata_path)
+        metadata = json.loads(raw_meta)
         
         return {
             "exists": True,
@@ -433,13 +485,12 @@ async def get_image_metadata(
 
 @router.put("/api/documents/{document_id}/image-metadata")
 async def update_image_metadata(
+    request: Request,
     document_id: str,
-    metadata: ImageMetadataRequest = Body(...),
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
     """Update existing image metadata sidecar file"""
-    # Same logic as create - just overwrites existing file
-    return await create_image_metadata(document_id, metadata, current_user)
+    return await create_image_metadata(request, document_id, current_user)
 
 
 @router.delete("/api/documents/{document_id}/image-metadata")
@@ -482,20 +533,22 @@ async def delete_image_metadata(
         # Delete metadata sidecar
         # Use stem (filename without extension) to match actual sidecar naming: image.jpg -> image.metadata.json
         metadata_path = image_path.parent / f"{image_path.stem}.metadata.json"
-        
-        if metadata_path.exists():
-            metadata_path.unlink()
-            logger.info(f"✅ Deleted image metadata sidecar: {metadata_path}")
-            
-            # TODO: Optionally delete the document record and embeddings for the metadata
-            # For now, just delete the file - the document record can remain
-            
-            return {
-                "status": "success",
-                "message": "Image metadata deleted successfully"
-            }
-        else:
+
+        from services import ds_upload_library_fs as dsf
+
+        dsf_uid = current_user.user_id
+        if not await dsf.exists(dsf_uid, metadata_path):
             raise HTTPException(status_code=404, detail="Metadata file not found")
+        try:
+            await dsf.delete_file(dsf_uid, metadata_path)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="Metadata file not found")
+        logger.info(f"✅ Deleted image metadata sidecar: {metadata_path}")
+        
+        return {
+            "status": "success",
+            "message": "Image metadata deleted successfully"
+        }
         
     except HTTPException:
         raise
@@ -524,9 +577,6 @@ async def describe_image_llm(
     if not has_cap:
         raise HTTPException(status_code=403, detail="Image LLM description not enabled for your account")
 
-    document_service = await _get_document_service()
-    folder_service = await _get_folder_service()
-
     doc_info = await check_document_access(document_id, current_user, "read")
     if not doc_info:
         raise HTTPException(status_code=404, detail="Document not found or access denied")
@@ -538,23 +588,21 @@ async def describe_image_llm(
     if not any(path_lower.endswith(ext) for ext in IMAGE_EXTENSIONS):
         raise HTTPException(status_code=400, detail="Document is not an image file")
 
-    user_id = getattr(doc_info, "user_id", None)
-    folder_id = getattr(doc_info, "folder_id", None)
-    collection_type = getattr(doc_info, "collection_type", "user")
-    file_path_str = await folder_service.get_document_file_path(
-        filename=filename,
-        folder_id=folder_id,
-        user_id=user_id,
-        collection_type=collection_type
-    )
-    image_path = Path(file_path_str)
-    if not image_path.exists():
-        raise HTTPException(status_code=404, detail="Image file not found")
-
+    user_id = getattr(doc_info, "user_id", None) or current_user.user_id
+    role = getattr(current_user, "role", "") or ""
     try:
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        parts: list[bytes] = []
+        async for chunk in dsc.download_document_stream(document_id, user_id, role=role):
+            if chunk.data:
+                parts.append(chunk.data)
+        image_bytes = b"".join(parts)
+        if not image_bytes:
+            raise HTTPException(status_code=404, detail="Image file not found")
         image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to read image: {e}")
         raise HTTPException(status_code=500, detail="Failed to read image file")
@@ -690,10 +738,13 @@ async def _generate_metadata_suggestions(
         
         # Load existing metadata if it exists
         existing_metadata = {}
-        if metadata_path.exists():
+        from services import ds_upload_library_fs as dsf
+
+        dsf_uid = user_id or ""
+        if dsf_uid and await dsf.exists(dsf_uid, metadata_path):
             try:
-                with open(metadata_path, 'r', encoding='utf-8') as f:
-                    existing_metadata = json.load(f)
+                raw = await dsf.read_text(dsf_uid, metadata_path)
+                existing_metadata = json.loads(raw)
             except Exception as e:
                 logger.warning(f"Failed to load existing metadata for suggestions: {e}")
         
@@ -1125,139 +1176,138 @@ async def analyze_image_faces(
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found or access denied")
         
-        # 3. Get image file path
-        folder_service = await _get_folder_service()
-        filename = getattr(doc_info, 'filename', '')
-        user_id = getattr(doc_info, 'user_id', None)
-        folder_id = getattr(doc_info, 'folder_id', None)
-        collection_type = getattr(doc_info, 'collection_type', 'user')
-        
-        file_path_str = await folder_service.get_document_file_path(
-            filename=filename,
-            folder_id=folder_id,
-            user_id=user_id,
-            collection_type=collection_type
+        # 3. Stream image to temp for tools that require a local path
+        filename = getattr(doc_info, "filename", "")
+        user_id = getattr(doc_info, "user_id", None)
+        collection_type = getattr(doc_info, "collection_type", "user")
+
+        tmp_local = await _download_document_image_to_temp(
+            document_id,
+            user_id or current_user.user_id,
+            filename,
+            role=getattr(current_user, "role", "") or "",
         )
-        image_path = Path(file_path_str)
-        
-        if not image_path.exists():
-            raise HTTPException(status_code=404, detail="Image file not found")
-        
-        # 4. Call Tools Service for face detection (graceful degradation)
         try:
-            tool_client = await get_tool_service_client()
-            detection_result = await tool_client.detect_faces(
-                attachment_path=str(image_path),
-                user_id=user_id or current_user.user_id
-            )
-            
-            if not detection_result.get("success"):
-                error_msg = detection_result.get("error", "Face detection failed")
-                logger.error(f"Face detection failed: {error_msg}")
+            # 4. Call Tools Service for face detection (graceful degradation)
+            try:
+                tool_client = await get_tool_service_client()
+                detection_result = await tool_client.detect_faces(
+                    attachment_path=str(tmp_local),
+                    user_id=user_id or current_user.user_id,
+                )
+
+                if not detection_result.get("success"):
+                    error_msg = detection_result.get("error", "Face detection failed")
+                    logger.error(f"Face detection failed: {error_msg}")
+                    return {
+                        "success": False,
+                        "error": error_msg,
+                        "faces": [],
+                    }
+
+                # Convert Tools Service response format to expected format
+                faces_list = []
+                for face in detection_result.get("faces", []):
+                    faces_list.append(
+                        {
+                            "bbox_x": face.get("bbox_x", 0),
+                            "bbox_y": face.get("bbox_y", 0),
+                            "bbox_width": face.get("bbox_width", 0),
+                            "bbox_height": face.get("bbox_height", 0),
+                            "face_encoding": face.get("face_encoding", []),
+                            "confidence": 1.0,
+                        }
+                    )
+
+                result = {
+                    "faces": faces_list,
+                    "processing_time_seconds": 0,  # Tools Service doesn't return this
+                    "image_width": detection_result.get("image_width"),
+                    "image_height": detection_result.get("image_height"),
+                }
+
+            except Exception as e:
+                logger.error(f"Tools Service unavailable: {e}")
                 return {
                     "success": False,
-                    "error": error_msg,
-                    "faces": []
+                    "error": "Face analysis service unavailable",
+                    "faces": [],
                 }
-            
-            # Convert Tools Service response format to expected format
-            faces_list = []
-            for face in detection_result.get("faces", []):
-                faces_list.append({
-                    "bbox_x": face.get("bbox_x", 0),
-                    "bbox_y": face.get("bbox_y", 0),
-                    "bbox_width": face.get("bbox_width", 0),
-                    "bbox_height": face.get("bbox_height", 0),
-                    "face_encoding": face.get("face_encoding", []),
-                    "confidence": 1.0
-                })
-            
-            result = {
-                "faces": faces_list,
-                "processing_time_seconds": 0,  # Tools Service doesn't return this
-                "image_width": detection_result.get("image_width"),
-                "image_height": detection_result.get("image_height")
+
+            # 5. Store detected faces in database
+            await _store_detected_faces(document_id, result["faces"])
+
+            # 6. Reload faces from database to get IDs
+            stored_faces = await _fetch_detected_faces(document_id)
+
+            # 7. Match faces against known identities for auto-suggestions using Tools Service
+            try:
+                identification_result = await tool_client.identify_faces(
+                    attachment_path=str(tmp_local),
+                    user_id=user_id or current_user.user_id,
+                    confidence_threshold=0.82,  # Align with L2 < 0.6 same-person rule (cosine >= 0.82)
+                )
+
+                faces_with_suggestions = await _merge_identity_suggestions(
+                    stored_faces=stored_faces,
+                    identified_faces=identification_result.get("identified_faces", [])
+                    if identification_result.get("success")
+                    else [],
+                )
+            except Exception as e:
+                logger.warning(f"Face identification failed, continuing without suggestions: {e}")
+                faces_with_suggestions = stored_faces
+
+            # Convert to response format (exclude face_encoding - too large for API response)
+            faces_response = []
+            for face in faces_with_suggestions:
+                face_data = {
+                    "id": face["id"],
+                    "bbox_x": face["bbox_x"],
+                    "bbox_y": face["bbox_y"],
+                    "bbox_width": face["bbox_width"],
+                    "bbox_height": face["bbox_height"],
+                    "identity_name": face["identity_name"],
+                    "identity_confirmed": face["identity_confirmed"],
+                    "confidence": face.get("confidence", 1.0),
+                }
+
+                if face.get("suggested_identity"):
+                    face_data["suggested_identity"] = face["suggested_identity"]
+                    face_data["suggested_confidence"] = face.get("suggested_confidence", 0)
+                    logger.info(
+                        f"   📤 Returning suggestion: {face_data['suggested_identity']} ({face_data['suggested_confidence']}%)"
+                    )
+
+                faces_response.append(face_data)
+
+            metadata_suggestions = None
+            if len(faces_response) > 0:
+                metadata_suggestions = await _generate_metadata_suggestions(
+                    document_id=document_id,
+                    faces=faces_response,
+                    filename=filename,
+                    user_id=user_id or current_user.user_id,
+                    collection_type=collection_type,
+                )
+
+            response = {
+                "success": True,
+                "faces": faces_response,
+                "processing_time": result["processing_time_seconds"],
+                "image_width": result["image_width"],
+                "image_height": result["image_height"],
             }
-            
-        except Exception as e:
-            logger.error(f"Tools Service unavailable: {e}")
-            return {
-                "success": False,
-                "error": "Face analysis service unavailable",
-                "faces": []
-            }
-        
-        # 5. Store detected faces in database
-        await _store_detected_faces(document_id, result["faces"])
-        
-        # 6. Reload faces from database to get IDs
-        stored_faces = await _fetch_detected_faces(document_id)
-        
-        # 7. Match faces against known identities for auto-suggestions using Tools Service
-        # High-confidence matches are suggested but NOT auto-synced until user confirms
-        try:
-            identification_result = await tool_client.identify_faces(
-                attachment_path=str(image_path),
-                user_id=user_id or current_user.user_id,
-                confidence_threshold=0.82  # Align with L2 < 0.6 same-person rule (cosine >= 0.82)
-            )
-            
-            # Merge identity suggestions with stored faces by matching bounding boxes
-            faces_with_suggestions = await _merge_identity_suggestions(
-                stored_faces=stored_faces,
-                identified_faces=identification_result.get("identified_faces", []) if identification_result.get("success") else []
-            )
-        except Exception as e:
-            logger.warning(f"Face identification failed, continuing without suggestions: {e}")
-            # Continue without identity suggestions if identification fails
-            faces_with_suggestions = stored_faces
-        
-        # Convert to response format (exclude face_encoding - too large for API response)
-        faces_response = []
-        for face in faces_with_suggestions:
-            face_data = {
-                "id": face["id"],
-                "bbox_x": face["bbox_x"],
-                "bbox_y": face["bbox_y"],
-                "bbox_width": face["bbox_width"],
-                "bbox_height": face["bbox_height"],
-                "identity_name": face["identity_name"],
-                "identity_confirmed": face["identity_confirmed"],
-                "confidence": face.get("confidence", 1.0)
-            }
-            
-            # Add suggested identity if found
-            if face.get("suggested_identity"):
-                face_data["suggested_identity"] = face["suggested_identity"]
-                face_data["suggested_confidence"] = face.get("suggested_confidence", 0)
-                logger.info(f"   📤 Returning suggestion: {face_data['suggested_identity']} ({face_data['suggested_confidence']}%)")
-            
-            faces_response.append(face_data)
-        
-        # 9. Generate metadata suggestions when faces are detected
-        metadata_suggestions = None
-        if len(faces_response) > 0:
-            metadata_suggestions = await _generate_metadata_suggestions(
-                document_id=document_id,
-                faces=faces_response,
-                filename=filename,
-                user_id=user_id or current_user.user_id,
-                collection_type=collection_type
-            )
-        
-        response = {
-            "success": True,
-            "faces": faces_response,
-            "processing_time": result["processing_time_seconds"],
-            "image_width": result["image_width"],
-            "image_height": result["image_height"]
-        }
-        
-        # Add metadata suggestions if available
-        if metadata_suggestions:
-            response["metadata_suggestions"] = metadata_suggestions
-        
-        return response
+
+            if metadata_suggestions:
+                response["metadata_suggestions"] = metadata_suggestions
+
+            return response
+        finally:
+            try:
+                os.unlink(tmp_local)
+            except OSError:
+                pass
         
     except HTTPException:
         raise
@@ -1402,53 +1452,52 @@ async def detect_objects(
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found or access denied")
 
-        folder_service = await _get_folder_service()
         filename = getattr(doc_info, "filename", "")
         user_id = getattr(doc_info, "user_id", None) or current_user.user_id
-        folder_id = getattr(doc_info, "folder_id", None)
-        collection_type = getattr(doc_info, "collection_type", "user")
 
-        file_path_str = await folder_service.get_document_file_path(
-            filename=filename,
-            folder_id=folder_id,
-            user_id=user_id,
-            collection_type=collection_type,
+        tmp_local = await _download_document_image_to_temp(
+            document_id,
+            user_id,
+            filename,
+            role=getattr(current_user, "role", "") or "",
         )
-        image_path = Path(file_path_str)
-        if not image_path.exists():
-            raise HTTPException(status_code=404, detail="Image file not found")
+        try:
+            from services.object_detection_service import get_object_detection_service
 
-        from services.object_detection_service import get_object_detection_service
+            obj_service = await get_object_detection_service()
+            opts = request or ObjectDetectionRequest()
+            result = await obj_service.detect_objects_in_image(
+                document_id=document_id,
+                image_path=str(tmp_local),
+                user_id=user_id,
+                class_filter=opts.class_filter,
+                confidence_threshold=opts.confidence_threshold,
+                semantic_descriptions=opts.semantic_descriptions,
+                match_user_annotations=opts.match_user_annotations,
+            )
 
-        obj_service = await get_object_detection_service()
-        opts = request or ObjectDetectionRequest()
-        result = await obj_service.detect_objects_in_image(
-            document_id=document_id,
-            image_path=str(image_path),
-            user_id=user_id,
-            class_filter=opts.class_filter,
-            confidence_threshold=opts.confidence_threshold,
-            semantic_descriptions=opts.semantic_descriptions,
-            match_user_annotations=opts.match_user_annotations,
-        )
+            if result.get("error"):
+                return {
+                    "success": False,
+                    "error": result["error"],
+                    "objects": [],
+                }
 
-        if result.get("error"):
+            await obj_service.process_detection_results(document_id, result["objects"], user_id=user_id)
+            stored = await obj_service.get_detected_objects(document_id)
+
             return {
-                "success": False,
-                "error": result["error"],
-                "objects": [],
+                "success": True,
+                "objects": stored,
+                "image_width": result.get("image_width"),
+                "image_height": result.get("image_height"),
+                "processing_time_seconds": result.get("processing_time_seconds"),
             }
-
-        await obj_service.process_detection_results(document_id, result["objects"], user_id=user_id)
-        stored = await obj_service.get_detected_objects(document_id)
-
-        return {
-            "success": True,
-            "objects": stored,
-            "image_width": result.get("image_width"),
-            "image_height": result.get("image_height"),
-            "processing_time_seconds": result.get("processing_time_seconds"),
-        }
+        finally:
+            try:
+                os.unlink(tmp_local)
+            except OSError:
+                pass
     except HTTPException:
         raise
     except Exception as e:
@@ -1468,134 +1517,138 @@ async def create_object_annotation(
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found or access denied")
 
-        folder_service = await _get_folder_service()
         filename = getattr(doc_info, "filename", "")
         user_id = getattr(doc_info, "user_id", None) or current_user.user_id
-        folder_id = getattr(doc_info, "folder_id", None)
-        collection_type = getattr(doc_info, "collection_type", "user")
 
-        file_path_str = await folder_service.get_document_file_path(
-            filename=filename,
-            folder_id=folder_id,
-            user_id=user_id,
-            collection_type=collection_type,
+        tmp_local = await _download_document_image_to_temp(
+            document_id,
+            user_id,
+            filename,
+            role=getattr(current_user, "role", "") or "",
         )
-        image_path = Path(file_path_str)
-        if not image_path.exists():
-            raise HTTPException(status_code=404, detail="Image file not found")
+        try:
+            from clients.image_vision_client import get_image_vision_client
+            from services.object_encoding_service import get_object_encoding_service
 
-        from clients.image_vision_client import get_image_vision_client
-        from services.object_encoding_service import get_object_encoding_service
+            vision_client = await get_image_vision_client()
+            if not settings.IMAGE_VISION_ENABLED:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Image vision is disabled (IMAGE_VISION_ENABLED=false)",
+                )
+            await vision_client.initialize(required=False)
+            if not vision_client.is_ready():
+                raise HTTPException(status_code=503, detail="Image Vision Service unavailable")
 
-        vision_client = await get_image_vision_client()
-        await vision_client.initialize(required=False)
-        if not vision_client._initialized:
-            raise HTTPException(status_code=503, detail="Image Vision Service unavailable")
-
-        bbox = {
-            "x": request.bbox.x,
-            "y": request.bbox.y,
-            "width": request.bbox.width,
-            "height": request.bbox.height,
-        }
-        features = await vision_client.extract_object_features(
-            image_path=str(image_path),
-            bbox=bbox,
-            description=request.description or request.object_name,
-        )
-        if not features or not features.get("combined_embedding"):
-            raise HTTPException(status_code=500, detail="Failed to extract object features")
-
-        obj_enc = await get_object_encoding_service()
-
-        # If user already has an annotation with this name, add this bbox as another example
-        existing = await fetch_one(
-            "SELECT id, user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, created_at, example_count FROM user_object_annotations WHERE user_id = $1 AND object_name = $2",
-            current_user.user_id,
-            request.object_name.strip(),
-        )
-        if existing:
-            annotation_id = existing["id"]
-            point_id = await obj_enc.add_annotation_example(
-                annotation_id=str(annotation_id),
-                user_id=current_user.user_id,
-                object_name=existing["object_name"],
-                combined_embedding=features["combined_embedding"],
-                source_document_id=document_id,
+            bbox = {
+                "x": request.bbox.x,
+                "y": request.bbox.y,
+                "width": request.bbox.width,
+                "height": request.bbox.height,
+            }
+            features = await vision_client.extract_object_features(
+                image_path=str(tmp_local),
+                bbox=bbox,
+                description=request.description or request.object_name,
             )
-            await execute(
+            if not features or not features.get("combined_embedding"):
+                raise HTTPException(status_code=500, detail="Failed to extract object features")
+
+            obj_enc = await get_object_encoding_service()
+
+            # If user already has an annotation with this name, add this bbox as another example
+            existing = await fetch_one(
+                "SELECT id, user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, created_at, example_count FROM user_object_annotations WHERE user_id = $1 AND object_name = $2",
+                current_user.user_id,
+                request.object_name.strip(),
+            )
+            if existing:
+                annotation_id = existing["id"]
+                point_id = await obj_enc.add_annotation_example(
+                    annotation_id=str(annotation_id),
+                    user_id=current_user.user_id,
+                    object_name=existing["object_name"],
+                    combined_embedding=features["combined_embedding"],
+                    source_document_id=document_id,
+                )
+                await execute(
+                    """
+                    INSERT INTO object_annotation_examples
+                    (annotation_id, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, combined_embedding_id)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    """,
+                    annotation_id,
+                    document_id,
+                    request.bbox.x,
+                    request.bbox.y,
+                    request.bbox.width,
+                    request.bbox.height,
+                    point_id,
+                )
+                await execute(
+                    "UPDATE user_object_annotations SET example_count = example_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                    annotation_id,
+                )
+                row = await fetch_one(
+                    "SELECT id, user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, created_at, example_count FROM user_object_annotations WHERE id = $1",
+                    annotation_id,
+                )
+                return {
+                    "success": True,
+                    "annotation_id": annotation_id,
+                    "annotation": dict(row),
+                    "added_as_example": True,
+                }
+
+            row = await fetch_one(
                 """
-                INSERT INTO object_annotation_examples
-                (annotation_id, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, combined_embedding_id)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                INSERT INTO user_object_annotations
+                (user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height,
+                 visual_embedding_id, combined_embedding_id, example_count)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)
+                RETURNING id, user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, created_at
                 """,
-                annotation_id,
+                current_user.user_id,
+                request.object_name.strip(),
+                request.description or "",
                 document_id,
                 request.bbox.x,
                 request.bbox.y,
                 request.bbox.width,
                 request.bbox.height,
-                point_id,
+                "",
+                "",
+            )
+            if not row:
+                raise HTTPException(status_code=500, detail="Failed to create annotation row")
+
+            annotation_id = row["id"]
+            point_id = await obj_enc.store_object_annotation(
+                annotation_id=str(annotation_id),
+                user_id=current_user.user_id,
+                object_name=request.object_name.strip(),
+                combined_embedding=features["combined_embedding"],
+                visual_embedding=features.get("visual_embedding"),
+                semantic_embedding=features.get("semantic_embedding"),
+                source_document_id=document_id,
             )
             await execute(
-                "UPDATE user_object_annotations SET example_count = example_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                "UPDATE user_object_annotations SET visual_embedding_id = $1, combined_embedding_id = $2 WHERE id = $3",
+                point_id,
+                point_id,
                 annotation_id,
             )
-            row = await fetch_one(
-                "SELECT id, user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, created_at, example_count FROM user_object_annotations WHERE id = $1",
-                annotation_id,
-            )
+
             return {
                 "success": True,
                 "annotation_id": annotation_id,
                 "annotation": dict(row),
-                "added_as_example": True,
             }
-
-        row = await fetch_one(
-            """
-            INSERT INTO user_object_annotations
-            (user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height,
-             visual_embedding_id, combined_embedding_id, example_count)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)
-            RETURNING id, user_id, object_name, description, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, created_at
-            """,
-            current_user.user_id,
-            request.object_name.strip(),
-            request.description or "",
-            document_id,
-            request.bbox.x,
-            request.bbox.y,
-            request.bbox.width,
-            request.bbox.height,
-            "",
-            "",
-        )
-        if not row:
-            raise HTTPException(status_code=500, detail="Failed to create annotation row")
-
-        annotation_id = row["id"]
-        point_id = await obj_enc.store_object_annotation(
-            annotation_id=str(annotation_id),
-            user_id=current_user.user_id,
-            object_name=request.object_name.strip(),
-            combined_embedding=features["combined_embedding"],
-            visual_embedding=features.get("visual_embedding"),
-            semantic_embedding=features.get("semantic_embedding"),
-            source_document_id=document_id,
-        )
-        await execute(
-            "UPDATE user_object_annotations SET visual_embedding_id = $1, combined_embedding_id = $2 WHERE id = $3",
-            point_id,
-            point_id,
-            annotation_id,
-        )
-
-        return {
-            "success": True,
-            "annotation_id": annotation_id,
-            "annotation": dict(row),
-        }
+        finally:
+            try:
+                os.unlink(tmp_local)
+            except OSError:
+                pass
     except HTTPException:
         raise
     except Exception as e:
@@ -1623,66 +1676,71 @@ async def add_annotation_example(
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found or access denied")
 
-        folder_service = await _get_folder_service()
         filename = getattr(doc_info, "filename", "")
         user_id = getattr(doc_info, "user_id", None) or current_user.user_id
-        folder_id = getattr(doc_info, "folder_id", None)
-        collection_type = getattr(doc_info, "collection_type", "user")
-        file_path_str = await folder_service.get_document_file_path(
-            filename=filename,
-            folder_id=folder_id,
-            user_id=user_id,
-            collection_type=collection_type,
-        )
-        image_path = Path(file_path_str)
-        if not image_path.exists():
-            raise HTTPException(status_code=404, detail="Image file not found")
 
-        from clients.image_vision_client import get_image_vision_client
-        from services.object_encoding_service import get_object_encoding_service
-
-        vision_client = await get_image_vision_client()
-        await vision_client.initialize(required=False)
-        if not vision_client._initialized:
-            raise HTTPException(status_code=503, detail="Image Vision Service unavailable")
-
-        bbox = {"x": request.bbox.x, "y": request.bbox.y, "width": request.bbox.width, "height": request.bbox.height}
-        features = await vision_client.extract_object_features(
-            image_path=str(image_path),
-            bbox=bbox,
-            description=ann["object_name"],
-        )
-        if not features or not features.get("combined_embedding"):
-            raise HTTPException(status_code=500, detail="Failed to extract object features")
-
-        obj_enc = await get_object_encoding_service()
-        point_id = await obj_enc.add_annotation_example(
-            annotation_id=str(annotation_id),
-            user_id=current_user.user_id,
-            object_name=ann["object_name"],
-            combined_embedding=features["combined_embedding"],
-            source_document_id=request.document_id,
-        )
-        await execute(
-            """
-            INSERT INTO object_annotation_examples
-            (annotation_id, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, combined_embedding_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            """,
-            annotation_id,
+        tmp_local = await _download_document_image_to_temp(
             request.document_id,
-            request.bbox.x,
-            request.bbox.y,
-            request.bbox.width,
-            request.bbox.height,
-            point_id,
+            user_id,
+            filename,
+            role=getattr(current_user, "role", "") or "",
         )
-        await execute(
-            "UPDATE user_object_annotations SET example_count = example_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
-            annotation_id,
-        )
+        try:
+            from clients.image_vision_client import get_image_vision_client
+            from services.object_encoding_service import get_object_encoding_service
 
-        return {"success": True, "annotation_id": annotation_id, "message": "Example added"}
+            vision_client = await get_image_vision_client()
+            if not settings.IMAGE_VISION_ENABLED:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Image vision is disabled (IMAGE_VISION_ENABLED=false)",
+                )
+            await vision_client.initialize(required=False)
+            if not vision_client.is_ready():
+                raise HTTPException(status_code=503, detail="Image Vision Service unavailable")
+
+            bbox = {"x": request.bbox.x, "y": request.bbox.y, "width": request.bbox.width, "height": request.bbox.height}
+            features = await vision_client.extract_object_features(
+                image_path=str(tmp_local),
+                bbox=bbox,
+                description=ann["object_name"],
+            )
+            if not features or not features.get("combined_embedding"):
+                raise HTTPException(status_code=500, detail="Failed to extract object features")
+
+            obj_enc = await get_object_encoding_service()
+            point_id = await obj_enc.add_annotation_example(
+                annotation_id=str(annotation_id),
+                user_id=current_user.user_id,
+                object_name=ann["object_name"],
+                combined_embedding=features["combined_embedding"],
+                source_document_id=request.document_id,
+            )
+            await execute(
+                """
+                INSERT INTO object_annotation_examples
+                (annotation_id, source_document_id, bbox_x, bbox_y, bbox_width, bbox_height, combined_embedding_id)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                """,
+                annotation_id,
+                request.document_id,
+                request.bbox.x,
+                request.bbox.y,
+                request.bbox.width,
+                request.bbox.height,
+                point_id,
+            )
+            await execute(
+                "UPDATE user_object_annotations SET example_count = example_count + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                annotation_id,
+            )
+
+            return {"success": True, "annotation_id": annotation_id, "message": "Example added"}
+        finally:
+            try:
+                os.unlink(tmp_local)
+            except OSError:
+                pass
     except HTTPException:
         raise
     except Exception as e:
@@ -1860,25 +1918,21 @@ async def update_detected_object(
                 if not full_row:
                     pass
                 else:
-                    folder_service = await _get_folder_service()
                     filename = getattr(doc_info, "filename", "")
                     user_id_attr = getattr(doc_info, "user_id", None) or current_user.user_id
-                    folder_id = getattr(doc_info, "folder_id", None)
-                    collection_type = getattr(doc_info, "collection_type", "user")
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id_attr,
-                        collection_type=collection_type,
+                    tmp_local = await _download_document_image_to_temp(
+                        full_row["document_id"],
+                        user_id_attr,
+                        filename,
+                        role=getattr(current_user, "role", "") or "",
                     )
-                    image_path = Path(file_path_str)
-                    if image_path.exists():
+                    try:
                         from clients.image_vision_client import get_image_vision_client
                         from services.object_encoding_service import get_object_encoding_service
 
                         vision_client = await get_image_vision_client()
                         await vision_client.initialize(required=False)
-                        if vision_client._initialized:
+                        if vision_client.is_ready():
                             bbox = {
                                 "x": full_row["bbox_x"],
                                 "y": full_row["bbox_y"],
@@ -1886,7 +1940,7 @@ async def update_detected_object(
                                 "height": full_row["bbox_height"],
                             }
                             features = await vision_client.extract_object_features(
-                                image_path=str(image_path),
+                                image_path=str(tmp_local),
                                 bbox=bbox,
                                 description=body.user_tag.strip(),
                             )
@@ -1973,6 +2027,11 @@ async def update_detected_object(
                                             ann_row["id"],
                                             object_id,
                                         )
+                    finally:
+                        try:
+                            os.unlink(tmp_local)
+                        except OSError:
+                            pass
             except Exception as enc_err:
                 logger.warning("CLIP encoding for YOLO user_tag skipped: %s", enc_err)
 
@@ -2183,7 +2242,6 @@ async def suggest_face_tags_from_metadata(
         folder_id = getattr(doc_info, 'folder_id', None)
         collection_type = getattr(doc_info, 'collection_type', 'user')
         
-        # Get file path
         folder_service = await _get_folder_service()
         file_path_str = await folder_service.get_document_file_path(
             filename=filename,
@@ -2192,8 +2250,11 @@ async def suggest_face_tags_from_metadata(
             collection_type=collection_type
         )
         image_path = Path(file_path_str)
-        
-        if not image_path.exists():
+
+        from services import ds_upload_library_fs as dsf
+
+        dsf_uid = current_user.user_id
+        if not await dsf.exists(dsf_uid, image_path):
             raise HTTPException(status_code=404, detail="Image file not found")
         
         # Load metadata.json
@@ -2201,13 +2262,13 @@ async def suggest_face_tags_from_metadata(
         metadata_path = image_path.parent / f"{image_path.stem}.metadata.json"
         metadata_tags = []
         
-        if metadata_path.exists():
+        if await dsf.exists(dsf_uid, metadata_path):
             try:
-                with open(metadata_path, 'r', encoding='utf-8') as f:
-                    metadata_data = json.load(f)
-                    metadata_tags = metadata_data.get('tags', [])
-                    if not isinstance(metadata_tags, list):
-                        metadata_tags = []
+                raw = await dsf.read_text(dsf_uid, metadata_path)
+                metadata_data = json.loads(raw)
+                metadata_tags = metadata_data.get('tags', [])
+                if not isinstance(metadata_tags, list):
+                    metadata_tags = []
             except Exception as e:
                 logger.warning(f"Failed to load metadata.json: {e}")
         

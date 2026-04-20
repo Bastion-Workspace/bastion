@@ -1,7 +1,7 @@
 """
-Org-Mode Recurring Tasks Service - Roosevelt's "Habit Cavalry"
+Org-mode recurring tasks service.
 
-**BULLY!** Automatic task recurrence for building lasting habits!
+Automatic task recurrence for building lasting habits.
 
 This service handles:
 - Parsing repeater syntax (+1w, .+1w, ++1w)
@@ -164,28 +164,24 @@ class OrgRecurringService:
         try:
             logger.info(f"🔁 RECURRING: Handling task completion at {file_path}:{line_number}")
             
-            # Resolve file path
-            from services.folder_service import FolderService
-            from backend.config import settings
+            from config import settings
             from services.database_manager.database_helpers import fetch_one
-            
-            folder_service = FolderService()
-            
-            # Get username
+            from services import ds_upload_library_fs as dsf
+
             row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
-            username = row['username'] if row else user_id
-            
-            # Construct file path
+            username = row["username"] if row else user_id
+
             upload_dir = Path(settings.UPLOAD_DIR)
             user_base_dir = upload_dir / "Users" / username
             full_path = user_base_dir / file_path
-            
-            if not full_path.exists():
+
+            if not await dsf.exists(user_id, full_path):
                 raise FileNotFoundError(f"File not found: {file_path}")
-            
-            # Read file
-            with open(full_path, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
+
+            body = await dsf.read_text(user_id, full_path)
+            lines = body.splitlines(keepends=True)
+            if not lines:
+                lines = [""]
             
             if line_number < 1 or line_number > len(lines):
                 raise ValueError(f"Invalid line number: {line_number}")
@@ -228,9 +224,7 @@ class OrgRecurringService:
             )
             lines[line_number - 1] = task_line_updated
             
-            # Write updated file
-            with open(full_path, 'w', encoding='utf-8') as f:
-                f.writelines(lines)
+            await dsf.write_text(user_id, full_path, "".join(lines))
             
             logger.info(f"✅ Recurring task reset: {task_line.strip()}")
             logger.info(f"📅 Next occurrence: {next_timestamp}")
@@ -267,7 +261,7 @@ class OrgRecurringService:
         Returns:
             Dict with consistency stats
         """
-        # TODO: Implement consistency tracking from LOGBOOK
+        # Future: optional consistency metrics from LOGBOOK (not implemented).
         # For now, return placeholder data
         return {
             "heading": heading_text,

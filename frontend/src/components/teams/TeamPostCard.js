@@ -276,12 +276,14 @@ const TeamPostCard = ({ post, teamId }) => {
     <Card
       ref={cardRef}
       sx={{
-        transition: 'background-color 3s cubic-bezier(0.4, 0, 0.2, 1)',
-        backgroundColor: isHighlighted 
-          ? (theme) => theme.palette.mode === 'dark' 
-            ? 'rgba(255, 255, 255, 0.08)' 
-            : 'rgba(25, 118, 210, 0.08)'
-          : 'transparent'
+        transition: 'box-shadow 3s cubic-bezier(0.4, 0, 0.2, 1)',
+        bgcolor: 'background.paper',
+        ...(isHighlighted && {
+          boxShadow: (theme) =>
+            theme.palette.mode === 'dark'
+              ? 'inset 0 0 0 9999px rgba(255, 255, 255, 0.08)'
+              : 'inset 0 0 0 9999px rgba(25, 118, 210, 0.08)',
+        }),
       }}
     >
       <CardContent>

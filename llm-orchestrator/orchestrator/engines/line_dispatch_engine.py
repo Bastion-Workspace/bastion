@@ -31,11 +31,34 @@ class LineDispatchEngine:
 
         briefing = (meta.get("line_dispatch_briefing") or meta.get("team_chat_context") or "").strip()
         rules = (meta.get("line_dispatch_tool_rules") or "").strip()
+        gmode = (meta.get("line_governance_mode") or "hierarchical").strip().lower()
+
+        if gmode == "round_robin":
+            role_intro = (
+                "You are the current rotating leader of this agent line (round-robin governance). "
+                "The user sent this message from **chat**. Respond clearly; delegate with tools when others should act.\n\n"
+            )
+        elif gmode == "committee":
+            role_intro = (
+                "You are the designated committee chair (or lead coordinator) for this agent line. "
+                "The user sent this message from **chat**. You may use send_to_agent(..., wait_for_response=True) "
+                "to consult other line members before answering. Use create_task_for_agent for async work.\n\n"
+            )
+        elif gmode == "consensus":
+            role_intro = (
+                "You are the consensus coordinator for this agent line. "
+                "The user sent this message from **chat**. Consult peers via send_to_agent(..., wait_for_response=True) "
+                "when useful; then synthesize one clear reply. Use create_task_for_agent when work should continue asynchronously.\n\n"
+            )
+        else:
+            role_intro = (
+                "You are the CEO (root) of this agent line. The user sent this message from **chat** "
+                "(interactive conversation, not a scheduled heartbeat). Respond clearly in chat; use tools "
+                "to delegate to your team when work should be done by others.\n\n"
+            )
 
         composed_query = (
-            "You are the CEO (root) of this agent line. The user sent this message from **chat** "
-            "(interactive conversation, not a scheduled heartbeat). Respond clearly in chat; use tools "
-            "to delegate to your team when work should be done by others.\n\n"
+            f"{role_intro}"
             "LINE CHAT — DELEGATION:\n"
             "- Use create_task_for_agent when work can continue asynchronously.\n"
             "- Use send_to_agent(..., wait_for_response=True) when you need a worker's output in this turn.\n"

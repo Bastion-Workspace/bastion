@@ -36,7 +36,7 @@ def cleanup_orphaned_generated_images_task(self, days: int = 7) -> Dict[str, Any
             from config import settings
             from services.database_manager.database_helpers import fetch_all
 
-            base = Path(settings.UPLOAD_DIR) / "web_sources" / "images"
+            base = Path(settings.WEB_SOURCES_ROOT) / "images"
             if not base.is_dir():
                 return 0
 

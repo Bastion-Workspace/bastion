@@ -31,9 +31,10 @@ import {
   TableRow,
   Chip,
 } from '@mui/material';
-import { PlayArrow, Delete, Download, Lock, Restore, DeleteSweep, Star, StarBorder } from '@mui/icons-material';
+import { PlayArrow, Delete, Download, Lock, Restore, DeleteSweep, Star, StarBorder, ContentCopy } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import agentFactoryService, { invalidateAgentHandlesQuery } from '../../services/agentFactoryService';
 import IdentitySection from './IdentitySection';
 import DataSourcesSection from './DataSourcesSection';
 import DataWorkspaceSection from './DataWorkspaceSection';
@@ -41,6 +42,7 @@ import ScheduleSection from './ScheduleSection';
 import MonitorsSection from './MonitorsSection';
 import BudgetSection from './BudgetSection';
 import ExecutionHistoryCard from './ExecutionHistoryCard';
+import AllowedConnectionsSection from './AllowedConnectionsSection';
 
 export default function AgentEditor({ profileId, onCloseEntityTab }) {
   const queryClient = useQueryClient();
@@ -61,13 +63,13 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
   const { data: playbooks = [] } = useQuery(
     'agentFactoryPlaybooks',
     () => apiService.agentFactory.listPlaybooks(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
 
   const { data: defaultChatPref } = useQuery(
     'defaultChatAgentProfile',
     () => apiService.settings.getDefaultChatAgentProfile(),
-    { retry: false }
+    { staleTime: 30_000, retry: false }
   );
 
   const setDefaultChatMutation = useMutation(
@@ -92,6 +94,27 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
     }
   );
 
+  const { data: sharedWithMe = [] } = useQuery(
+    'agentFactorySharedWithMe',
+    () => agentFactoryService.listSharedWithMe(),
+    { staleTime: 30_000, retry: false }
+  );
+  const shareIdForProfile = (sharedWithMe || []).find(
+    (s) => s.artifact_type === 'agent_profile' && s.artifact_id === profileId
+  )?.id;
+
+  const copySharedToMineMutation = useMutation(
+    (shareId) => agentFactoryService.copySharedToMine(shareId),
+    {
+      onSuccess: (data) => {
+        queryClient.invalidateQueries('agentFactoryProfiles');
+        queryClient.invalidateQueries('agentFactoryPlaybooks');
+        queryClient.invalidateQueries('agentFactorySkills');
+        queryClient.invalidateQueries('agentFactorySharedWithMe');
+      },
+    }
+  );
+
   const currentProfile = localProfile ?? profile;
 
   const updateProfileMutation = useMutation(
@@ -105,6 +128,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
           queryClient.invalidateQueries(['agentFactoryProfile', id]);
         }
         queryClient.invalidateQueries('agentFactoryProfiles');
+        invalidateAgentHandlesQuery(queryClient);
         setLocalProfile(null);
       },
       onError: (err) => {
@@ -129,6 +153,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
         queryClient.invalidateQueries(['agentFactoryProfile', id]);
         queryClient.invalidateQueries('agentFactoryProfiles');
         queryClient.invalidateQueries('defaultChatAgentProfile');
+        invalidateAgentHandlesQuery(queryClient);
         setLocalProfile((prev) => (prev ? { ...prev, is_active: false } : null));
       },
     }
@@ -140,6 +165,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
         queryClient.invalidateQueries(['agentFactoryProfile', id]);
         queryClient.invalidateQueries('agentFactoryProfiles');
         queryClient.invalidateQueries('defaultChatAgentProfile');
+        invalidateAgentHandlesQuery(queryClient);
         setLocalProfile((prev) => (prev ? { ...prev, is_active: true } : null));
       },
     }
@@ -150,6 +176,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
     {
       onSuccess: (_, id) => {
         queryClient.invalidateQueries('agentFactoryProfiles');
+        invalidateAgentHandlesQuery(queryClient);
         setDeleteAgentConfirmOpen(false);
         onCloseEntityTab?.('agent', id);
       },
@@ -162,6 +189,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
       onSuccess: (data, id) => {
         queryClient.setQueryData(['agentFactoryProfile', id], data);
         queryClient.invalidateQueries('agentFactoryProfiles');
+        invalidateAgentHandlesQuery(queryClient);
         setLocalProfile(null);
       },
     }
@@ -183,7 +211,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
 
   const handleProfileChange = useCallback(
     (next) => {
-      if (profile?.is_builtin) return;
+      if (profile?.is_builtin || profile?.ownership === 'shared') return;
       setLocalProfile(next);
       if (!profileId || !next) return;
       pendingProfileRef.current = next;
@@ -214,9 +242,13 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
           include_datetime_context: pending.include_datetime_context,
           include_user_facts: pending.include_user_facts,
           include_facts_categories: pending.include_facts_categories ?? [],
+          use_themed_memory: pending.use_themed_memory !== false,
           include_agent_memory: pending.include_agent_memory,
           auto_routable: pending.auto_routable,
           data_workspace_config: pending.data_workspace_config ?? {},
+          allowed_connections: Array.isArray(pending.allowed_connections)
+            ? pending.allowed_connections
+            : [],
         };
         updateProfileMutation.mutate({ id: profileId, body });
         pendingProfileRef.current = null;
@@ -308,6 +340,9 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
 
   if (!currentProfile) return null;
 
+  const isShared = currentProfile?.ownership === 'shared';
+  const isReadOnly = isShared || !!currentProfile?.is_builtin;
+
   const isChatDefault =
     (!!defaultChatPref?.agent_profile_id && defaultChatPref.agent_profile_id === profileId) ||
     (!!currentProfile?.is_builtin && !defaultChatPref?.agent_profile_id);
@@ -351,6 +386,27 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
           {saveError}
         </Alert>
       )}
+      {isShared && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2 }}
+          action={
+            shareIdForProfile && (
+              <Button
+                color="inherit"
+                size="small"
+                startIcon={<ContentCopy />}
+                onClick={() => copySharedToMineMutation.mutate(shareIdForProfile)}
+                disabled={copySharedToMineMutation.isLoading}
+              >
+                {copySharedToMineMutation.isLoading ? 'Copying…' : 'Make my own copy'}
+              </Button>
+            )
+          }
+        >
+          This agent is shared by {currentProfile.owner_display_name || currentProfile.owner_username || 'another user'}. You can use it as-is or make your own copy to customize.
+        </Alert>
+      )}
       {currentProfile?.is_builtin && (
         <Alert severity="info" sx={{ mb: 2 }}>
           This is the factory built-in agent: read-only here. Create a custom agent to customize behavior, then use
@@ -381,7 +437,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
               <Switch
                 checked={!!currentProfile.is_locked || !!currentProfile.is_builtin}
                 onChange={handleLockToggle}
-                disabled={updateProfileMutation.isLoading || !!currentProfile?.is_builtin}
+                disabled={updateProfileMutation.isLoading || isReadOnly}
                 color="primary"
               />
             }
@@ -452,7 +508,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
             variant="outlined"
             startIcon={<Delete />}
             onClick={() => setDeleteAgentConfirmOpen(true)}
-            disabled={!!currentProfile.is_locked || !!currentProfile.is_builtin}
+            disabled={!!currentProfile.is_locked || isReadOnly}
           >
             Delete
           </Button>
@@ -484,7 +540,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
         profile={currentProfile}
         playbooks={playbooks}
         onChange={handleProfileChange}
-        readOnly={!!currentProfile?.is_builtin || !!currentProfile?.is_locked}
+        readOnly={isReadOnly || !!currentProfile?.is_locked}
       />
 
       <DataSourcesSection profileId={profileId} />
@@ -492,20 +548,14 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
       <DataWorkspaceSection
         profile={currentProfile}
         onChange={handleProfileChange}
-        readOnly={!!currentProfile?.is_builtin || !!currentProfile?.is_locked}
+        readOnly={isReadOnly || !!currentProfile?.is_locked}
       />
 
-      <Card variant="outlined" sx={{ mb: 2 }}>
-        <CardContent>
-          <Typography variant="subtitle1" gutterBottom>
-            External tools (email, calendar, MCP)
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            Connect accounts in Settings → External connections. In the Workflow Composer, open each LLM Agent or
-            Deep Agent step to choose external tool packs and which connections apply to that step.
-          </Typography>
-        </CardContent>
-      </Card>
+      <AllowedConnectionsSection
+        profile={currentProfile}
+        onChange={handleProfileChange}
+        readOnly={!!currentProfile?.is_builtin || !!currentProfile?.is_locked}
+      />
 
       <ScheduleSection profileId={profileId} />
 

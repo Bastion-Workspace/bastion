@@ -1,61 +1,82 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS builder
 
-# Install system dependencies for Crawl4AI and browser
-RUN apt-get update && apt-get install -y \
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     wget \
     gnupg \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js for Crawl4AI browser dependencies
 RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
-WORKDIR /app
+COPY crawl4ai-service/requirements.txt crawl4ai-service/requirements-build.txt ./
+# Install codegen to default site-packages (protoc). Runtime deps go to --prefix only.
+# Use --ignore-installed so deps are not skipped when already satisfied in /usr/local
+# (e.g. after setuptools); the final stage copies only /install.
+RUN pip install --no-cache-dir -r requirements-build.txt && \
+    pip install --no-cache-dir --prefix=/install --ignore-installed -r requirements.txt
 
-# Copy requirements and install Python dependencies
-COPY crawl4ai-service/requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
-    pip install --no-cache-dir -r requirements.txt
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
 
-# Install Playwright browsers for Crawl4AI
-RUN pip install playwright \
-    && playwright install chromium
+RUN mkdir -p /opt/ms-playwright && \
+    PYTHONPATH=/install/lib/python3.11/site-packages \
+    PATH=/install/bin:${PATH} \
+    python3 -m playwright install chromium
 
-# Install Crawl4AI and run setup
-RUN pip install crawl4ai>=0.7.2 \
-    && crawl4ai-setup
+RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+    PATH=/install/bin:${PATH} \
+    crawl4ai-setup
 
-# Copy shared proto files first
 COPY protos /app/protos
-
-# Copy application code
 COPY crawl4ai-service /app
 
-# Generate gRPC code from shared proto files
-RUN python -m grpc_tools.protoc \
+RUN python3 -m grpc_tools.protoc \
     -I/app \
     --python_out=/app \
     --grpc_python_out=/app \
     --pyi_out=/app \
     /app/protos/crawl_service.proto
 
-# Expose gRPC port
+FROM python:3.11-slim
+
+ARG BASTION_RUNTIME_UID=10001
+ARG BASTION_RUNTIME_GID=10001
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
+    libpangocairo-1.0-0 \
+    libgtk-3-0 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+
+COPY --from=builder /install /usr/local
+COPY --from=builder /opt/ms-playwright /opt/ms-playwright
+COPY --from=builder /app/protos /app/protos
+COPY crawl4ai-service /app
+
+RUN groupadd --gid "${BASTION_RUNTIME_GID}" appgroup && \
+    useradd --uid "${BASTION_RUNTIME_UID}" --gid appgroup --create-home --shell /bin/bash crawluser && \
+    chown -R crawluser:appgroup /app /opt/ms-playwright
+USER crawluser
+
 EXPOSE 50055
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD python -c "import socket; s = socket.socket(); s.settimeout(5); s.connect(('localhost', 50055)); s.close()" || exit 1
 
-# Run the service
 CMD ["python", "main.py"]
-
-
-
-
-
-
-
-

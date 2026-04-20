@@ -8,11 +8,11 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 import grpc
 import yaml
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 from pydantic import AliasChoices
@@ -24,7 +24,31 @@ from services import agent_skills_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/agent-factory", tags=["Agent Factory"])
+
+def _api_user_rls(user_id: str) -> Dict[str, str]:
+    """RLS session context for Agent Factory HTTP handlers (matches database_manager GUC keys)."""
+    return {"user_id": user_id, "user_role": "user"}
+
+
+async def _agent_factory_request_rls(
+    current_user: Annotated[AuthenticatedUserResponse, Depends(get_current_user)],
+):
+    """Bind default DB RLS GUCs for this request (database_helpers.http_request_rls_context)."""
+    from services.database_manager.database_helpers import http_request_rls_context
+
+    token = http_request_rls_context.set(_api_user_rls(current_user.user_id))
+    try:
+        yield
+    finally:
+        http_request_rls_context.reset(token)
+
+
+router = APIRouter(
+    prefix="/api/agent-factory",
+    tags=["Agent Factory"],
+    dependencies=[Depends(_agent_factory_request_rls)],
+)
+
 
 try:
     from protos import orchestrator_pb2, orchestrator_pb2_grpc
@@ -52,11 +76,14 @@ class AgentProfileCreate(BaseModel):
     journal_config: Dict[str, Any] = Field(default_factory=dict)
     team_config: Dict[str, Any] = Field(default_factory=dict)
     watch_config: Dict[str, Any] = Field(default_factory=dict)
-    prompt_history_enabled: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("prompt_history_enabled", "chat_history_enabled"),
-        serialization_alias="prompt_history_enabled",
-    )
+    prompt_history_enabled: Annotated[
+        bool,
+        Field(
+            default=False,
+            validation_alias=AliasChoices("prompt_history_enabled", "chat_history_enabled"),
+            serialization_alias="prompt_history_enabled",
+        ),
+    ]
     chat_history_lookback: int = Field(default=10, ge=1, le=50)
     summary_threshold_tokens: int = Field(default=5000, ge=500, le=100000)
     summary_keep_messages: int = Field(default=10, ge=1, le=50)
@@ -66,9 +93,13 @@ class AgentProfileCreate(BaseModel):
     include_datetime_context: bool = True
     include_user_facts: bool = False
     include_facts_categories: List[str] = Field(default_factory=list)
+    use_themed_memory: bool = True
     auto_routable: bool = False
     chat_visible: bool = True
     data_workspace_config: Dict[str, Any] = Field(default_factory=dict)
+    include_agent_memory: bool = False
+    allowed_connections: List[Dict[str, Any]] = Field(default_factory=list)
+    category: Optional[str] = Field(None, max_length=100)
 
     @field_validator("include_facts_categories", mode="before")
     @classmethod
@@ -80,6 +111,21 @@ class AgentProfileCreate(BaseModel):
         if isinstance(v, str):
             if not v.strip():
                 return []
+            try:
+                parsed = json.loads(v)
+                return parsed if isinstance(parsed, list) else []
+            except json.JSONDecodeError:
+                return []
+        return []
+
+    @field_validator("allowed_connections", mode="before")
+    @classmethod
+    def coerce_allowed_connections_create(cls, v: Any) -> List[Dict[str, Any]]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return v
+        if isinstance(v, str) and v.strip():
             try:
                 parsed = json.loads(v)
                 return parsed if isinstance(parsed, list) else []
@@ -105,11 +151,14 @@ class AgentProfileUpdate(BaseModel):
     journal_config: Optional[Dict[str, Any]] = None
     team_config: Optional[Dict[str, Any]] = None
     watch_config: Optional[Dict[str, Any]] = None
-    prompt_history_enabled: Optional[bool] = Field(
-        None,
-        validation_alias=AliasChoices("prompt_history_enabled", "chat_history_enabled"),
-        serialization_alias="prompt_history_enabled",
-    )
+    prompt_history_enabled: Annotated[
+        Optional[bool],
+        Field(
+            default=None,
+            validation_alias=AliasChoices("prompt_history_enabled", "chat_history_enabled"),
+            serialization_alias="prompt_history_enabled",
+        ),
+    ]
     chat_history_lookback: Optional[int] = Field(None, ge=1, le=50)
     summary_threshold_tokens: Optional[int] = Field(None, ge=500, le=100000)
     summary_keep_messages: Optional[int] = Field(None, ge=1, le=50)
@@ -120,10 +169,12 @@ class AgentProfileUpdate(BaseModel):
     include_datetime_context: Optional[bool] = None
     include_user_facts: Optional[bool] = None
     include_facts_categories: Optional[List[str]] = None
+    use_themed_memory: Optional[bool] = None
     include_agent_memory: Optional[bool] = None
     auto_routable: Optional[bool] = None
     is_locked: Optional[bool] = None
     data_workspace_config: Optional[Dict[str, Any]] = None
+    allowed_connections: Optional[List[Dict[str, Any]]] = None
     category: Optional[str] = Field(None, max_length=100)
 
     @field_validator("include_facts_categories", mode="before")
@@ -233,6 +284,7 @@ class SkillCreate(BaseModel):
     slug: str = Field(..., min_length=1, max_length=100)
     procedure: str = Field(..., min_length=1)
     required_tools: List[str] = Field(default_factory=list)
+    required_connection_types: List[str] = Field(default_factory=list)
     optional_tools: List[str] = Field(default_factory=list)
     description: Optional[str] = None
     category: Optional[str] = Field(None, max_length=100)
@@ -240,11 +292,14 @@ class SkillCreate(BaseModel):
     outputs_schema: Dict[str, Any] = Field(default_factory=dict)
     examples: List[Any] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
+    is_core: bool = Field(default=False, description="Core skills always appear in the condensed skill catalog")
+    depends_on: List[str] = Field(default_factory=list, description="Slugs of dependency skills")
 
 
 class SkillUpdate(BaseModel):
     procedure: Optional[str] = None
     required_tools: Optional[List[str]] = None
+    required_connection_types: Optional[List[str]] = None
     optional_tools: Optional[List[str]] = None
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
@@ -255,6 +310,9 @@ class SkillUpdate(BaseModel):
     tags: Optional[List[str]] = None
     improvement_rationale: Optional[str] = None
     evidence_metadata: Optional[Dict[str, Any]] = None
+    is_core: Optional[bool] = None
+    depends_on: Optional[List[str]] = None
+    as_candidate: bool = False
 
 
 class SidebarCategoryCreate(BaseModel):
@@ -415,7 +473,7 @@ async def _get_connector_actions_for_profile(profile_id: str, user_id: str) -> L
     return actions
 
 
-# Email tools that get account-scoped variants when profile has service bindings (email:<connection_id>:<tool_name>).
+# Email tools replaced by account-scoped variants from user connections (email:<connection_id>:<tool_name>).
 EMAIL_CATEGORY_TOOL_NAMES = {"list_emails", "search_emails", "get_email_thread", "read_email", "move_email", "list_email_folders", "update_email", "create_draft", "get_email_statistics", "send_email", "reply_to_email"}
 
 CALENDAR_CATEGORY_TOOL_NAMES = {
@@ -472,56 +530,6 @@ EMAIL_TOOL_SPECS = [
         {"name": "confirmed", "type": "boolean", "description": "User confirmed", "required": False, "default": False},
     ], [{"name": "success", "type": "boolean", "description": "Whether sent"}, {"name": "message_id", "type": "text", "description": "New message ID"}, {"name": "formatted", "type": "text", "description": "Human-readable"}]),
 ]
-
-
-async def _get_email_actions_for_profile(profile_id: str, user_id: str) -> List[Dict[str, Any]]:
-    """
-    Legacy: email actions from agent_service_bindings. Prefer _get_email_actions_for_user;
-    kept for migration scripts and backward compatibility.
-    """
-    from services.database_manager.database_helpers import fetch_all, fetch_one
-
-    profile = await fetch_one(
-        "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
-        profile_id,
-        user_id,
-    )
-    if not profile:
-        return []
-
-    rows = await fetch_all(
-        """
-        SELECT asb.id AS binding_id, asb.connection_id, asb.service_type,
-               ec.account_identifier, ec.display_name, ec.provider
-        FROM agent_service_bindings asb
-        JOIN external_connections ec ON ec.id = asb.connection_id AND ec.user_id = $2
-        WHERE asb.agent_profile_id = $1 AND asb.service_type = 'email' AND asb.is_enabled = true
-          AND ec.connection_type = 'email' AND ec.is_active = true
-        """,
-        profile_id,
-        user_id,
-    )
-    actions = []
-    for row in rows:
-        connection_id = int(row["connection_id"])
-        account = (row.get("display_name") or row.get("account_identifier") or "").strip() or row.get("account_identifier") or f"connection {connection_id}"
-        provider = (row.get("provider") or "").strip()
-        if provider:
-            account = f"{account} ({provider})"
-        for tool_name, desc_tpl, input_fields, output_fields in EMAIL_TOOL_SPECS:
-            action_name = f"email:{connection_id}:{tool_name}"
-            description = desc_tpl.format(account=account)
-            actions.append({
-                "name": action_name,
-                "category": "email",
-                "description": description,
-                "input_schema": {"type": "object", "properties": {f["name"]: {"type": "string"} for f in input_fields}},
-                "params_schema": {},
-                "output_schema": {"type": "object", "properties": {"formatted": {"type": "string"}}},
-                "input_fields": input_fields,
-                "output_fields": output_fields,
-            })
-    return actions
 
 
 CALENDAR_TOOL_SPECS = [
@@ -608,14 +616,18 @@ async def _get_email_actions_for_user(user_id: str) -> List[Dict[str, Any]]:
 
 
 async def _get_calendar_actions_for_user(user_id: str) -> List[Dict[str, Any]]:
-    """Per-connection calendar actions for all active calendar external_connections."""
+    """Per-connection calendar actions: CalDAV calendar rows plus Microsoft 365 email (Graph calendar scopes)."""
     from services.database_manager.database_helpers import fetch_all
 
     rows = await fetch_all(
         """
-        SELECT id AS connection_id, account_identifier, display_name, provider
+        SELECT id AS connection_id, account_identifier, display_name, provider, connection_type
         FROM external_connections
-        WHERE user_id = $1 AND connection_type = 'calendar' AND is_active = true
+        WHERE user_id = $1 AND is_active = true
+          AND (
+            connection_type = 'calendar'
+            OR (connection_type = 'email' AND LOWER(TRIM(COALESCE(provider, ''))) = 'microsoft')
+          )
         ORDER BY id
         """,
         user_id,
@@ -625,14 +637,211 @@ async def _get_calendar_actions_for_user(user_id: str) -> List[Dict[str, Any]]:
         connection_id = int(row["connection_id"])
         account = (row.get("display_name") or row.get("account_identifier") or "").strip() or row.get("account_identifier") or f"connection {connection_id}"
         provider = (row.get("provider") or "").strip()
+        ctype = (row.get("connection_type") or "").strip()
         if provider:
             account = f"{account} ({provider})"
+        if ctype == "email" and (provider or "").strip().lower() == "microsoft":
+            account = f"{account} — calendar (Microsoft 365)"
         for tool_name, desc_tpl, input_fields, output_fields in CALENDAR_TOOL_SPECS:
             action_name = f"calendar:{connection_id}:{tool_name}"
             description = desc_tpl.format(account=account)
             actions.append({
                 "name": action_name,
                 "category": "calendar",
+                "description": description,
+                "input_schema": {"type": "object", "properties": {f["name"]: {"type": "string"} for f in input_fields}},
+                "params_schema": {},
+                "output_schema": {"type": "object", "properties": {"formatted": {"type": "string"}}},
+                "input_fields": input_fields,
+                "output_fields": output_fields,
+            })
+    return actions
+
+
+# (tool_name, description_template, input_fields, output_fields) for Workflow Composer.
+# Tool names and order must match llm-orchestrator/orchestrator/tools/tool_pack_registry.py GITHUB_PACK_ALL_TOOLS.
+_GITHUB_TOOL_ROWS = [
+    ("github_list_repos", "List GitHub repositories for {account}", [], [
+        {"name": "records", "type": "list[record]", "description": "Raw API records"},
+        {"name": "count", "type": "number", "description": "Count"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_get_repo", "Get repo metadata for {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository name", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Repo object"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_issues", "List issues in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "state", "type": "text", "description": "open, closed, all", "required": False, "default": "open"},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Issues"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_get_issue", "Get issue in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "issue_number", "type": "number", "description": "Issue number", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Issue"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_issue_comments", "List issue/PR comments in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "issue_number", "type": "number", "description": "Issue or PR number", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Comments"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_pulls", "List pull requests in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "state", "type": "text", "description": "open, closed, all", "required": False, "default": "open"},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "PRs"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_get_pull", "Get pull request in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "pull_number", "type": "number", "description": "PR number", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "PR"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_get_pull_diff", "PR changed files and patches in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "pull_number", "type": "number", "description": "PR number", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Files"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_pull_reviews", "List PR reviews in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "pull_number", "type": "number", "description": "PR number", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Reviews"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_pull_comments", "List PR review line comments in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "pull_number", "type": "number", "description": "PR number", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Comments"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_commits", "List commits in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Commits"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_get_commit", "Get commit in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "sha", "type": "text", "description": "Commit SHA", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Commit"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_compare_refs", "Compare two refs in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "base_ref", "type": "text", "description": "Base branch/tag/SHA", "required": True},
+        {"name": "head_ref", "type": "text", "description": "Head branch/tag/SHA", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Compare result"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_get_file_content", "Read file or directory in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "path", "type": "text", "description": "File path", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Content metadata"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_list_branches", "List branches in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Branches"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_search_code", "Search code (GitHub query syntax) in {account}", [
+        {"name": "q", "type": "text", "description": "Search query", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Matches"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_create_issue", "Create issue in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "title", "type": "text", "description": "Title", "required": True},
+        {"name": "body", "type": "text", "description": "Body", "required": False},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Created issue"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_create_issue_comment", "Comment on issue/PR in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "issue_number", "type": "number", "description": "Issue or PR number", "required": True},
+        {"name": "body", "type": "text", "description": "Comment body", "required": True},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Comment"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+    ("github_create_pr_review", "Submit PR review in {account}", [
+        {"name": "owner", "type": "text", "description": "Owner", "required": True},
+        {"name": "repo", "type": "text", "description": "Repository", "required": True},
+        {"name": "pull_number", "type": "number", "description": "PR number", "required": True},
+        {"name": "event", "type": "text", "description": "COMMENT, APPROVE, REQUEST_CHANGES", "required": True},
+        {"name": "body", "type": "text", "description": "Review body", "required": False},
+    ], [
+        {"name": "records", "type": "list[record]", "description": "Review"},
+        {"name": "formatted", "type": "text", "description": "Summary"},
+    ]),
+]
+
+# Registry names for the GitHub pack; same order as _GITHUB_TOOL_ROWS. Filter duplicate base actions in get_actions.
+GITHUB_CATEGORY_TOOL_NAMES = frozenset(row[0] for row in _GITHUB_TOOL_ROWS)
+
+
+async def _get_github_actions_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """Per-connection GitHub actions for code_platform OAuth connections."""
+    from services.database_manager.database_helpers import fetch_all
+
+    rows = await fetch_all(
+        """
+        SELECT id AS connection_id, account_identifier, display_name, provider
+        FROM external_connections
+        WHERE user_id = $1 AND connection_type = 'code_platform' AND provider = 'github' AND is_active = true
+        ORDER BY id
+        """,
+        user_id,
+    )
+    actions: List[Dict[str, Any]] = []
+    for row in rows:
+        connection_id = int(row["connection_id"])
+        account = (row.get("display_name") or row.get("account_identifier") or "").strip() or row.get("account_identifier") or f"github {connection_id}"
+        provider = (row.get("provider") or "").strip()
+        if provider:
+            account = f"{account} ({provider})"
+        for tool_name, desc_tpl, input_fields, output_fields in _GITHUB_TOOL_ROWS:
+            action_name = f"github:{connection_id}:{tool_name}"
+            description = desc_tpl.format(account=account)
+            actions.append({
+                "name": action_name,
+                "category": "github",
                 "description": description,
                 "input_schema": {"type": "object", "properties": {f["name"]: {"type": "string"} for f in input_fields}},
                 "params_schema": {},
@@ -705,9 +914,9 @@ async def _get_mcp_actions_for_user(user_id: str) -> List[Dict[str, Any]]:
     return actions
 
 
-# Tool pack catalog for team-level assignment (matches llm-orchestrator tool_pack_registry.py).
-# team_tools is auto-injected in team context; other packs can be added per team.
-# has_write_tools: True if pack has any write tools (UI shows read/full toggle). read_tool_count: number of read-only tools.
+# DEPRECATED: Tool packs replaced by skills in Skills-First Architecture.
+# Kept for backward compat with stored playbooks that still reference tool_packs.
+# NOTE: Remove after legacy playbooks no longer reference tool_packs (post UI re-save migration).
 TOOL_PACKS_LIST: List[Dict[str, Any]] = [
     {"name": "text_transforms", "description": "Text manipulation: summarize, extract, format conversion, merge, compare", "has_write_tools": False, "read_tool_count": 5},
     {"name": "session_memory", "description": "Ephemeral clipboard for passing data between plan steps", "has_write_tools": True, "read_tool_count": 1},
@@ -726,6 +935,12 @@ TOOL_PACKS_LIST: List[Dict[str, Any]] = [
     {"name": "notifications", "description": "Send messages via in-app, Telegram, Discord, or email", "has_write_tools": True, "read_tool_count": 0},
     {"name": "email", "description": "Read, search, send, draft, and manage emails via O365/Microsoft Graph", "has_write_tools": True, "read_tool_count": 6},
     {"name": "calendar", "description": "Read and manage O365 calendar events", "has_write_tools": True, "read_tool_count": 3},
+    {"name": "todo", "description": "Microsoft To Do lists and tasks (Microsoft 365)", "has_write_tools": True, "read_tool_count": 2},
+    {"name": "files", "description": "OneDrive files and folders (Microsoft 365)", "has_write_tools": True, "read_tool_count": 3},
+    {"name": "onenote", "description": "OneNote notebooks, sections, and pages (Microsoft 365)", "has_write_tools": True, "read_tool_count": 3},
+    {"name": "planner", "description": "Microsoft Planner plans and tasks (Microsoft 365)", "has_write_tools": True, "read_tool_count": 2},
+    {"name": "github", "description": "GitHub repos, issues, PRs, diffs, and code via OAuth", "has_write_tools": True, "read_tool_count": 15},
+    {"name": "gitea", "description": "Gitea repos, issues, PRs (same tools as GitHub pack) via personal access token", "has_write_tools": True, "read_tool_count": 15},
     {"name": "navigation", "description": "Save named locations; compute and save routes", "has_write_tools": True, "read_tool_count": 3},
     {"name": "data_workspace", "description": "Query tabular data in Data Workspaces", "has_write_tools": False, "read_tool_count": 3},
     {"name": "image_generation", "description": "Generate images from text descriptions", "has_write_tools": True, "read_tool_count": 0},
@@ -741,7 +956,7 @@ PACK_TOOLS: Dict[str, List[str]] = {
     "text_transforms": ["summarize_text_tool", "extract_structured_data_tool", "transform_format_tool", "merge_texts_tool", "compare_texts_tool"],
     "session_memory": ["clipboard_store_tool", "clipboard_get_tool"],
     "planning": ["create_plan_tool", "get_plan_tool", "update_plan_step_tool", "add_plan_step_tool"],
-    "discovery": ["search_documents_tool", "search_by_tags_tool", "search_images_tool", "search_web_tool", "enhance_query_tool", "search_conversation_cache_tool"],
+    "discovery": ["search_documents_tool", "search_by_tags_tool", "search_images_tool", "search_web_tool", "enhance_query_tool"],
     "knowledge": ["get_document_content_tool", "find_document_by_path_tool", "search_within_document_tool", "search_segments_across_documents_tool"],
     "knowledge_graph": ["find_documents_by_entities_tool", "find_related_documents_by_entities_tool", "find_co_occurring_entities_tool", "search_entities_tool", "get_entity_tool"],
     "rss": [
@@ -764,12 +979,57 @@ PACK_TOOLS: Dict[str, List[str]] = {
     "task_management": ["list_todos_tool", "create_todo_tool", "update_todo_tool", "toggle_todo_tool", "delete_todo_tool", "archive_done_tool", "refile_todo_tool", "discover_refile_targets_tool"],
     "math": ["calculate_expression_tool", "evaluate_formula_tool", "convert_units_tool", "list_available_formulas_tool"],
     "utility": ["adjust_number_tool", "adjust_date_tool", "parse_date_tool", "compare_dates_tool", "set_value_tool", "toggle_boolean_tool", "append_to_list_tool", "get_list_length_tool"],
-    "contacts": ["get_contacts_tool", "get_contact_by_id_tool", "create_contact_tool", "update_contact_tool", "delete_contact_tool"],
+    "contacts": [
+        "get_contacts_tool",
+        "get_contact_by_id_tool",
+        "create_contact_tool",
+        "update_contact_tool",
+        "delete_contact_tool",
+        "search_contacts_tool",
+    ],
     "notifications": ["notify_user_tool", "send_channel_message_tool", "schedule_reminder_tool"],
     "email": ["get_emails_tool", "search_emails_tool", "get_email_thread_tool", "read_email_tool", "send_email_tool", "reply_to_email_tool", "create_draft_tool", "move_email_tool", "update_email_tool", "get_email_folders_tool", "get_email_statistics_tool"],
     "calendar": ["list_calendars_tool", "get_calendar_events_tool", "get_event_by_id_tool", "create_event_tool", "update_event_tool", "delete_event_tool"],
+    "todo": [
+        "list_todo_lists_tool",
+        "get_todo_tasks_tool",
+        "create_todo_task_tool",
+        "update_todo_task_tool",
+        "delete_todo_task_tool",
+    ],
+    "files": [
+        "list_drive_items_tool",
+        "get_drive_item_tool",
+        "search_drive_tool",
+        "get_onedrive_file_content_tool",
+        "upload_onedrive_file_tool",
+        "create_drive_folder_tool",
+        "move_drive_item_tool",
+        "delete_drive_item_tool",
+    ],
+    "onenote": [
+        "list_onenote_notebooks_tool",
+        "list_onenote_sections_tool",
+        "list_onenote_pages_tool",
+        "get_onenote_page_content_tool",
+        "create_onenote_page_tool",
+    ],
+    "planner": [
+        "list_planner_plans_tool",
+        "get_planner_tasks_tool",
+        "create_planner_task_tool",
+        "update_planner_task_tool",
+        "delete_planner_task_tool",
+    ],
+    "github": [row[0] for row in _GITHUB_TOOL_ROWS],
+    "gitea": [row[0] for row in _GITHUB_TOOL_ROWS],
     "navigation": ["create_location_tool", "list_locations_tool", "delete_location_tool", "compute_route_tool", "save_route_tool", "list_saved_routes_tool"],
-    "data_workspace": ["list_data_workspaces_tool", "get_workspace_schema_tool", "query_data_workspace_tool"],
+    "data_workspace": [
+        "list_data_workspaces_tool",
+        "get_workspace_schema_tool",
+        "resolve_workspace_link_tool",
+        "query_data_workspace_tool",
+    ],
     "image_generation": ["generate_image_tool"],
     "visualization": ["create_chart_tool"],
     "data_connection_builder": ["probe_api_endpoint_tool", "analyze_openapi_spec_tool", "draft_connector_definition_tool", "validate_connector_definition_tool", "test_connector_endpoint_tool", "create_data_connector_tool", "list_data_connectors_tool", "update_data_connector_tool", "bulk_scrape_urls_tool", "get_bulk_scrape_status_tool", "bind_data_source_to_agent_tool", "list_control_panes_tool", "get_connector_endpoints_tool", "create_control_pane_tool", "update_control_pane_tool", "delete_control_pane_tool", "execute_control_action_tool", "crawl_web_content_tool", "search_web_tool"],
@@ -779,11 +1039,11 @@ PACK_TOOLS: Dict[str, List[str]] = {
 }
 
 
-@router.get("/tool-packs")
+@router.get("/tool-packs", deprecated=True)
 async def get_tool_packs(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> JSONResponse:
-    """Return tool pack names and descriptions for team-level tool assignment UI. Includes tools array per pack for overlap hint."""
+    """DEPRECATED: Tool packs replaced by skills in Skills-First Architecture. Kept for backward compat."""
     from services.database_manager.database_helpers import fetch_all
 
     out: List[Dict[str, Any]] = []
@@ -791,7 +1051,17 @@ async def get_tool_packs(
         entry = dict(p)
         name = entry.get("name")
         entry["tools"] = PACK_TOOLS.get(name, [])
-        if name in ("email", "calendar"):
+        if name in (
+            "email",
+            "calendar",
+            "contacts",
+            "todo",
+            "files",
+            "onenote",
+            "planner",
+            "github",
+            "gitea",
+        ):
             entry["type"] = "external"
             entry["available_connections"] = []
         else:
@@ -800,6 +1070,14 @@ async def get_tool_packs(
 
     uid = current_user.user_id
     if uid:
+        from services.agent_factory_m365_actions import (
+            CONTACTS_CATEGORY_TOOL_NAMES as M365_CONTACTS_TOOL_NAMES,
+            FILES_REGISTRY_NAMES,
+            ONENOTE_REGISTRY_NAMES,
+            PLANNER_REGISTRY_NAMES,
+            TODO_REGISTRY_NAMES,
+        )
+
         email_rows = await fetch_all(
             """
             SELECT id, account_identifier, display_name, provider
@@ -833,14 +1111,104 @@ async def get_tool_packs(
         for i, e in enumerate(out):
             if e.get("name") == "calendar":
                 conns = []
+                seen_cal = set()
                 for r in cal_rows:
+                    cid = int(r["id"])
+                    if cid in seen_cal:
+                        continue
+                    seen_cal.add(cid)
+                    label = (r.get("display_name") or r.get("account_identifier") or "").strip() or str(cid)
+                    prov = (r.get("provider") or "").strip()
+                    if prov:
+                        label = f"{label} ({prov})"
+                    conns.append({"id": cid, "label": label})
+                for r in email_rows:
+                    if (r.get("provider") or "").strip().lower() != "microsoft":
+                        continue
+                    cid = int(r["id"])
+                    if cid in seen_cal:
+                        continue
+                    seen_cal.add(cid)
+                    label = (r.get("display_name") or r.get("account_identifier") or "").strip() or str(cid)
+                    prov = (r.get("provider") or "").strip()
+                    if prov:
+                        label = f"{label} ({prov})"
+                    conns.append({"id": cid, "label": f"{label} — includes calendar"})
+                out[i] = {**e, "available_connections": conns, "tools": sorted(CALENDAR_CATEGORY_TOOL_NAMES)}
+                break
+
+        ms_pack_conns: List[Dict[str, Any]] = []
+        for r in email_rows:
+            if (r.get("provider") or "").strip().lower() != "microsoft":
+                continue
+            cid = int(r["id"])
+            label = (r.get("display_name") or r.get("account_identifier") or "").strip() or str(cid)
+            prov = (r.get("provider") or "").strip()
+            if prov:
+                label = f"{label} ({prov})"
+            ms_pack_conns.append({"id": cid, "label": f"{label} — Microsoft 365"})
+
+        for i, e in enumerate(out):
+            if e.get("name") == "contacts":
+                out[i] = {
+                    **e,
+                    "available_connections": ms_pack_conns,
+                    "tools": sorted(M365_CONTACTS_TOOL_NAMES),
+                }
+                break
+        for pack_name, reg_names in (
+            ("todo", TODO_REGISTRY_NAMES),
+            ("files", FILES_REGISTRY_NAMES),
+            ("onenote", ONENOTE_REGISTRY_NAMES),
+            ("planner", PLANNER_REGISTRY_NAMES),
+        ):
+            for i, e in enumerate(out):
+                if e.get("name") == pack_name:
+                    out[i] = {**e, "available_connections": ms_pack_conns, "tools": sorted(reg_names)}
+                    break
+
+        gh_rows = await fetch_all(
+            """
+            SELECT id, account_identifier, display_name, provider
+            FROM external_connections
+            WHERE user_id = $1 AND connection_type = 'code_platform' AND provider = 'github' AND is_active = true
+            ORDER BY id
+            """,
+            uid,
+        )
+        for i, e in enumerate(out):
+            if e.get("name") == "github":
+                conns = []
+                for r in gh_rows:
                     cid = int(r["id"])
                     label = (r.get("display_name") or r.get("account_identifier") or "").strip() or str(cid)
                     prov = (r.get("provider") or "").strip()
                     if prov:
                         label = f"{label} ({prov})"
                     conns.append({"id": cid, "label": label})
-                out[i] = {**e, "available_connections": conns, "tools": sorted(CALENDAR_CATEGORY_TOOL_NAMES)}
+                out[i] = {**e, "available_connections": conns, "tools": sorted(GITHUB_CATEGORY_TOOL_NAMES)}
+                break
+
+        gitea_rows = await fetch_all(
+            """
+            SELECT id, account_identifier, display_name, provider
+            FROM external_connections
+            WHERE user_id = $1 AND connection_type = 'code_platform' AND provider = 'gitea' AND is_active = true
+            ORDER BY id
+            """,
+            uid,
+        )
+        for i, e in enumerate(out):
+            if e.get("name") == "gitea":
+                conns = []
+                for r in gitea_rows:
+                    cid = int(r["id"])
+                    label = (r.get("display_name") or r.get("account_identifier") or "").strip() or str(cid)
+                    prov = (r.get("provider") or "").strip()
+                    if prov:
+                        label = f"{label} ({prov})"
+                    conns.append({"id": cid, "label": label})
+                out[i] = {**e, "available_connections": conns, "tools": sorted(GITHUB_CATEGORY_TOOL_NAMES)}
                 break
 
         mcp_rows = await fetch_all(
@@ -922,10 +1290,32 @@ async def get_actions(
 
     email_actions: List[Dict[str, Any]] = []
     calendar_actions: List[Dict[str, Any]] = []
+    contacts_actions: List[Dict[str, Any]] = []
+    m365_todo_actions: List[Dict[str, Any]] = []
+    m365_files_actions: List[Dict[str, Any]] = []
+    m365_onenote_actions: List[Dict[str, Any]] = []
+    m365_planner_actions: List[Dict[str, Any]] = []
+    github_actions: List[Dict[str, Any]] = []
     mcp_actions: List[Dict[str, Any]] = []
     if current_user.user_id:
+        from services.agent_factory_m365_actions import (
+            CONTACTS_CATEGORY_TOOL_NAMES,
+            M365_SCOPED_REGISTRY_NAMES,
+            get_contacts_actions_for_user,
+            get_m365_files_actions_for_user,
+            get_m365_onenote_actions_for_user,
+            get_m365_planner_actions_for_user,
+            get_m365_todo_actions_for_user,
+        )
+
         email_actions = await _get_email_actions_for_user(current_user.user_id)
         calendar_actions = await _get_calendar_actions_for_user(current_user.user_id)
+        contacts_actions = await get_contacts_actions_for_user(current_user.user_id)
+        m365_todo_actions = await get_m365_todo_actions_for_user(current_user.user_id)
+        m365_files_actions = await get_m365_files_actions_for_user(current_user.user_id)
+        m365_onenote_actions = await get_m365_onenote_actions_for_user(current_user.user_id)
+        m365_planner_actions = await get_m365_planner_actions_for_user(current_user.user_id)
+        github_actions = await _get_github_actions_for_user(current_user.user_id)
         mcp_actions = await _get_mcp_actions_for_user(current_user.user_id)
 
     actions = list(actions)
@@ -933,6 +1323,16 @@ async def get_actions(
         actions = [a for a in actions if not (a.get("category") == "email" and a.get("name") in EMAIL_CATEGORY_TOOL_NAMES)]
     if calendar_actions:
         actions = [a for a in actions if not (a.get("category") == "calendar" and a.get("name") in CALENDAR_CATEGORY_TOOL_NAMES)]
+    if contacts_actions:
+        actions = [
+            a
+            for a in actions
+            if not (a.get("category") == "contacts" and a.get("name") in CONTACTS_CATEGORY_TOOL_NAMES)
+        ]
+    if m365_todo_actions or m365_files_actions or m365_onenote_actions or m365_planner_actions:
+        actions = [a for a in actions if a.get("name") not in M365_SCOPED_REGISTRY_NAMES]
+    if github_actions:
+        actions = [a for a in actions if not (a.get("category") == "github" and a.get("name") in GITHUB_CATEGORY_TOOL_NAMES)]
 
     list_accounts_action = next((a for a in actions if a.get("name") == "list_accounts"), None)
     if list_accounts_action:
@@ -944,6 +1344,12 @@ async def get_actions(
         tail.append(list_accounts_action)
     tail.extend(email_actions)
     tail.extend(calendar_actions)
+    tail.extend(contacts_actions)
+    tail.extend(m365_todo_actions)
+    tail.extend(m365_files_actions)
+    tail.extend(m365_onenote_actions)
+    tail.extend(m365_planner_actions)
+    tail.extend(github_actions)
     tail.extend(mcp_actions)
     actions = actions + tail
     return JSONResponse(content=actions)
@@ -1602,10 +2008,12 @@ def _row_to_profile(row: Dict[str, Any]) -> Dict[str, Any]:
         "include_datetime_context": row.get("include_datetime_context", True),
         "include_user_facts": row.get("include_user_facts", False),
         "include_facts_categories": row.get("include_facts_categories") or [],
+        "use_themed_memory": row.get("use_themed_memory", True),
         "include_agent_memory": row.get("include_agent_memory", False),
         "auto_routable": row.get("auto_routable", False),
         "chat_visible": row.get("chat_visible", True),
         "data_workspace_config": _ensure_json_obj(row.get("data_workspace_config"), {}),
+        "allowed_connections": _ensure_json_obj(row.get("allowed_connections"), []),
         "default_run_context": row.get("default_run_context") or "interactive",
         "default_approval_policy": row.get("default_approval_policy") or "require",
         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
@@ -1753,7 +2161,20 @@ async def get_profile(
     from services.database_manager.database_helpers import fetch_one
     from services.model_source_resolver import try_soft_retarget
     row = await fetch_one(
-        "SELECT * FROM agent_profiles WHERE id = $1 AND user_id = $2",
+        """SELECT p.*,
+                  CASE WHEN p.user_id = $2 THEN 'owned' ELSE 'shared' END AS ownership,
+                  u_owner.username AS owner_username,
+                  u_owner.display_name AS owner_display_name
+           FROM agent_profiles p
+           LEFT JOIN users u_owner ON u_owner.user_id = p.user_id
+           WHERE p.id = $1
+             AND (p.user_id = $2
+                  OR EXISTS (
+                      SELECT 1 FROM agent_artifact_shares _sh
+                      WHERE _sh.artifact_type = 'agent_profile'
+                        AND _sh.artifact_id = p.id
+                        AND _sh.shared_with_user_id = $2
+                  ))""",
         profile_id,
         current_user.user_id,
         rls_context={"user_id": current_user.user_id, "user_role": "user"},
@@ -1998,7 +2419,9 @@ async def export_profile(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Profile not found")
-    return JSONResponse(content=_row_to_profile(row))
+    content = _row_to_profile(row)
+    content["budget"] = await agent_factory_service.get_profile_budget(profile_id, current_user.user_id)
+    return JSONResponse(content=content)
 
 
 def _build_agent_bundle_dict(
@@ -2007,18 +2430,22 @@ def _build_agent_bundle_dict(
     data_source_rows: List[Dict[str, Any]],
     persona_row: Optional[Dict[str, Any]] = None,
     skills: Optional[List[Dict[str, Any]]] = None,
+    budget: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Build the agent bundle dict for YAML export (no ids, no credentials)."""
+    """Build the agent bundle dict for YAML export (no ids, no credentials; full profile fields for round-trip)."""
     default_playbook_id = profile_row.get("default_playbook_id")
     default_playbook_name = None
     if playbook_row and default_playbook_id and str(playbook_row.get("id")) == str(default_playbook_id):
         default_playbook_name = playbook_row.get("name") or "imported-playbook"
 
-    agent = {
+    agent: Dict[str, Any] = {
         "name": profile_row.get("name"),
         "handle": profile_row.get("handle"),
         "description": profile_row.get("description"),
+        "is_active": profile_row.get("is_active", True),
         "model_preference": profile_row.get("model_preference"),
+        "model_source": profile_row.get("model_source"),
+        "model_provider_type": profile_row.get("model_provider_type"),
         "max_research_rounds": profile_row.get("max_research_rounds", 3),
         "system_prompt_additions": profile_row.get("system_prompt_additions"),
         "knowledge_config": _ensure_json_obj(profile_row.get("knowledge_config"), {}),
@@ -2027,21 +2454,31 @@ def _build_agent_bundle_dict(
         "default_approval_policy": profile_row.get("default_approval_policy") or "require",
         "journal_config": _ensure_json_obj(profile_row.get("journal_config"), {}),
         "team_config": _ensure_json_obj(profile_row.get("team_config"), {}),
-        "is_active": profile_row.get("is_active", True),
         "watch_config": _ensure_json_obj(profile_row.get("watch_config"), {}),
         "prompt_history_enabled": profile_row.get("chat_history_enabled", False),
         "chat_history_lookback": profile_row.get("chat_history_lookback", 10),
+        "summary_threshold_tokens": profile_row.get("summary_threshold_tokens", 5000),
+        "summary_keep_messages": profile_row.get("summary_keep_messages", 10),
         "persona_mode": profile_row.get("persona_mode") or "none",
         "include_user_context": profile_row.get("include_user_context", False),
         "include_datetime_context": profile_row.get("include_datetime_context", True),
         "include_user_facts": profile_row.get("include_user_facts", False),
-        "include_facts_categories": profile_row.get("include_facts_categories") or [],
+        "include_facts_categories": _ensure_json_obj(profile_row.get("include_facts_categories"), []),
+        "use_themed_memory": profile_row.get("use_themed_memory", True),
+        "include_agent_memory": profile_row.get("include_agent_memory", False),
+        "auto_routable": profile_row.get("auto_routable", False),
+        "chat_visible": profile_row.get("chat_visible", True),
+        "category": profile_row.get("category"),
+        "data_workspace_config": _ensure_json_obj(profile_row.get("data_workspace_config"), {}),
+        "allowed_connections": _ensure_json_obj(profile_row.get("allowed_connections"), []),
     }
     if persona_row:
         agent["persona"] = {
             "name": persona_row.get("name"),
             "is_builtin": persona_row.get("is_builtin", False),
         }
+    if budget:
+        agent["budget"] = dict(budget)
 
 
     playbook: Optional[Dict[str, Any]] = None
@@ -2085,7 +2522,7 @@ def _build_agent_bundle_dict(
 
     out: Dict[str, Any] = {
         "bastion_agent_bundle": {
-            "version": "1",
+            "version": "2",
             "exported_at": datetime.now(timezone.utc).isoformat(),
         },
         "agent": agent,
@@ -2181,6 +2618,7 @@ async def export_profile_bundle(
                         "category": s.get("category"),
                         "procedure": s.get("procedure") or "",
                         "required_tools": s.get("required_tools") or [],
+                        "required_connection_types": s.get("required_connection_types") or [],
                         "optional_tools": s.get("optional_tools") or [],
                         "inputs_schema": _ensure_json_obj(s.get("inputs_schema"), {}),
                         "outputs_schema": _ensure_json_obj(s.get("outputs_schema"), {}),
@@ -2188,10 +2626,23 @@ async def export_profile_bundle(
                         "tags": list(s.get("tags") or []),
                     })
 
+    budget_export: Optional[Dict[str, Any]] = None
+    try:
+        bud = await agent_factory_service.get_profile_budget(str(profile_row["id"]), current_user.user_id)
+        if bud and bud.get("monthly_limit_usd") is not None:
+            budget_export = {
+                "monthly_limit_usd": float(bud["monthly_limit_usd"]),
+                "warning_threshold_pct": int(bud.get("warning_threshold_pct") or 80),
+                "enforce_hard_limit": bool(bud.get("enforce_hard_limit", True)),
+            }
+    except Exception as e:
+        logger.debug("Agent bundle export: budget omitted: %s", e)
+
     bundle = _build_agent_bundle_dict(
         profile_row, playbook_row, data_source_rows,
         persona_row=persona_row,
         skills=skills_export if skills_export else None,
+        budget=budget_export,
     )
     yaml_str = yaml.dump(bundle, default_flow_style=False, allow_unicode=True, sort_keys=False)
     handle = (profile_row.get("handle") or profile_row.get("name") or "agent")[:80]
@@ -2305,6 +2756,7 @@ async def import_profile_bundle(
                         slug=slug,
                         procedure=item.get("procedure", ""),
                         required_tools=item.get("required_tools"),
+                        required_connection_types=item.get("required_connection_types"),
                         optional_tools=item.get("optional_tools"),
                         description=item.get("description"),
                         category=item.get("category"),
@@ -2421,38 +2873,69 @@ async def import_profile_bundle(
             )
             if persona_lookup:
                 persona_id_val = str(persona_lookup["id"])
-    profile_id = await fetch_value(
-        """
-        INSERT INTO agent_profiles (
-            user_id, name, handle, description, is_active, model_preference,
-            max_research_rounds, system_prompt_additions, knowledge_config, default_playbook_id,
-            default_run_context, default_approval_policy,
-            journal_config, team_config, watch_config, chat_history_enabled, chat_history_lookback,
-            persona_mode, persona_id
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::uuid, $12, $13, $14::jsonb, $15::jsonb, $16::jsonb, $17, $18, $19, $20::uuid)
-        RETURNING id
-        """,
-        current_user.user_id,
-        name,
-        handle,
-        agent_data.get("description"),
-        agent_data.get("is_active", True),
-        agent_data.get("model_preference"),
-        agent_data.get("max_research_rounds", 3),
-        agent_data.get("system_prompt_additions"),
-        json.dumps(agent_data.get("knowledge_config") or {}),
-        playbook_id,
-        agent_data.get("default_run_context") or "interactive",
-        agent_data.get("default_approval_policy") or "require",
-        json.dumps(agent_data.get("journal_config") or {}),
-        json.dumps(agent_data.get("team_config") or {}),
-        json.dumps(agent_data.get("watch_config") or {}),
-        agent_data.get("prompt_history_enabled", agent_data.get("chat_history_enabled", False)),
-        agent_data.get("chat_history_lookback", 10),
-        agent_data.get("persona_mode") or "none",
-        persona_id_val,
-    )
-    profile_id = str(profile_id)
+
+    persona_mode = (agent_data.get("persona_mode") or "none").strip() or "none"
+    if persona_id_val:
+        persona_mode = "specific"
+    elif persona_mode == "specific":
+        persona_mode = "none"
+        persona_id_val = None
+
+    create_payload: Dict[str, Any] = {
+        "name": name,
+        "handle": handle,
+        "description": agent_data.get("description"),
+        "is_active": agent_data.get("is_active", True),
+        "model_preference": agent_data.get("model_preference"),
+        "model_source": agent_data.get("model_source"),
+        "model_provider_type": agent_data.get("model_provider_type"),
+        "max_research_rounds": agent_data.get("max_research_rounds", 3),
+        "system_prompt_additions": agent_data.get("system_prompt_additions"),
+        "knowledge_config": _ensure_json_obj(agent_data.get("knowledge_config"), {}),
+        "default_playbook_id": playbook_id,
+        "default_run_context": agent_data.get("default_run_context") or "interactive",
+        "default_approval_policy": agent_data.get("default_approval_policy") or "require",
+        "journal_config": _ensure_json_obj(agent_data.get("journal_config"), {}),
+        "team_config": _ensure_json_obj(agent_data.get("team_config"), {}),
+        "watch_config": _ensure_json_obj(agent_data.get("watch_config"), {}),
+        "prompt_history_enabled": agent_data.get(
+            "prompt_history_enabled", agent_data.get("chat_history_enabled", False)
+        ),
+        "chat_history_lookback": agent_data.get("chat_history_lookback", 10),
+        "summary_threshold_tokens": agent_data.get("summary_threshold_tokens", 5000),
+        "summary_keep_messages": agent_data.get("summary_keep_messages", 10),
+        "persona_mode": persona_mode,
+        "persona_id": persona_id_val,
+        "include_user_context": agent_data.get("include_user_context", False),
+        "include_datetime_context": agent_data.get("include_datetime_context", True),
+        "include_user_facts": agent_data.get("include_user_facts", False),
+        "include_facts_categories": _ensure_json_obj(agent_data.get("include_facts_categories"), []),
+        "use_themed_memory": agent_data.get("use_themed_memory", True),
+        "include_agent_memory": agent_data.get("include_agent_memory", False),
+        "auto_routable": agent_data.get("auto_routable", False),
+        "chat_visible": agent_data.get("chat_visible", True),
+        "category": agent_data.get("category"),
+        "data_workspace_config": _ensure_json_obj(agent_data.get("data_workspace_config"), {}),
+        "allowed_connections": _ensure_json_obj(agent_data.get("allowed_connections"), []),
+    }
+    try:
+        created = await agent_factory_service.create_profile(current_user.user_id, create_payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    profile_id = str(created["id"])
+
+    bdata = agent_data.get("budget")
+    if isinstance(bdata, dict) and bdata.get("monthly_limit_usd") is not None:
+        try:
+            await agent_factory_service.set_profile_budget(
+                profile_id,
+                current_user.user_id,
+                monthly_limit_usd=float(bdata["monthly_limit_usd"]),
+                warning_threshold_pct=int(bdata.get("warning_threshold_pct") or 80),
+                enforce_hard_limit=bool(bdata.get("enforce_hard_limit", True)),
+            )
+        except (ValueError, TypeError) as e:
+            logger.warning("Import bundle: skipped budget restore: %s", e)
 
     bindings = []
     for i, ds in enumerate(data_sources_data):
@@ -2486,7 +2969,8 @@ async def import_profile(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> JSONResponse:
     """Import a profile from JSON (creates new profile for current user)."""
-    from services.database_manager.database_helpers import fetch_one, execute, fetch_value
+    from services.database_manager.database_helpers import fetch_one
+
     handle = (body.get("handle") or "imported").strip() or "imported"
     base_handle = handle[:90]
     suffix = 0
@@ -2501,33 +2985,51 @@ async def import_profile(
             handle = candidate
             break
         suffix += 1
-    name = (body.get("name") or "Imported profile")[:255]
-    default_playbook_id = body.get("default_playbook_id") or (body.get("output_config") or {}).get("default_playbook_id")
-    profile_id = await fetch_value(
-        """
-        INSERT INTO agent_profiles (
-            user_id, name, handle, description, is_active, model_preference,
-            max_research_rounds, system_prompt_additions, knowledge_config, default_playbook_id,
-            default_run_context, default_approval_policy,
-            journal_config, team_config
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::uuid, $12, $13, $14::jsonb, $15::jsonb)
-        RETURNING id
-        """,
-        current_user.user_id,
-        name,
-        handle,
-        body.get("description"),
-        body.get("is_active", True),
-        body.get("model_preference"),
-        body.get("max_research_rounds", 3),
-        body.get("system_prompt_additions"),
-        json.dumps(body.get("knowledge_config") or {}),
-        default_playbook_id,
-        body.get("default_run_context") or "interactive",
-        body.get("default_approval_policy") or "require",
-        json.dumps(body.get("journal_config") or {}),
-        json.dumps(body.get("team_config") or {}),
-    )
+
+    skip_keys = {
+        "id",
+        "user_id",
+        "created_at",
+        "updated_at",
+        "is_locked",
+        "is_builtin",
+        "last_execution_status",
+        "status",
+        "model_source_meta",
+        "budget",
+        "output_config",
+    }
+    payload: Dict[str, Any] = {}
+    for k, v in body.items():
+        if k in skip_keys:
+            continue
+        payload[k] = v
+    payload["handle"] = handle
+    oc = body.get("output_config")
+    if isinstance(oc, dict) and payload.get("default_playbook_id") is None:
+        payload["default_playbook_id"] = oc.get("default_playbook_id")
+    if not (payload.get("name") or "").strip():
+        payload["name"] = (body.get("name") or handle or "Imported profile")[:255]
+
+    try:
+        created = await agent_factory_service.create_profile(current_user.user_id, payload)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    profile_id = str(created["id"])
+    b = body.get("budget")
+    if isinstance(b, dict) and b.get("monthly_limit_usd") is not None:
+        try:
+            await agent_factory_service.set_profile_budget(
+                profile_id,
+                current_user.user_id,
+                monthly_limit_usd=float(b["monthly_limit_usd"]),
+                warning_threshold_pct=int(b.get("warning_threshold_pct") or 80),
+                enforce_hard_limit=bool(b.get("enforce_hard_limit", True)),
+            )
+        except (ValueError, TypeError):
+            pass
+
     row = await fetch_one("SELECT * FROM agent_profiles WHERE id = $1", profile_id)
     return JSONResponse(content=_row_to_profile(row), status_code=201)
 
@@ -2540,10 +3042,12 @@ async def list_profile_executions(
 ) -> JSONResponse:
     """List recent execution log entries for an agent profile."""
     from services.database_manager.database_helpers import fetch_all, fetch_one
+    _rls = _api_user_rls(current_user.user_id)
     profile = await fetch_one(
         "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -2559,6 +3063,7 @@ async def list_profile_executions(
         profile_id,
         current_user.user_id,
         min(limit, 100),
+        rls_context=_rls,
     )
     out = []
     for r in rows:
@@ -2596,10 +3101,12 @@ async def get_execution(
 ) -> JSONResponse:
     """Get a single execution log entry (for detail viewer)."""
     from services.database_manager.database_helpers import fetch_one, fetch_all
+    _rls = _api_user_rls(current_user.user_id)
     profile = await fetch_one(
         "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -2614,6 +3121,7 @@ async def get_execution(
         execution_id,
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Execution not found")
@@ -2632,6 +3140,7 @@ async def get_execution(
         ORDER BY step_index
         """,
         execution_id,
+        rls_context=_rls,
     )
     steps = []
     for s in (steps_rows or []):
@@ -2699,10 +3208,12 @@ async def delete_execution(
 ) -> JSONResponse:
     """Delete a single execution (and its steps/discoveries via CASCADE)."""
     from services.database_manager.database_helpers import fetch_one, execute
+    _rls = _api_user_rls(current_user.user_id)
     profile = await fetch_one(
         "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -2711,6 +3222,7 @@ async def delete_execution(
         execution_id,
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Execution not found")
@@ -2719,6 +3231,7 @@ async def delete_execution(
         execution_id,
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     return JSONResponse(content={"deleted": True, "id": execution_id})
 
@@ -2730,10 +3243,12 @@ async def clear_executions(
 ) -> JSONResponse:
     """Delete all executions for a profile (journal clear). Cascades to agent_execution_steps and agent_discoveries."""
     from services.database_manager.database_helpers import fetch_one, execute
+    _rls = _api_user_rls(current_user.user_id)
     profile = await fetch_one(
         "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -2741,6 +3256,7 @@ async def clear_executions(
         "DELETE FROM agent_execution_log WHERE agent_profile_id = $1 AND user_id = $2",
         profile_id,
         current_user.user_id,
+        rls_context=_rls,
     )
     return JSONResponse(content={"deleted": True, "profile_id": profile_id})
 
@@ -2754,6 +3270,7 @@ async def dashboard_fleet_status(
     """All agents with schedule info, last execution, budget status for operations dashboard."""
     from services.database_manager.database_helpers import fetch_all
     user_id = current_user.user_id
+    _rls = _api_user_rls(user_id)
     rows = await fetch_all(
         """
         SELECT p.id, p.name, p.handle, p.is_active, p.model_preference,
@@ -2776,6 +3293,7 @@ async def dashboard_fleet_status(
         ORDER BY p.updated_at DESC
         """,
         user_id,
+        rls_context=_rls,
     )
     out = []
     for r in rows:
@@ -2821,6 +3339,7 @@ async def dashboard_cost_summary(
     user_id = current_user.user_id
     today = date.today()
     period_start = today.replace(day=1)
+    _rls = _api_user_rls(user_id)
     rows = await fetch_all(
         """
         SELECT b.agent_profile_id, p.name, p.handle,
@@ -2830,6 +3349,7 @@ async def dashboard_cost_summary(
         WHERE b.user_id = $1
         """,
         user_id,
+        rls_context=_rls,
     )
     by_agent = []
     total = 0
@@ -2863,6 +3383,7 @@ async def dashboard_activity_feed(
     """Recent execution events across all agents for the dashboard activity feed."""
     from services.database_manager.database_helpers import fetch_all
     user_id = current_user.user_id
+    _rls = _api_user_rls(user_id)
     rows = await fetch_all(
         """
         SELECT e.id, e.agent_profile_id, e.query, e.status, e.started_at, e.completed_at, e.duration_ms, e.error_details, e.cost_usd, e.trigger_type,
@@ -2875,6 +3396,7 @@ async def dashboard_activity_feed(
         """,
         user_id,
         min(limit, 100),
+        rls_context=_rls,
     )
     out = []
     for r in rows:
@@ -2904,6 +3426,7 @@ async def list_pending_approvals(
     """List pending approval queue entries for the current user."""
     from services.database_manager.database_helpers import fetch_all
     user_id = current_user.user_id
+    _rls = _api_user_rls(user_id)
     rows = await fetch_all(
         """
         SELECT a.id, a.agent_profile_id, a.execution_id, a.step_name, a.prompt, a.preview_data, a.governance_type, a.status, a.created_at,
@@ -2914,6 +3437,7 @@ async def list_pending_approvals(
         ORDER BY a.created_at DESC
         """,
         user_id,
+        rls_context=_rls,
     )
     out = []
     for r in rows:
@@ -3594,176 +4118,6 @@ async def delete_data_source(
     return JSONResponse(content={"deleted": True, "id": source_id})
 
 
-# ---------- Service bindings (profile -> external connections for email/messaging scoped tools) ----------
-
-class ServiceBindingCreate(BaseModel):
-    """Bind an external connection (e.g. email account) to an agent profile."""
-    connection_id: int = Field(..., description="external_connections.id")
-    service_type: str = Field(default="email", description="email, messaging, etc.")
-
-
-def _row_to_service_binding(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not row:
-        return {}
-    return {
-        "id": str(row["id"]),
-        "agent_profile_id": str(row["agent_profile_id"]),
-        "connection_id": int(row["connection_id"]),
-        "service_type": row.get("service_type", "email"),
-        "is_enabled": row.get("is_enabled", True),
-        "account_identifier": row.get("account_identifier"),
-        "display_name": row.get("display_name"),
-        "provider": row.get("provider"),
-        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
-    }
-
-
-def _row_to_connection(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert external_connections row to API-friendly dict (datetimes as ISO strings)."""
-    if not row:
-        return {}
-    return {
-        "id": row.get("id"),
-        "provider": row.get("provider"),
-        "connection_type": row.get("connection_type"),
-        "account_identifier": row.get("account_identifier"),
-        "display_name": row.get("display_name"),
-        "is_active": row.get("is_active", True),
-        "connection_status": row.get("connection_status"),
-        "token_expires_at": row["token_expires_at"].isoformat() if row.get("token_expires_at") else None,
-        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
-        "updated_at": row["updated_at"].isoformat() if row.get("updated_at") else None,
-        "last_sync_at": row["last_sync_at"].isoformat() if row.get("last_sync_at") else None,
-    }
-
-
-@router.get("/profiles/{profile_id}/service-bindings")
-async def list_service_bindings(
-    profile_id: str = Path(..., description="Agent profile UUID"),
-    current_user: AuthenticatedUserResponse = Depends(get_current_user),
-) -> JSONResponse:
-    """List service bindings for an agent profile (with connection details)."""
-    from services.database_manager.database_helpers import fetch_all, fetch_one
-    profile = await fetch_one(
-        "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
-        profile_id,
-        current_user.user_id,
-    )
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    try:
-        rows = await fetch_all(
-            """
-            SELECT asb.id, asb.agent_profile_id, asb.connection_id, asb.service_type, asb.is_enabled, asb.created_at,
-                   ec.account_identifier, ec.display_name, ec.provider
-            FROM agent_service_bindings asb
-            JOIN external_connections ec ON ec.id = asb.connection_id AND ec.user_id = $2
-            WHERE asb.agent_profile_id = $1
-            ORDER BY asb.service_type, ec.account_identifier
-            """,
-            profile_id,
-            current_user.user_id,
-        )
-    except Exception as e:
-        if "does not exist" in str(e).lower() or "relation" in str(e).lower():
-            return JSONResponse(content=[])
-        raise
-    return JSONResponse(content=[_row_to_service_binding(r) for r in rows])
-
-
-@router.post("/profiles/{profile_id}/service-bindings")
-async def create_service_binding(
-    profile_id: str = Path(..., description="Agent profile UUID"),
-    body: ServiceBindingCreate = ...,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user),
-) -> JSONResponse:
-    """Bind an external connection (e.g. email account) to an agent profile."""
-    from services.database_manager.database_helpers import fetch_one, execute
-    from uuid import uuid4
-    profile = await fetch_one(
-        "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
-        profile_id,
-        current_user.user_id,
-    )
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    conn = await fetch_one(
-        "SELECT id FROM external_connections WHERE id = $1 AND user_id = $2 AND is_active = true",
-        body.connection_id,
-        current_user.user_id,
-    )
-    if not conn:
-        raise HTTPException(status_code=404, detail="Connection not found or inactive")
-    binding_id = uuid4()
-    await execute(
-        """
-        INSERT INTO agent_service_bindings (id, agent_profile_id, connection_id, service_type, is_enabled)
-        VALUES ($1, $2, $3, $4, true)
-        ON CONFLICT (agent_profile_id, connection_id) DO UPDATE SET is_enabled = true
-        """,
-        binding_id,
-        profile_id,
-        body.connection_id,
-        body.service_type,
-    )
-    row = await fetch_one(
-        """
-        SELECT asb.id, asb.agent_profile_id, asb.connection_id, asb.service_type, asb.is_enabled, asb.created_at,
-               ec.account_identifier, ec.display_name, ec.provider
-        FROM agent_service_bindings asb
-        JOIN external_connections ec ON ec.id = asb.connection_id
-        WHERE asb.agent_profile_id = $1 AND asb.connection_id = $2
-        """,
-        profile_id,
-        body.connection_id,
-    )
-    return JSONResponse(content=_row_to_service_binding(row), status_code=201)
-
-
-@router.get("/available-email-connections")
-async def list_available_email_connections(
-    current_user: AuthenticatedUserResponse = Depends(get_current_user),
-) -> JSONResponse:
-    """List the current user's email connections (for binding to agent profiles)."""
-    from services.external_connections_service import external_connections_service
-    connections = await external_connections_service.get_user_connections(
-        current_user.user_id,
-        connection_type="email",
-        active_only=True,
-    )
-    return JSONResponse(content={"connections": [_row_to_connection(c) for c in connections]})
-
-
-@router.delete("/profiles/{profile_id}/service-bindings/{binding_id}")
-async def delete_service_binding(
-    profile_id: str = Path(..., description="Agent profile UUID"),
-    binding_id: str = Path(..., description="Service binding UUID"),
-    current_user: AuthenticatedUserResponse = Depends(get_current_user),
-) -> JSONResponse:
-    """Remove a service binding from an agent profile."""
-    from services.database_manager.database_helpers import fetch_one, execute
-    profile = await fetch_one(
-        "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
-        profile_id,
-        current_user.user_id,
-    )
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
-    row = await fetch_one(
-        "SELECT id FROM agent_service_bindings WHERE id = $1 AND agent_profile_id = $2",
-        binding_id,
-        profile_id,
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="Service binding not found")
-    await execute(
-        "DELETE FROM agent_service_bindings WHERE id = $1 AND agent_profile_id = $2",
-        binding_id,
-        profile_id,
-    )
-    return JSONResponse(content={"deleted": True, "id": binding_id})
-
-
 # ---------- Plugin configs (per-profile plugin credentials) ----------
 
 class PluginConfigUpdate(BaseModel):
@@ -3931,10 +4285,28 @@ async def get_playbook(
     playbook_id: str = Path(..., description="Playbook UUID"),
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> JSONResponse:
-    """Get a single playbook by ID (user's or template)."""
+    """Get a single playbook by ID (user's, template, or shared)."""
     from services.database_manager.database_helpers import fetch_one
     row = await fetch_one(
-        "SELECT * FROM custom_playbooks WHERE id = $1 AND (user_id = $2 OR is_template = true)",
+        """SELECT pb.*,
+                  CASE
+                      WHEN pb.user_id = $2 THEN 'owned'
+                      WHEN pb.is_template = true THEN 'template'
+                      ELSE 'shared'
+                  END AS ownership,
+                  u_owner.username AS owner_username,
+                  u_owner.display_name AS owner_display_name
+           FROM custom_playbooks pb
+           LEFT JOIN users u_owner ON u_owner.user_id = pb.user_id
+           WHERE pb.id = $1
+             AND (pb.user_id = $2
+                  OR pb.is_template = true
+                  OR EXISTS (
+                      SELECT 1 FROM agent_artifact_shares _sh
+                      WHERE _sh.artifact_type = 'playbook'
+                        AND _sh.artifact_id = pb.id
+                        AND _sh.shared_with_user_id = $2
+                  ))""",
         playbook_id,
         current_user.user_id,
     )
@@ -4017,8 +4389,14 @@ async def update_playbook(
         step_count = len(defn.get("steps", [])) if isinstance(defn, dict) else -1
         top_keys = list(defn.keys())[:10] if isinstance(defn, dict) else type(defn).__name__
         logger.info("update_playbook %s: def_bytes=%d steps=%d keys=%s", playbook_id, len(def_str), step_count, top_keys)
+        # Large definitions are normal (long prompts, many steps). Preview is for debug only — does not block save.
         if len(def_str) > 5000:
-            logger.warning("update_playbook %s: definition too large (%d bytes), first 500: %s", playbook_id, len(def_str), def_str[:500])
+            logger.debug(
+                "update_playbook %s: definition size=%d bytes, first 500 chars: %s",
+                playbook_id,
+                len(def_str),
+                def_str[:500],
+            )
         if old_def is not None and old_def != {}:
             from services.database_manager.database_helpers import fetch_value
             next_ver = await fetch_value(
@@ -4064,6 +4442,12 @@ async def update_playbook(
         await agent_factory_service.notify_playbook_model_remediation(
             current_user.user_id, playbook_id, playbook_remediation_steps, playbook_remediation_msgs
         )
+    if "definition" in updates:
+        try:
+            from services.agent_artifact_sharing_service import refresh_transitive_shares
+            await refresh_transitive_shares("playbook", playbook_id, current_user.user_id)
+        except Exception as e:
+            logger.warning("Failed to refresh transitive shares for playbook %s: %s", playbook_id, e)
     return JSONResponse(content=_row_to_playbook(row))
 
 
@@ -4257,58 +4641,36 @@ async def clone_playbook(
     playbook_id: str = Path(..., description="Playbook UUID"),
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> JSONResponse:
-    """Create a new playbook with the same definition, named '{original name} (Copy)'."""
-    from services.database_manager.database_helpers import fetch_one, fetch_value, execute
+    """Create a new playbook with the same definition, named '{original name} (Copy)'.
+    Uses deep-clone path (with skill remapping) for shared or template playbooks
+    to produce fully independent artifacts.
+    """
+    from services.database_manager.database_helpers import fetch_one, fetch_value
+    from services import agent_artifact_clone_service
+
     row = await fetch_one(
-        "SELECT * FROM custom_playbooks WHERE id = $1 AND (user_id = $2 OR is_template = true)",
+        """SELECT * FROM custom_playbooks
+           WHERE id = $1
+             AND (user_id = $2
+                  OR is_template = true
+                  OR EXISTS (
+                      SELECT 1 FROM agent_artifact_shares _sh
+                      WHERE _sh.artifact_type = 'playbook'
+                        AND _sh.artifact_id = custom_playbooks.id
+                        AND _sh.shared_with_user_id = $2
+                  ))""",
         playbook_id,
         current_user.user_id,
     )
     if not row:
         raise HTTPException(status_code=404, detail="Playbook not found")
-    base_name = (row.get("name") or "Playbook").strip()
-    if base_name.endswith(" (Copy)"):
-        base_name = base_name[:-7].strip() or "Playbook"
-    name = f"{base_name} (Copy)"
-    suffix = 0
-    while True:
-        candidate = f"{name}_{suffix}" if suffix else name
-        existing = await fetch_one(
-            "SELECT id FROM custom_playbooks WHERE user_id = $1 AND name = $2",
-            current_user.user_id,
-            candidate,
-        )
-        if not existing:
-            name = candidate
-            break
-        suffix += 1
-    defn = row.get("definition") or {}
-    if not isinstance(defn, dict):
-        defn = {}
-    defn, clone_steps, clone_msgs = await agent_factory_service.validate_and_remediate_playbook_models_for_user(
-        current_user.user_id, defn
+
+    new_id, _ = await agent_artifact_clone_service.deep_clone_playbook(
+        playbook_id, current_user.user_id
     )
-    triggers = row.get("triggers") or []
-    tags = list(row.get("tags") or [])
-    required_connectors = list(row.get("required_connectors") or [])
-    new_id = await fetch_value(
-        """
-        INSERT INTO custom_playbooks (user_id, name, description, definition, triggers, tags, required_connectors, is_template)
-        VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6, $7, false)
-        RETURNING id
-        """,
-        current_user.user_id,
-        name,
-        row.get("description") or "",
-        json.dumps(defn) if isinstance(defn, (dict, list)) else defn,
-        json.dumps(triggers) if isinstance(triggers, (dict, list)) else triggers,
-        tags,
-        required_connectors,
-    )
-    if clone_msgs and new_id:
-        await agent_factory_service.notify_playbook_model_remediation(
-            current_user.user_id, str(new_id), clone_steps, clone_msgs
-        )
+    if not new_id:
+        raise HTTPException(status_code=500, detail="Clone failed")
+
     new_row = await fetch_one("SELECT * FROM custom_playbooks WHERE id = $1", new_id)
     return JSONResponse(content=_row_to_playbook(new_row), status_code=201)
 
@@ -4319,7 +4681,8 @@ async def import_playbook(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> JSONResponse:
     """Import a playbook from JSON (creates new playbook for current user)."""
-    from services.database_manager.database_helpers import fetch_one, execute, fetch_value
+    from services.database_manager.database_helpers import fetch_one
+
     name = (body.get("name") or "Imported playbook")[:255]
     base_name = name
     suffix = 0
@@ -4334,39 +4697,39 @@ async def import_playbook(
             name = candidate
             break
         suffix += 1
+
     definition = body.get("definition") or {}
     if not isinstance(definition, dict):
         definition = {}
-    definition, imp_steps, imp_msgs = await agent_factory_service.validate_and_remediate_playbook_models_for_user(
-        current_user.user_id, definition
-    )
-    triggers = body.get("triggers") or {}
+
+    triggers = body.get("triggers") or []
+    if not isinstance(triggers, list):
+        triggers = []
+
     tags = body.get("tags") or []
     required_connectors = body.get("required_connectors") or []
     if not isinstance(tags, list):
         tags = []
     if not isinstance(required_connectors, list):
         required_connectors = []
-    playbook_id = await fetch_value(
-        """
-        INSERT INTO custom_playbooks (
-            user_id, name, definition, triggers, tags, required_connectors, is_template
-        ) VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6, false)
-        RETURNING id
-        """,
-        current_user.user_id,
-        name,
-        json.dumps(definition),
-        json.dumps(triggers),
-        tags,
-        required_connectors,
-    )
-    if imp_msgs and playbook_id:
-        await agent_factory_service.notify_playbook_model_remediation(
-            current_user.user_id, str(playbook_id), imp_steps, imp_msgs
+
+    try:
+        out = await agent_factory_service.create_playbook(
+            current_user.user_id,
+            {
+                "name": name,
+                "description": body.get("description"),
+                "version": body.get("version") or "1.0",
+                "definition": definition,
+                "triggers": triggers,
+                "category": body.get("category"),
+                "tags": tags,
+                "required_connectors": required_connectors,
+            },
         )
-    row = await fetch_one("SELECT * FROM custom_playbooks WHERE id = $1", playbook_id)
-    return JSONResponse(content=_row_to_playbook(row), status_code=201)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(content=out, status_code=201)
 
 
 # ---------- Skills ----------
@@ -4508,6 +4871,58 @@ async def list_skills(
     return JSONResponse(content=out)
 
 
+@router.get("/skills/metrics/summary")
+async def get_skills_metrics_summary(
+    limit: int = Query(20, ge=1, le=100, description="Max results per category"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Return top-used and lowest-success-rate skills summary."""
+    summary = await agent_skills_service.get_skills_metrics_summary(limit)
+    return JSONResponse(content=summary)
+
+
+# ---------------------------------------------------------------------------
+# Skill promotion / demotion recommendations (before /skills/{skill_id} to avoid shadowing)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/skills/recommendations")
+async def list_skill_recommendations(
+    status: str = Query("pending", description="pending, applied, or dismissed"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """List skill promotion/demotion recommendations."""
+    recs = await agent_skills_service.list_promotion_recommendations(status=status, limit=limit)
+    return JSONResponse(content=recs)
+
+
+@router.post("/skills/recommendations/{rec_id}/apply")
+async def apply_skill_recommendation(
+    rec_id: int = Path(..., description="Recommendation ID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Apply a pending recommendation (promote or demote the skill)."""
+    try:
+        result = await agent_skills_service.apply_recommendation(rec_id, current_user.user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(content=result)
+
+
+@router.post("/skills/recommendations/{rec_id}/dismiss")
+async def dismiss_skill_recommendation(
+    rec_id: int = Path(..., description="Recommendation ID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> Response:
+    """Dismiss a pending recommendation without action."""
+    try:
+        await agent_skills_service.dismiss_recommendation(rec_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(status_code=204)
+
+
 @router.get("/skills/{skill_id}")
 async def get_skill(
     skill_id: str = Path(..., description="Skill UUID"),
@@ -4535,6 +4950,7 @@ async def create_skill(
             slug=body.slug,
             procedure=body.procedure,
             required_tools=body.required_tools,
+            required_connection_types=body.required_connection_types,
             optional_tools=body.optional_tools,
             description=body.description,
             category=body.category,
@@ -4542,6 +4958,8 @@ async def create_skill(
             outputs_schema=body.outputs_schema,
             examples=body.examples,
             tags=body.tags,
+            is_core=body.is_core,
+            depends_on=body.depends_on,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4561,6 +4979,7 @@ async def update_skill(
             current_user.user_id,
             procedure=body.procedure,
             required_tools=body.required_tools,
+            required_connection_types=body.required_connection_types,
             optional_tools=body.optional_tools,
             name=body.name,
             description=body.description,
@@ -4571,6 +4990,9 @@ async def update_skill(
             tags=body.tags,
             improvement_rationale=body.improvement_rationale,
             evidence_metadata=body.evidence_metadata,
+            is_core=body.is_core,
+            depends_on=body.depends_on,
+            as_candidate=body.as_candidate,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -4616,3 +5038,245 @@ async def revert_skill(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return JSONResponse(content=out)
+
+
+# ---------------------------------------------------------------------------
+# Skill execution metrics
+# ---------------------------------------------------------------------------
+
+
+@router.get("/skills/{skill_id}/metrics")
+async def get_skill_metrics(
+    skill_id: str = Path(..., description="Skill UUID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Return aggregated execution metrics for a single skill."""
+    metrics = await agent_skills_service.get_skill_metrics(skill_id)
+    return JSONResponse(content=metrics)
+
+
+# ---------------------------------------------------------------------------
+# Skill candidate versioning
+# ---------------------------------------------------------------------------
+
+
+@router.get("/skills/{skill_id}/candidate")
+async def get_skill_candidate(
+    skill_id: str = Path(..., description="Active skill UUID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Return the candidate version of a skill, if any."""
+    skill = await agent_skills_service.get_skill(skill_id, current_user.user_id)
+    if not skill:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    slug = skill.get("slug") or ""
+    candidate = await agent_skills_service.get_candidate_for_slug(
+        slug, user_id=current_user.user_id
+    )
+    if not candidate:
+        return JSONResponse(content={"has_candidate": False, "candidate": None})
+    return JSONResponse(content={"has_candidate": True, "candidate": candidate})
+
+
+@router.post("/skills/{skill_id}/promote")
+async def promote_skill_candidate(
+    skill_id: str = Path(..., description="Candidate skill UUID to promote"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Promote a candidate skill version to active."""
+    try:
+        out = await agent_skills_service.promote_candidate(
+            skill_id, current_user.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(content=out)
+
+
+@router.post("/skills/{skill_id}/reject")
+async def reject_skill_candidate(
+    skill_id: str = Path(..., description="Candidate skill UUID to reject"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> Response:
+    """Reject and delete a candidate skill version."""
+    try:
+        await agent_skills_service.reject_candidate(
+            skill_id, current_user.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return Response(status_code=204)
+
+
+class CandidateWeightBody(BaseModel):
+    weight: int = Field(..., ge=0, le=100, description="Traffic weight 0-100")
+
+
+@router.patch("/skills/{skill_id}/candidate-weight")
+async def set_skill_candidate_weight(
+    skill_id: str = Path(..., description="Candidate skill UUID"),
+    body: CandidateWeightBody = ...,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Update the traffic weight for a candidate skill version."""
+    try:
+        out = await agent_skills_service.set_candidate_weight(
+            skill_id, body.weight, current_user.user_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return JSONResponse(content=out)
+
+
+# ---------------------------------------------------------------------------
+# Artifact Sharing
+# ---------------------------------------------------------------------------
+
+
+class ArtifactShareBody(BaseModel):
+    artifact_type: str = Field(..., description="agent_profile, playbook, or skill")
+    artifact_id: str = Field(..., description="UUID of the artifact")
+    shared_with_user_id: str = Field(..., description="Target user's user_id")
+
+
+@router.post("/shares")
+async def create_share(
+    body: ArtifactShareBody,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Share an artifact with another user (cascades to dependencies)."""
+    from services import agent_artifact_sharing_service
+    try:
+        result = await agent_artifact_sharing_service.share_artifact(
+            artifact_type=body.artifact_type,
+            artifact_id=body.artifact_id,
+            owner_user_id=current_user.user_id,
+            target_user_id=body.shared_with_user_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if result is None:
+        raise HTTPException(status_code=404, detail="Artifact not found or not owned by you")
+    try:
+        from utils.websocket_manager import get_websocket_manager
+        from services.database_manager.database_helpers import fetch_one
+        artifact_name = ""
+        table_map = {"agent_profile": "agent_profiles", "playbook": "custom_playbooks", "skill": "agent_skills"}
+        table = table_map.get(body.artifact_type)
+        if table:
+            name_row = await fetch_one(f"SELECT name FROM {table} WHERE id = $1", body.artifact_id)
+            artifact_name = name_row.get("name", "") if name_row else ""
+        ws = get_websocket_manager()
+        await ws.send_to_session({
+            "type": "agent_notification",
+            "subtype": "artifact_shared",
+            "artifact_type": body.artifact_type,
+            "artifact_id": body.artifact_id,
+            "artifact_name": artifact_name,
+            "shared_by": current_user.username if hasattr(current_user, "username") else current_user.user_id,
+        }, body.shared_with_user_id)
+    except Exception as e:
+        logger.warning("WebSocket share notification failed: %s", e)
+    return JSONResponse(content=result, status_code=201)
+
+
+@router.delete("/shares/{share_id}")
+async def revoke_share(
+    share_id: str = Path(..., description="Share UUID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Revoke a share (owner only). Transitive child shares are auto-deleted."""
+    from services import agent_artifact_sharing_service
+    await agent_artifact_sharing_service.revoke_share(share_id, current_user.user_id)
+    return JSONResponse(content={"revoked": True})
+
+
+@router.get("/shares/mine")
+async def list_my_shares(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """List artifacts I have shared with others (non-transitive only)."""
+    from services import agent_artifact_sharing_service
+    shares = await agent_artifact_sharing_service.list_shares_by_owner(current_user.user_id)
+    return JSONResponse(content=shares)
+
+
+@router.get("/shares/with-me")
+async def list_shared_with_me(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """List artifacts shared with me (non-transitive only)."""
+    from services import agent_artifact_sharing_service
+    shares = await agent_artifact_sharing_service.list_shares_with_user(current_user.user_id)
+    return JSONResponse(content=shares)
+
+
+@router.get("/shares/artifact/{artifact_type}/{artifact_id}")
+async def list_artifact_shares(
+    artifact_type: str = Path(..., description="agent_profile, playbook, or skill"),
+    artifact_id: str = Path(..., description="Artifact UUID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """List all direct recipients of a specific artifact."""
+    from services import agent_artifact_sharing_service
+    shares = await agent_artifact_sharing_service.list_shares_for_artifact(artifact_type, artifact_id)
+    return JSONResponse(content=shares)
+
+
+@router.post("/shares/{share_id}/copy-to-mine")
+async def copy_shared_to_mine(
+    share_id: str = Path(..., description="Share UUID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+) -> JSONResponse:
+    """Deep-clone a shared artifact into my workspace, then remove the share."""
+    from services.database_manager.database_helpers import fetch_one, execute
+    from services import agent_artifact_clone_service
+
+    share_row = await fetch_one(
+        "SELECT * FROM agent_artifact_shares WHERE id = $1 AND shared_with_user_id = $2",
+        share_id,
+        current_user.user_id,
+    )
+    if not share_row:
+        raise HTTPException(status_code=404, detail="Share not found")
+
+    artifact_type = share_row["artifact_type"]
+    artifact_id = str(share_row["artifact_id"])
+    result: Dict[str, Any] = {"artifact_type": artifact_type}
+
+    if artifact_type == "skill":
+        new_id, _ = await agent_artifact_clone_service.deep_clone_skill(
+            artifact_id, current_user.user_id
+        )
+        result["new_skill_id"] = new_id
+
+    elif artifact_type == "playbook":
+        new_id, _ = await agent_artifact_clone_service.deep_clone_playbook(
+            artifact_id, current_user.user_id
+        )
+        result["new_playbook_id"] = new_id
+
+    elif artifact_type == "agent_profile":
+        created = await agent_artifact_clone_service.deep_clone_agent_profile(
+            artifact_id, current_user.user_id
+        )
+        result["new_profile"] = created
+
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown artifact type: {artifact_type}")
+
+    parent_share = await fetch_one(
+        """SELECT id FROM agent_artifact_shares
+           WHERE artifact_type = $1 AND artifact_id = $2
+             AND shared_with_user_id = $3 AND is_transitive = false""",
+        artifact_type,
+        artifact_id,
+        current_user.user_id,
+    )
+    if parent_share:
+        await execute(
+            "DELETE FROM agent_artifact_shares WHERE id = $1",
+            parent_share["id"],
+        )
+
+    return JSONResponse(content=result, status_code=201)

@@ -1,6 +1,6 @@
 # SQL Schema Directory
 
-**BULLY!** Welcome to Roosevelt's Database Schema Headquarters! 
+PostgreSQL schema and initialization notes for Bastion.
 
 ## 📁 Current Structure
 
@@ -233,7 +233,7 @@ WHERE conrelid = 'document_folders'::regclass;
 ```sql
 CREATE TABLE document_folders (
     ...
-    -- Roosevelt's Trust-Busting Constraint
+    -- Unique folder per parent/user/collection
     CONSTRAINT unique_folder_per_parent_user 
     UNIQUE (user_id, name, parent_folder_id, collection_type)
 );
@@ -254,21 +254,11 @@ CREATE TABLE document_folders (
 -- Human-in-the-loop patterns enabled
 ```
 
-## 🏇 Roosevelt's Database Doctrine
+## Design notes
 
-**"Speak softly and carry a big schema!"**
-
-- **Single file** = Single source of truth
-- **Well organized** = Easy to maintain  
-- **Properly indexed** = Fast queries
-- **Constraints built-in** = Data integrity
-- **Clean slate friendly** = Fast deployments
-
----
-
-**BULLY!** That's a Square Deal for database management! 
-
-**By George!**, just delete the volume and run `docker compose up --build` - you'll have a perfectly initialized database ready for action! 🎯
+- Single init script is the source of truth for fresh environments
+- Prefer clear table layout, indexes, and constraints for integrity
+- For a clean database, remove the Postgres volume and run `docker compose up --build`
 
 
 

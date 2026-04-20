@@ -208,7 +208,7 @@ export default function MarkdownTableEditor({ open, onClose, initialModel, isEdi
       storageKey="markdownEditor_tableDrawerWidth"
       ModalProps={{ keepMounted: true }}
     >
-      <Box sx={{ p: 2, maxHeight: '100vh', boxSizing: 'border-box' }} role="presentation">
+      <Box sx={{ p: 2, boxSizing: 'border-box' }} role="presentation">
         <Typography variant="h6" sx={{ mb: 0.5 }}>
           Table editor
         </Typography>
@@ -246,7 +246,7 @@ export default function MarkdownTableEditor({ open, onClose, initialModel, isEdi
         <Box sx={{ overflowX: 'auto', mb: 1 }}>
           <Stack spacing={1.5}>
             <Box>
-              <Stack direction="row" spacing={0.5} sx={{ alignItems: 'flex-start', flexWrap: 'nowrap' }}>
+              <Stack direction="row" spacing={1.25} sx={{ alignItems: 'flex-start', flexWrap: 'nowrap' }}>
                 {model.headers.map((h, colIdx) => (
                   <Box
                     key={colIdx}
@@ -322,8 +322,8 @@ export default function MarkdownTableEditor({ open, onClose, initialModel, isEdi
                 <Stack
                   key={rowIdx}
                   direction="row"
-                  spacing={0.5}
-                  sx={{ alignItems: 'center', mb: 1, flexWrap: 'nowrap' }}
+                  spacing={1.25}
+                  sx={{ alignItems: 'center', mb: 1.5, flexWrap: 'nowrap' }}
                 >
                   {model.headers.map((_, colIdx) => (
                     <TextField

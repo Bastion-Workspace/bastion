@@ -3,7 +3,9 @@ Knowledge Graph Service - Manages entities and relationships extraction
 """
 
 import logging
+import time
 from typing import List, Dict, Any, Optional
+
 from neo4j import AsyncGraphDatabase
 
 from config import settings
@@ -14,31 +16,94 @@ logger = logging.getLogger(__name__)
 
 class KnowledgeGraphService:
     """Service for knowledge graph management"""
-    
+
     def __init__(self):
         self.driver = None
-    
+        self.enabled = False
+        self._last_unavailable_log_monotonic = 0.0
+        self._startup_degraded_logged = False
+
+    def is_connected(self) -> bool:
+        """True when Neo4j driver is active and the service is marked enabled."""
+        return bool(self.enabled and self.driver is not None)
+
+    def _available(self) -> bool:
+        return self.is_connected()
+
+    async def _mark_unavailable(self, reason: str) -> None:
+        now = time.monotonic()
+        if now - self._last_unavailable_log_monotonic > 60.0:
+            self._last_unavailable_log_monotonic = now
+            logger.warning("Neo4j marked unavailable: %s", reason)
+        self.enabled = False
+        if self.driver:
+            try:
+                await self.driver.close()
+            except Exception:
+                pass
+            self.driver = None
+
     async def initialize(self):
-        """Initialize Neo4j connection"""
-        logger.debug("🔧 Initializing Knowledge Graph Service...")
-        
+        """Initialize Neo4j when enabled; degrade gracefully unless NEO4J_REQUIRED."""
+        self.enabled = False
+        if not getattr(settings, "NEO4J_ENABLED", True):
+            logger.info("Knowledge graph disabled (NEO4J_ENABLED=false)")
+            self.driver = None
+            return
+        logger.debug("Initializing Knowledge Graph Service")
         try:
             self.driver = AsyncGraphDatabase.driver(
                 settings.NEO4J_URI,
-                auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD)
+                auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
             )
-            
-            # Verify connection
             await self.driver.verify_connectivity()
-            
-            # Create indexes and constraints
             await self._setup_schema()
-            
-            logger.debug("✅ Knowledge Graph Service initialized")
-            
+            self.enabled = True
+            logger.debug("Knowledge Graph Service initialized")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize Neo4j: {e}")
-            raise
+            self.enabled = False
+            if self.driver:
+                try:
+                    await self.driver.close()
+                except Exception:
+                    pass
+                self.driver = None
+            if getattr(settings, "NEO4J_REQUIRED", False):
+                logger.error("Failed to initialize Neo4j (required): %s", e)
+                raise
+            if not self._startup_degraded_logged:
+                self._startup_degraded_logged = True
+                logger.warning(
+                    "Neo4j unavailable at startup; running without knowledge graph (%s)",
+                    e,
+                )
+
+    async def try_reconnect(self) -> bool:
+        """Attempt to establish Neo4j after a prior failure. Returns True if connected."""
+        if not getattr(settings, "NEO4J_ENABLED", True):
+            return False
+        if self._available():
+            return True
+        try:
+            self.driver = AsyncGraphDatabase.driver(
+                settings.NEO4J_URI,
+                auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
+            )
+            await self.driver.verify_connectivity()
+            await self._setup_schema()
+            self.enabled = True
+            logger.info("Neo4j connection restored")
+            return True
+        except Exception as e:
+            logger.debug("Neo4j reconnect attempt failed: %s", e)
+            self.enabled = False
+            if self.driver:
+                try:
+                    await self.driver.close()
+                except Exception:
+                    pass
+                self.driver = None
+            return False
     
     async def _setup_schema(self):
         """Set up Neo4j schema with indexes and constraints"""
@@ -59,69 +124,154 @@ class KnowledgeGraphService:
                 except Exception as e:
                     # Constraint might already exist
                     logger.debug(f"Schema setup query failed (expected): {e}")
-    
+
+    async def _write_entities_to_neo4j(
+        self,
+        document_id: str,
+        entities: List[Entity],
+        chunks: Optional[List[Chunk]] = None,
+    ) -> bool:
+        """Execute MERGE graph writes. Caller must ensure driver is available."""
+        try:
+            async with self.driver.session() as session:
+                if chunks:
+                    for ch in chunks:
+                        await session.run(
+                            """
+                            MERGE (d:Document {id: $doc_id})
+                            MERGE (c:Chunk {id: $chunk_id})
+                            SET c.document_id = $doc_id, c.chunk_index = $chunk_index
+                            MERGE (c)-[:PART_OF]->(d)
+                            """,
+                            doc_id=document_id,
+                            chunk_id=ch.chunk_id,
+                            chunk_index=ch.chunk_index,
+                        )
+                for entity in entities:
+                    context = (entity.metadata or {}).get("context", "") or ""
+                    await session.run(
+                        """
+                        MERGE (e:Entity {name: $name})
+                        SET e.type = $type, e.confidence = $confidence
+                        WITH e
+                        MERGE (d:Document {id: $doc_id})
+                        MERGE (e)-[r:MENTIONED_IN]->(d)
+                        SET r.context = $context
+                        """,
+                        name=entity.name,
+                        type=entity.entity_type,
+                        confidence=entity.confidence,
+                        doc_id=document_id,
+                        context=context[:2000] if context else "",
+                    )
+                    chunk_ids = (entity.metadata or {}).get("chunk_ids", [])
+                    if chunks and chunk_ids:
+                        for cid in chunk_ids:
+                            await session.run(
+                                """
+                                MATCH (e:Entity {name: $name})
+                                MATCH (c:Chunk {id: $chunk_id})
+                                WHERE c.document_id = $doc_id
+                                MERGE (e)-[:APPEARS_IN]->(c)
+                                """,
+                                name=entity.name,
+                                chunk_id=cid,
+                                doc_id=document_id,
+                            )
+            logger.info("Stored %s entities for document %s", len(entities), document_id)
+            return True
+        except Exception as e:
+            logger.warning(
+                "Neo4j entity storage failed for document %s (non-fatal): %s",
+                document_id,
+                e,
+            )
+            return False
+
+    async def replay_store_entities(
+        self,
+        document_id: str,
+        entities: List[Entity],
+        chunks: Optional[List[Chunk]] = None,
+    ) -> bool:
+        """Replay a backlog store_entities row; no backlog enqueue on failure."""
+        if not entities or not self._available():
+            return False
+        ok = await self._write_entities_to_neo4j(document_id, entities, chunks)
+        if ok:
+            logger.info("Replayed backlog entities for document %s", document_id)
+        return ok
+
+    async def replay_delete_document(self, document_id: str) -> bool:
+        if not self._available():
+            return False
+        try:
+            async with self.driver.session() as session:
+                await session.run(
+                    """
+                    MATCH (d:Document {id: $doc_id})
+                    DETACH DELETE d
+                    """,
+                    doc_id=document_id,
+                )
+                await session.run(
+                    """
+                    MATCH (e:Entity)
+                    WHERE NOT (e)-[:MENTIONED_IN]->()
+                    DELETE e
+                    """
+                )
+            return True
+        except Exception as e:
+            logger.warning("Neo4j replay delete failed for %s: %s", document_id, e)
+            return False
+
     async def store_entities(
         self,
         entities: List[Entity],
         document_id: str,
         chunks: Optional[List[Chunk]] = None,
-    ):
+        user_id: Optional[str] = None,
+    ) -> bool:
         """Store extracted entities with optional chunk-level links for co-occurrence.
         When chunks are provided, creates Chunk nodes, PART_OF->Document, and APPEARS_IN
         from entities to chunks so co-occurrence can be computed at chunk level.
+
+        Returns True on success, False on failure. Never raises — a Neo4j outage
+        should not abort the wider document processing pipeline.
         """
-        async with self.driver.session() as session:
-            if chunks:
-                for ch in chunks:
-                    await session.run(
-                        """
-                        MERGE (d:Document {id: $doc_id})
-                        MERGE (c:Chunk {id: $chunk_id})
-                        SET c.document_id = $doc_id, c.chunk_index = $chunk_index
-                        MERGE (c)-[:PART_OF]->(d)
-                        """,
-                        doc_id=document_id,
-                        chunk_id=ch.chunk_id,
-                        chunk_index=ch.chunk_index,
-                    )
-            for entity in entities:
-                context = (entity.metadata or {}).get("context", "") or ""
-                await session.run(
-                    """
-                    MERGE (e:Entity {name: $name})
-                    SET e.type = $type, e.confidence = $confidence
-                    WITH e
-                    MERGE (d:Document {id: $doc_id})
-                    MERGE (e)-[r:MENTIONED_IN]->(d)
-                    SET r.context = $context
-                    """,
-                    name=entity.name,
-                    type=entity.entity_type,
-                    confidence=entity.confidence,
-                    doc_id=document_id,
-                    context=context[:2000] if context else "",
-                )
-                chunk_ids = (entity.metadata or {}).get("chunk_ids", [])
-                if chunks and chunk_ids:
-                    for cid in chunk_ids:
-                        await session.run(
-                            """
-                            MATCH (e:Entity {name: $name})
-                            MATCH (c:Chunk {id: $chunk_id})
-                            WHERE c.document_id = $doc_id
-                            MERGE (e)-[:APPEARS_IN]->(c)
-                            """,
-                            name=entity.name,
-                            chunk_id=cid,
-                            doc_id=document_id,
-                        )
-        logger.info(f"🔗 Stored {len(entities)} entities for document {document_id}")
+        if not entities:
+            return True
+        if not getattr(settings, "NEO4J_ENABLED", True):
+            return True
+        from services import kg_write_backlog
+
+        if not self._available():
+            await kg_write_backlog.enqueue_store_entities(
+                document_id, user_id, entities, chunks
+            )
+            return False
+        ok = await self._write_entities_to_neo4j(document_id, entities, chunks)
+        if not ok:
+            await self._mark_unavailable("store_entities failed")
+            await kg_write_backlog.enqueue_store_entities(
+                document_id, user_id, entities, chunks
+            )
+        return ok
 
     async def get_entity_detail(
         self, entity_name: str, user_document_ids: List[str]
     ) -> Dict[str, Any]:
         """Return entity type/confidence, per-document mentions with context, and co-occurring entities."""
         if not user_document_ids:
+            return {
+                "name": entity_name,
+                "entity_type": None,
+                "confidence": None,
+                "document_mentions": [],
+                "co_occurring_entities": [],
+            }
+        if not self._available():
             return {
                 "name": entity_name,
                 "entity_type": None,
@@ -217,6 +367,8 @@ class KnowledgeGraphService:
     
     async def get_entities(self, entity_type: str = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Get entities from the knowledge graph"""
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             if entity_type:
                 result = await session.run(
@@ -250,6 +402,8 @@ class KnowledgeGraphService:
     
     async def get_entity_relationships(self, entity_name: str) -> List[Dict[str, Any]]:
         """Get relationships for a specific entity"""
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 """
@@ -276,6 +430,8 @@ class KnowledgeGraphService:
     
     async def find_related_entities(self, entity_name: str, max_hops: int = 2) -> List[Dict[str, Any]]:
         """Find entities related to a given entity within max_hops"""
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 f"""
@@ -300,6 +456,8 @@ class KnowledgeGraphService:
     
     async def get_document_entities(self, document_id: str) -> List[Dict[str, Any]]:
         """Get all entities mentioned in a specific document"""
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 """
@@ -322,6 +480,13 @@ class KnowledgeGraphService:
     
     async def get_graph_stats(self) -> Dict[str, Any]:
         """Get knowledge graph statistics"""
+        if not self._available():
+            return {
+                "total_entities": 0,
+                "total_documents": 0,
+                "total_relationships": 0,
+                "entity_types": {},
+            }
         try:
             async with self.driver.session() as session:
                 # Get entity count
@@ -374,6 +539,12 @@ class KnowledgeGraphService:
         the current user's documents (RLS applied by caller).
         """
         if not document_ids:
+            return {
+                "entity_nodes": [],
+                "document_ids": [],
+                "co_occurrence_edges": [],
+            }
+        if not self._available():
             return {
                 "entity_nodes": [],
                 "document_ids": [],
@@ -465,6 +636,8 @@ class KnowledgeGraphService:
 
     async def check_health(self) -> bool:
         """Check Neo4j health"""
+        if not self._available():
+            return False
         try:
             async with self.driver.session() as session:
                 result = await session.run("RETURN 1 as health_check")
@@ -479,7 +652,7 @@ class KnowledgeGraphService:
         Extract entities from text using simple keyword matching
         
         ⚠️  **DEPRECATED:** This primitive method is kept for backwards compatibility only.
-        **BULLY!** Use DocumentProcessor._extract_entities() for proper spaCy NER instead!
+        Use DocumentProcessor._extract_entities() for proper spaCy NER instead.
         
         For proper entity extraction:
         ```python
@@ -512,7 +685,8 @@ class KnowledgeGraphService:
         """Find documents that mention any of the given entities"""
         if not entity_names:
             return []
-        
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 """
@@ -533,7 +707,8 @@ class KnowledgeGraphService:
         """Find documents mentioning entities related to the given entities"""
         if not entity_names:
             return []
-        
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 f"""
@@ -554,7 +729,8 @@ class KnowledgeGraphService:
         """Calculate importance scores for entities based on document frequency and centrality"""
         if not entity_names:
             return {}
-        
+        if not self._available():
+            return {}
         async with self.driver.session() as session:
             result = await session.run(
                 """
@@ -583,7 +759,8 @@ class KnowledgeGraphService:
         """Find entities that frequently co-occur with the given entities"""
         if not entity_names:
             return []
-        
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 """
@@ -610,6 +787,8 @@ class KnowledgeGraphService:
     
     async def get_document_similarity_by_entities(self, document_id: str, min_shared_entities: int = 2) -> List[Dict[str, Any]]:
         """Find documents similar to the given document based on shared entities"""
+        if not self._available():
+            return []
         async with self.driver.session() as session:
             result = await session.run(
                 """
@@ -633,20 +812,26 @@ class KnowledgeGraphService:
             
             return similar_docs
 
-    async def delete_document_entities(self, document_id: str):
-        """Delete all entities and relationships for a specific document"""
+    async def delete_document_entities(
+        self, document_id: str, user_id: Optional[str] = None
+    ) -> None:
+        """Delete all entities and relationships for a specific document."""
+        from services import kg_write_backlog
+
+        if not getattr(settings, "NEO4J_ENABLED", True):
+            return
+        if not self._available():
+            await kg_write_backlog.enqueue_delete_document(document_id, user_id)
+            return
         try:
             async with self.driver.session() as session:
-                # First, remove the document node and its relationships
                 await session.run(
                     """
                     MATCH (d:Document {id: $doc_id})
                     DETACH DELETE d
                     """,
-                    doc_id=document_id
+                    doc_id=document_id,
                 )
-                
-                # Remove orphaned entities (entities not mentioned in any document)
                 await session.run(
                     """
                     MATCH (e:Entity)
@@ -654,15 +839,17 @@ class KnowledgeGraphService:
                     DELETE e
                     """
                 )
-                
-                logger.info(f"🗑️ Deleted knowledge graph entities for document {document_id}")
-                
+                logger.info("Deleted knowledge graph entities for document %s", document_id)
         except Exception as e:
-            logger.error(f"❌ Failed to delete document entities from knowledge graph: {e}")
-            raise
+            logger.error("Failed to delete document entities from knowledge graph: %s", e)
+            await self._mark_unavailable("delete_document_entities failed")
+            await kg_write_backlog.enqueue_delete_document(document_id, user_id)
 
     async def clear_all_data(self):
         """Clear all entities, relationships, and documents from the knowledge graph"""
+        if not self._available():
+            logger.warning("clear_all_data skipped: Neo4j not connected")
+            return
         try:
             async with self.driver.session() as session:
                 # Delete all nodes and relationships
@@ -683,8 +870,11 @@ class KnowledgeGraphService:
         """
         Store entertainment-specific entities and relationships in Neo4j
         
-        **BULLY!** Entertainment-scoped graph with proper namespacing!
+        Entertainment-scoped graph with namespaced labels.
         """
+        if not self._available():
+            logger.debug("store_entertainment_entities skipped: Neo4j not connected")
+            return
         try:
             async with self.driver.session() as session:
                 # Store entities with entertainment-specific labels
@@ -768,8 +958,10 @@ class KnowledgeGraphService:
         """
         Get entertainment recommendations based on shared actors/directors/genres
         
-        **BULLY!** Graph-based recommendations using relationship traversal!
+        Graph-based recommendations using relationship traversal.
         """
+        if not self._available():
+            return []
         try:
             async with self.driver.session() as session:
                 query = """
@@ -836,8 +1028,10 @@ class KnowledgeGraphService:
         """
         Find all works featuring a specific actor
         
-        **BULLY!** Actor filmography via graph traversal!
+        Actor filmography via graph traversal.
         """
+        if not self._available():
+            return []
         try:
             async with self.driver.session() as session:
                 query = """
@@ -873,6 +1067,8 @@ class KnowledgeGraphService:
 
     async def close(self):
         """Close Neo4j connection"""
+        self.enabled = False
         if self.driver:
             await self.driver.close()
-        logger.info("🔄 Knowledge Graph Service closed")
+            self.driver = None
+        logger.info("Knowledge Graph Service closed")

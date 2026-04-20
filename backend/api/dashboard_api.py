@@ -15,12 +15,14 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from models.api_models import AuthenticatedUserResponse
 from models.home_dashboard_models import (
+    ArtifactEmbedWidget,
     HomeDashboardLayout,
     RssHeadlinesWidget,
     UserDashboardCreateRequest,
     UserDashboardPatchRequest,
     UserDashboardsListResponse,
 )
+from services import saved_artifact_service as saved_artifact_svc
 from services import user_home_dashboard_service as dash_svc
 from tools_service.services.rss_service import get_rss_service
 from utils.auth_middleware import get_current_user
@@ -45,6 +47,20 @@ async def _validate_rss_feed_access(layout: HomeDashboardLayout, user_id: str) -
                     status_code=400,
                     detail="RSS feed not accessible for this user",
                 )
+
+
+async def _validate_saved_artifact_widgets(layout: HomeDashboardLayout, user_id: str) -> None:
+    for w in layout.widgets:
+        if not isinstance(w, ArtifactEmbedWidget):
+            continue
+        aid = (w.config.artifact_id or "").strip()
+        if not aid:
+            continue
+        if not await saved_artifact_svc.user_owns_artifact(user_id, aid):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Saved artifact not found or not owned: {aid}",
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +133,7 @@ async def put_home_dashboard_layout(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> HomeDashboardLayout:
     await _validate_rss_feed_access(body, current_user.user_id)
+    await _validate_saved_artifact_widgets(body, current_user.user_id)
     try:
         return await dash_svc.put_layout(current_user.user_id, dashboard_id, body)
     except LookupError as e:
@@ -144,6 +161,7 @@ async def put_home_dashboard(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> HomeDashboardLayout:
     await _validate_rss_feed_access(body, current_user.user_id)
+    await _validate_saved_artifact_widgets(body, current_user.user_id)
     try:
         return await dash_svc.put_default_layout(current_user.user_id, body)
     except LookupError as e:

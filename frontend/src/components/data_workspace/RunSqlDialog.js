@@ -14,7 +14,7 @@ import {
 import { Code as CodeIcon } from '@mui/icons-material';
 import dataWorkspaceService from '../../services/dataWorkspaceService';
 
-const RunSqlDialog = ({ open, onClose, workspaceId, onSuccess }) => {
+const RunSqlDialog = ({ open, onClose, workspaceId, onSuccess, container }) => {
   const [sql, setSql] = useState('');
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState(null);
@@ -51,7 +51,7 @@ const RunSqlDialog = ({ open, onClose, workspaceId, onSuccess }) => {
   const hasResults = result?.results?.length > 0;
 
   return (
-    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth container={container}>
       <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <CodeIcon /> Run SQL
       </DialogTitle>

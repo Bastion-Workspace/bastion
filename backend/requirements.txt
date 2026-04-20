@@ -3,25 +3,25 @@ fastapi==0.115.6
 uvicorn[standard]==0.32.1
 python-multipart==0.0.12
 
-# gRPC server for tool service (Phase 2)
-grpcio==1.76.0
-grpcio-tools==1.76.0
-grpcio-health-checking==1.76.0
+# gRPC server for tool service (Phase 2). Codegen: grpcio-tools in requirements-build.txt (Docker build only).
+grpcio==1.80.0
+grpcio-health-checking==1.80.0
+# Required for generated *_pb2.py (grpcio does not install protobuf); align with grpcio-tools 1.80 protoc output
+protobuf>=6.31.1,<7
 
 # Celery for background processing
 celery==5.5.3
 flower==2.0.1
 
-# LangChain ecosystem
-langchain==0.3.27
-langchain-openai==0.3.28
-langchain-community==0.3.27
-langchain-core==0.3.72
+# LangChain ecosystem (0.3.x latest patches; see PyPI langchain / langchain-core)
+langchain==0.3.28
+langchain-openai==0.3.35
+langchain-community==0.3.31
+langchain-core==0.3.84
 langsmith==0.4.13
 
-# Vector database and embeddings
-qdrant-client==1.14.1
-openai==1.99.1
+# Embeddings (vector DB access is via vector-service gRPC only)
+openai==1.109.1
 
 # PostgreSQL database
 psycopg2-binary==2.9.10
@@ -57,6 +57,9 @@ langdetect==1.0.9
 # Redis for caching
 redis==6.4.0
 
+# Per-document file encryption (Argon2id)
+argon2-cffi==23.1.0
+
 # Cron expression parsing for agent schedules
 croniter==3.0.0
 
@@ -82,12 +85,13 @@ pyyaml>=6.0
 
 # Configuration and logging
 pydantic==2.12.5  # ocrmypdf 17.x requires >=2.12.5; rest of stack compatible
-pydantic-settings==2.6.1
+pydantic-settings==2.13.1
 python-dotenv==1.0.1
 structlog==24.4.0
 pytz==2024.1
 
 # Authentication and security
+PyNaCl>=1.5.0
 python-jose[cryptography]==3.3.0
 PyJWT==2.9.0
 passlib[bcrypt]==1.7.4
@@ -97,18 +101,15 @@ bcrypt==3.2.2
 # WebSockets for real-time updates
 websockets==13.1
 
+# CRDT collaborative editing (Yjs protocol, YRoom WebSocket server)
+pycrdt>=0.12.16,<0.13.0
+pycrdt-websocket>=0.16.0
+
 # Image processing (for OCR)
 Pillow==11.0.0
 
 # Progress tracking
 tqdm==4.67.1
-
-# Development tools
-pytest==7.4.3
-pytest-asyncio==0.21.1
-black==23.11.0
-isort==5.12.0
-
 
 datasets==4.0.0
 nest-asyncio==1.6.0
@@ -122,16 +123,18 @@ readability-lxml==0.8.1
 newspaper3k==0.2.8
 trafilatura==2.0.0
 
-# LangGraph for agentic architecture
-langgraph>=1.0.0,<2.0.0
-langgraph-checkpoint-postgres>=3.0.0
+# LangGraph for agentic architecture (1.0.1 + prebuilt 1.0.1: last pair compatible with langchain-core 0.3.x; prebuilt>=1.0.2 requires langchain-core>=1.0)
+langgraph==1.0.1
+langgraph-prebuilt==1.0.1
+langgraph-checkpoint-postgres>=3.0.5,<4.0.0
+psycopg[binary]>=3.1.0  # Required for langgraph-checkpoint-postgres (bundled libpq on slim images)
 
 # WebDAV server for OrgMode mobile sync
 WsgiDAV==4.3.3
 Cheroot==10.0.1
 watchdog==4.0.0
 
-# Org-Mode parsing - Roosevelt's cavalry for proper org parsing!
+# Org-Mode parsing
 orgparse==0.4.20250520
 
 # Graph processing for system modeling

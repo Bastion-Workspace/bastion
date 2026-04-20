@@ -26,6 +26,7 @@ class Settings:
     BACKEND_URL: str = os.getenv("BACKEND_URL", "http://backend:8000")
     INTERNAL_SERVICE_KEY: str = os.getenv("INTERNAL_SERVICE_KEY", "")
     EXTERNAL_CHAT_TIMEOUT: float = float(os.getenv("EXTERNAL_CHAT_TIMEOUT", "300"))
+    TRANSCRIPTION_TIMEOUT: float = float(os.getenv("TRANSCRIPTION_TIMEOUT", "120"))
 
     @classmethod
     def validate(cls) -> None:

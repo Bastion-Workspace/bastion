@@ -269,7 +269,9 @@ class AuthenticationService:
                     # Get user by username
                     user_row = await conn.fetchrow("""
                         SELECT user_id, username, email, password_hash, salt, role, 
-                               display_name, is_active, failed_login_attempts, preferences
+                               display_name, is_active, failed_login_attempts, preferences,
+                               federation_discoverable,
+                               federation_share_read_receipts, federation_share_presence
                         FROM users 
                         WHERE username = $1
                     """, login_request.username)
@@ -318,7 +320,12 @@ class AuthenticationService:
                         "username": user_row["username"],
                         "email": user_row["email"],
                         "role": user_row["role"],
-                        "display_name": user_row["display_name"]
+                        "display_name": user_row["display_name"],
+                        "federation_discoverable": user_row.get("federation_discoverable"),
+                        "federation_share_read_receipts": user_row.get(
+                            "federation_share_read_receipts"
+                        ),
+                        "federation_share_presence": user_row.get("federation_share_presence"),
                     }
                     
                     token, expiration = self._generate_jwt_token(user_data)
@@ -379,13 +386,26 @@ class AuthenticationService:
                 # IMMEDIATE CACHE: Cache the user session immediately to avoid database lookup timing issues
                 try:
                     cache_key = f"auth:user:{token_hash}"
+                    _prefs = user_row["preferences"]
+                    if isinstance(_prefs, str):
+                        try:
+                            _prefs = json.loads(_prefs)
+                        except (json.JSONDecodeError, TypeError):
+                            _prefs = {}
+                    elif _prefs is None:
+                        _prefs = {}
                     cached_user = AuthenticatedUserResponse(
                         user_id=user_row["user_id"],
                         username=user_row["username"],
                         email=user_row["email"],
                         role=user_row["role"],
                         display_name=user_row["display_name"],
-                        preferences=user_row["preferences"]
+                        preferences=_prefs if isinstance(_prefs, dict) else {},
+                        federation_discoverable=user_row.get("federation_discoverable"),
+                        federation_share_read_receipts=user_row.get(
+                            "federation_share_read_receipts"
+                        ),
+                        federation_share_presence=user_row.get("federation_share_presence"),
                     )
                     
                     # Cache in Redis if available
@@ -442,7 +462,9 @@ class AuthenticationService:
             async with self.db_pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """
-                    SELECT user_id, username, email, role, display_name, is_active, preferences
+                    SELECT user_id, username, email, role, display_name, is_active, preferences,
+                           federation_discoverable,
+                           federation_share_read_receipts, federation_share_presence
                     FROM users WHERE user_id = $1
                     """,
                     user_id,
@@ -465,6 +487,9 @@ class AuthenticationService:
                 display_name=row["display_name"],
                 role=row["role"] or "user",
                 preferences=prefs if isinstance(prefs, dict) else {},
+                federation_discoverable=row.get("federation_discoverable"),
+                federation_share_read_receipts=row.get("federation_share_read_receipts"),
+                federation_share_presence=row.get("federation_share_presence"),
             )
         except Exception as e:
             logger.error("GReader token verification failed: %s", e)
@@ -610,7 +635,9 @@ class AuthenticationService:
             # Get user from database
             async with self.db_pool.acquire() as conn:
                 user_row = await conn.fetchrow("""
-                    SELECT user_id, username, email, role, display_name, preferences, is_active
+                    SELECT user_id, username, email, role, display_name, preferences, is_active,
+                           federation_discoverable,
+                           federation_share_read_receipts, federation_share_presence
                     FROM users 
                     WHERE user_id = $1 AND is_active = true
                 """, payload["user_id"])
@@ -625,7 +652,12 @@ class AuthenticationService:
                     "username": user_row["username"],
                     "email": user_row["email"],
                     "role": user_row["role"],
-                    "display_name": user_row["display_name"]
+                    "display_name": user_row["display_name"],
+                    "federation_discoverable": user_row.get("federation_discoverable"),
+                    "federation_share_read_receipts": user_row.get(
+                        "federation_share_read_receipts"
+                    ),
+                    "federation_share_presence": user_row.get("federation_share_presence"),
                 }
                 
                 new_token, expiration = self._generate_jwt_token(user_data)
@@ -676,7 +708,12 @@ class AuthenticationService:
                         email=user_row["email"],
                         role=user_row["role"],
                         display_name=user_row["display_name"],
-                        preferences=preferences
+                        preferences=preferences,
+                        federation_discoverable=user_row.get("federation_discoverable"),
+                        federation_share_read_receipts=user_row.get(
+                            "federation_share_read_receipts"
+                        ),
+                        federation_share_presence=user_row.get("federation_share_presence"),
                     )
                     
                     if self.redis_client:
@@ -758,7 +795,9 @@ class AuthenticationService:
                     if token_valid:
                         logger.info("✅ JWT token is still valid - proceeding with JWT-only authentication")
                         user_row = await conn.fetchrow("""
-                            SELECT user_id, username, email, role, display_name, preferences, is_active
+                            SELECT user_id, username, email, role, display_name, preferences, is_active,
+                                   federation_discoverable,
+                                   federation_share_read_receipts, federation_share_presence
                             FROM users 
                             WHERE user_id = $1 AND is_active = true
                         """, payload["user_id"])
@@ -779,7 +818,12 @@ class AuthenticationService:
                             email=user_row["email"],
                             role=user_row["role"],
                             display_name=user_row["display_name"],
-                            preferences=preferences
+                            preferences=preferences,
+                            federation_discoverable=user_row.get("federation_discoverable"),
+                            federation_share_read_receipts=user_row.get(
+                                "federation_share_read_receipts"
+                            ),
+                            federation_share_presence=user_row.get("federation_share_presence"),
                         )
                         await self._cache_user(token_hash, user)
                         logger.info(f"✅ JWT-only authentication successful for user: {user.username}")
@@ -791,7 +835,9 @@ class AuthenticationService:
                 
                 # Get user details
                 user_row = await conn.fetchrow("""
-                    SELECT user_id, username, email, role, display_name, preferences, is_active
+                    SELECT user_id, username, email, role, display_name, preferences, is_active,
+                           federation_discoverable,
+                           federation_share_read_receipts, federation_share_presence
                     FROM users 
                     WHERE user_id = $1 AND is_active = true
                 """, payload["user_id"])
@@ -815,7 +861,12 @@ class AuthenticationService:
                     email=user_row["email"],
                     role=user_row["role"],
                     display_name=user_row["display_name"],
-                    preferences=preferences
+                    preferences=preferences,
+                    federation_discoverable=user_row.get("federation_discoverable"),
+                    federation_share_read_receipts=user_row.get(
+                        "federation_share_read_receipts"
+                    ),
+                    federation_share_presence=user_row.get("federation_share_presence"),
                 )
                 
                 # Cache the user data
@@ -907,10 +958,12 @@ class AuthenticationService:
                 try:
                     from services.agent_factory_service import (
                         seed_default_agent_profiles,
+                        seed_devops_advisor_profiles,
                         seed_rss_manager_profiles,
                     )
                     await seed_default_agent_profiles(user_id)
                     await seed_rss_manager_profiles(user_id)
+                    await seed_devops_advisor_profiles(user_id)
                 except Exception as af_e:
                     logger.warning("Default agent profile seed for new user failed: %s", af_e)
 
@@ -922,7 +975,10 @@ class AuthenticationService:
                     avatar_url=None,
                     role=user_request.role,
                     is_active=True,
-                    created_at=now
+                    created_at=now,
+                    federation_discoverable=False,
+                    federation_share_read_receipts=True,
+                    federation_share_presence=True,
                 )
                 
         except Exception as e:
@@ -939,7 +995,8 @@ class AuthenticationService:
                 # Get users
                 rows = await conn.fetch("""
                     SELECT user_id, username, email, role, display_name, avatar_url,
-                           is_active, created_at, last_login
+                           is_active, created_at, last_login, federation_discoverable,
+                           federation_share_read_receipts, federation_share_presence
                     FROM users 
                     ORDER BY created_at DESC
                     LIMIT $1 OFFSET $2
@@ -955,7 +1012,12 @@ class AuthenticationService:
                         role=row["role"],
                         is_active=row["is_active"],
                         created_at=row["created_at"],
-                        last_login=row["last_login"]
+                        last_login=row["last_login"],
+                        federation_discoverable=row.get("federation_discoverable"),
+                        federation_share_read_receipts=row.get(
+                            "federation_share_read_receipts"
+                        ),
+                        federation_share_presence=row.get("federation_share_presence"),
                     )
                     for row in rows
                 ]
@@ -999,6 +1061,25 @@ class AuthenticationService:
                     update_fields.append(f"is_active = ${param_count}")
                     values.append(update_request.is_active)
                     param_count += 1
+
+                if update_request.federation_discoverable is not None:
+                    update_fields.append(f"federation_discoverable = ${param_count}")
+                    values.append(update_request.federation_discoverable)
+                    param_count += 1
+
+                if update_request.federation_share_read_receipts is not None:
+                    update_fields.append(
+                        f"federation_share_read_receipts = ${param_count}"
+                    )
+                    values.append(update_request.federation_share_read_receipts)
+                    param_count += 1
+
+                if update_request.federation_share_presence is not None:
+                    update_fields.append(
+                        f"federation_share_presence = ${param_count}"
+                    )
+                    values.append(update_request.federation_share_presence)
+                    param_count += 1
                 
                 if not update_fields:
                     return None
@@ -1014,7 +1095,8 @@ class AuthenticationService:
                     SET {', '.join(update_fields)}
                     WHERE user_id = ${param_count}
                     RETURNING user_id, username, email, role, display_name, avatar_url,
-                              is_active, created_at, last_login
+                              is_active, created_at, last_login, federation_discoverable,
+                              federation_share_read_receipts, federation_share_presence
                 """
                 
                 row = await conn.fetchrow(query, *values)
@@ -1031,7 +1113,12 @@ class AuthenticationService:
                     role=row["role"],
                     is_active=row["is_active"],
                     created_at=row["created_at"],
-                    last_login=row["last_login"]
+                    last_login=row["last_login"],
+                    federation_discoverable=row.get("federation_discoverable"),
+                    federation_share_read_receipts=row.get(
+                        "federation_share_read_receipts"
+                    ),
+                    federation_share_presence=row.get("federation_share_presence"),
                 )
                 
                 # Invalidate any cached sessions for this user

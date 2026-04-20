@@ -418,53 +418,69 @@ class TeamService:
             raise PermissionError("Only team admins can delete teams")
         
         try:
+            # Library files and upload volume live on document-service (not backend). Tear down
+            # team folders, documents, vectors, and disk there before removing the team row.
+            try:
+                from clients.document_service_client import get_document_service_client
+                from services.folder_service import FolderService
+
+                folder_service = FolderService()
+                await folder_service.initialize()
+                team_folders = await folder_service.document_repository.get_folders_by_teams(
+                    [team_id], user_id=user_id
+                )
+                root_folders = [f for f in team_folders if not f.get("parent_folder_id")]
+
+                dsc = get_document_service_client()
+                await dsc.initialize(required=True)
+
+                for root in root_folders:
+                    fid = root.get("folder_id")
+                    if not fid:
+                        continue
+                    ok, _data, err = await dsc.delete_folder_json(
+                        user_id,
+                        {
+                            "folder_id": fid,
+                            "user_id": user_id,
+                            "role": "user",
+                            "recursive": True,
+                            "allow_team_root": True,
+                        },
+                        timeout=600.0,
+                    )
+                    if not ok:
+                        logger.warning(
+                            "Document-service failed to delete team root folder %s: %s",
+                            fid,
+                            err,
+                        )
+
+                ok_rm, _data_rm, err_rm = await dsc.document_mirror_json(
+                    user_id,
+                    {
+                        "action": "remove_team_upload_directory",
+                        "team_id": str(team_id),
+                        "user_id": user_id,
+                    },
+                )
+                if not ok_rm:
+                    logger.warning(
+                        "Document-service remove_team_upload_directory failed for %s: %s",
+                        team_id,
+                        err_rm,
+                    )
+            except Exception as e:
+                logger.warning(
+                    "Team library cleanup via document-service failed for %s: %s",
+                    team_id,
+                    e,
+                )
+
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
-                
-                # Find and delete team folder(s) before deleting team
-                try:
-                    from services.folder_service import FolderService
-                    from pathlib import Path
-                    import shutil
-                    from config import settings
-                    
-                    folder_service = FolderService()
-                    await folder_service.initialize()
-                    
-                    # Get all folders for this team
-                    team_folders = await folder_service.document_repository.get_folders_by_teams([team_id])
-                    
-                    # Delete all team folders from database (cascade will handle documents)
-                    # We delete directly from repository to bypass the team root folder restriction
-                    for folder_data in team_folders:
-                        folder_id = folder_data.get('folder_id')
-                        if folder_id:
-                            try:
-                                # Delete from database (cascade will handle subfolders and documents)
-                                await folder_service.document_repository.delete_folder(folder_id)
-                                logger.info(f"Deleted team folder {folder_id} from database")
-                            except Exception as e:
-                                logger.warning(f"Failed to delete team folder {folder_id} from database: {e}")
-                    
-                    # Delete entire team directory from disk (Teams/{team_id})
-                    # This will delete all team files including documents, posts, etc.
-                    team_base_path = folder_service.get_team_base_path(team_id)
-                    team_dir = team_base_path.parent  # Go up one level to get Teams/{team_id}
-                    
-                    if team_dir.exists():
-                        try:
-                            shutil.rmtree(team_dir)
-                            logger.info(f"Deleted team directory from disk: {team_dir}")
-                        except Exception as e:
-                            logger.warning(f"Failed to delete team directory {team_dir} from disk: {e}")
-                    else:
-                        logger.info(f"Team directory not found on disk: {team_dir}")
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to delete team folder(s) for team {team_id}: {e}")
-                    # Continue with team deletion even if folder deletion fails
-                
+
                 # Delete team (cascades to members, posts, etc.)
                 result = await conn.execute("""
                     DELETE FROM teams WHERE team_id = $1

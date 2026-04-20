@@ -1,6 +1,5 @@
 """
-Org Search API - Roosevelt's Search Endpoints
-Provides search, agenda, and TODO list functionality for org-mode files
+Org search API: search, agenda, and TODO-style listing for org-mode files.
 """
 
 import logging
@@ -116,8 +115,6 @@ async def get_all_todos(
 
     DEPRECATED: Prefer GET /api/todos (org_todo_api) with query params scope, states, tags, limit.
 
-    **BULLY!** View all your TODOs in one place!
-    
     **Query Parameters:**
     - **states**: Filter by states, e.g., "TODO,NEXT,WAITING" (optional, default: all non-DONE)
     - **tags**: Filter by tags, e.g., "work,urgent" (optional)
@@ -173,10 +170,8 @@ async def get_all_contacts(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Get all contact entries across org files
-    
-    **BULLY!** View all your contacts in one place!
-    
+    Get all contact entries across org files.
+
     Contacts are identified by having properties like EMAIL, PHONE, BIRTHDAY,
     or being in sections labeled "Contacts", "People", etc.
     
@@ -345,7 +340,7 @@ async def get_agenda(
                             try:
                                 hour, minute = map(int, time_for_sort.split(':'))
                                 sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=hour, minute=minute))
-                            except:
+                            except Exception:
                                 sort_datetime = datetime.combine(item_date, datetime.min.time())
                         else:
                             sort_datetime = datetime.combine(item_date, datetime.min.time())
@@ -389,7 +384,7 @@ async def get_agenda(
                             try:
                                 hour, minute = map(int, time_for_sort.split(':'))
                                 sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=hour, minute=minute))
-                            except:
+                            except Exception:
                                 sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=23, minute=59))
                         else:
                             sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=23, minute=59))
@@ -434,7 +429,7 @@ async def get_agenda(
                                 try:
                                     hour, minute = map(int, time_for_sort.split(':'))
                                     sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=hour, minute=minute))
-                                except:
+                                except Exception:
                                     sort_datetime = datetime.combine(item_date, datetime.min.time())
                             else:
                                 sort_datetime = datetime.combine(item_date, datetime.min.time())
@@ -503,10 +498,8 @@ async def get_backlinks(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Find all org files that link to the specified file
-    
-    **BULLY!** Discover knowledge connections through backlinks!
-    
+    Find all org files that link to the specified file.
+
     **Query Parameters:**
     - **filename**: The filename to find backlinks for (e.g., "projects.org")
     
@@ -553,10 +546,8 @@ async def lookup_document_by_filename(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Look up org file by filename and return document_id from document_metadata
-    
-    **BULLY!** Find org files in document_metadata for proper opening!
-    
+    Look up an org file by filename and return document_id from document_metadata.
+
     **Query Parameters:**
     - **filename**: The filename to search for (e.g., "inbox.org")
     
@@ -653,10 +644,8 @@ async def discover_refile_targets(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Discover all potential refile targets for the user
-    
-    **BULLY!** Find all the places to refile your TODOs!
-    
+    Discover all potential refile targets for the user.
+
     **Returns:**
     - List of refile targets (files and headings)
     """
@@ -695,7 +684,7 @@ async def refile_entry(
     """
     Refile (move) an org entry from one location to another
     
-    **ROOSEVELT REFILE OPERATION!** Move that TODO!
+    Refile operation Move that TODO!
     
     **Body Parameters:**
     - **source_file**: Source file relative path (e.g., "OrgMode/inbox.org")
@@ -753,7 +742,7 @@ async def get_archive_location(
     """
     Get archive location for a source file
     
-    **ROOSEVELT ARCHIVE LOCATION!** Check where entries will be archived!
+    Return configured archive location for entries
     
     Returns archive location with priority:
     1. File-level #+ARCHIVE: directive (if present)
@@ -782,18 +771,23 @@ async def get_archive_location(
         upload_dir = Path(settings.UPLOAD_DIR)
         user_base_dir = upload_dir / "Users" / username
         source_path = user_base_dir / source_file
-        
-        if not source_path.exists():
+
+        from services import ds_upload_library_fs as dsf
+
+        if not await dsf.exists(current_user.user_id, source_path):
             raise HTTPException(status_code=404, detail=f"Source file not found: {source_file}")
-        
+
         # Check file-level directive
         file_archive = None
         try:
-            with open(source_path, 'r', encoding='utf-8') as f:
-                file_content = f.read()
+            file_content = await dsf.read_text(current_user.user_id, source_path)
             file_archive = archive_service._parse_file_archive_directive(file_content)
         except Exception as e:
-            logger.warning(f"Failed to read file for archive directive: {e}")
+            logger.warning(
+                "Could not read org file or parse #+ARCHIVE: for %s: %s",
+                source_file,
+                e,
+            )
         
         # Check settings
         from services.org_settings_service import OrgSettingsService
@@ -851,7 +845,7 @@ async def archive_entry(
     """
     Archive a single org entry to the archive file
     
-    **ROOSEVELT ARCHIVE OPERATION!** Keep your files clean!
+    Archive a single org entry
     
     **Body Parameters:**
     - **source_file**: Source file relative path (e.g., "OrgMode/tasks.org")
@@ -899,7 +893,7 @@ async def archive_all_done(
     """
     Archive all DONE items from a file
     
-    **ROOSEVELT BULK ARCHIVE!** Clean house - archive all completed tasks!
+    Bulk-archive completed tasks
     
     **Body Parameters:**
     - **source_file**: Source file relative path (e.g., "OrgMode/inbox.org")
@@ -947,7 +941,7 @@ async def handle_recurring_task_completion(
     """
     Handle completion of a recurring task
     
-    **ROOSEVELT RECURRING TASKS!** Build lasting habits!
+    Create or update recurring task rules
     
     If task has a repeater (e.g., SCHEDULED: <2025-10-22 Tue +1w>):
     - Resets task to TODO
@@ -999,7 +993,7 @@ async def get_habit_consistency(
     """
     Get habit consistency data for a recurring task
     
-    **ROOSEVELT HABIT TRACKING!** Track your consistency!
+    Habit consistency tracking
     
     Analyzes completion history to show:
     - Total completions vs expected
@@ -1051,7 +1045,7 @@ async def clock_in(
     """
     Clock in to a task
     
-    **ROOSEVELT TIME TRACKING!** Start the productivity meter!
+    Start the org clock on a heading
     
     **Body Parameters:**
     - **file_path**: File path (e.g., "OrgMode/tasks.org")
@@ -1094,7 +1088,7 @@ async def clock_out(
     """
     Clock out of current task
     
-    **ROOSEVELT CLOCK OUT!** Stop the timer and log your progress!
+    Stop the org clock and log duration
     
     Writes CLOCK entry to LOGBOOK drawer in format:
     ```
@@ -1134,7 +1128,7 @@ async def get_active_clock(
     """
     Get user's active clock if any
     
-    **ROOSEVELT CLOCK CHECK!** See if you're on the clock!
+    Return active clock state for the user
     
     **Returns:**
     - Active clock details with elapsed time, or null if not clocked in
@@ -1170,7 +1164,7 @@ async def get_time_report(
     """
     Generate time report from CLOCK entries
     
-    **ROOSEVELT TIME REPORT!** See where your time went!
+    Time tracking report for the user
     
     Analyzes LOGBOOK entries to show:
     - Total time tracked

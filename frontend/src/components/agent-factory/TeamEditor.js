@@ -17,6 +17,7 @@ import {
 } from '@mui/material';
 import { useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import { invalidateAgentHandlesQuery } from '../../services/agentFactoryService';
 
 const STATUS_OPTIONS = [
   { value: 'active', label: 'Active' },
@@ -46,6 +47,7 @@ export default function TeamEditor({ teamId, initialValues, onSuccess, onCancel 
       onSuccess: (data) => {
         queryClient.invalidateQueries('agentFactoryTeams');
         queryClient.invalidateQueries('agentFactoryLines');
+        invalidateAgentHandlesQuery(queryClient);
         onSuccess?.(data);
       },
     }
@@ -56,6 +58,7 @@ export default function TeamEditor({ teamId, initialValues, onSuccess, onCancel 
       onSuccess: (data) => {
         queryClient.invalidateQueries('agentFactoryTeams');
         queryClient.invalidateQueries(['agentFactoryTeam', teamId]);
+        invalidateAgentHandlesQuery(queryClient);
         onSuccess?.(data);
       },
     }

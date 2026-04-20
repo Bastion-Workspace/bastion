@@ -334,9 +334,9 @@ class TeamPostService:
                         # Don't fail deletion if vector cleanup fails
                         logger.warning(f"Failed to remove vectorized content for post {post_id}: {e}")
                     
-                    # Delete attachment files from disk
+                    # Delete attachment library documents
                     if attachments:
-                        await self._cleanup_attachment_files(team_id, attachments)
+                        await self._cleanup_attachment_files(team_id, attachments, user_id)
                     
                     return True
                 else:
@@ -817,54 +817,53 @@ class TeamPostService:
     async def _cleanup_attachment_files(
         self,
         team_id: str,
-        attachments: List[Dict[str, Any]]
+        attachments: List[Dict[str, Any]],
+        acting_user_id: str,
     ):
         """
-        Delete attachment files from disk
-        
-        Args:
-            team_id: Team ID
-            attachments: List of attachment metadata dicts
+        Delete attachment documents via document-service (library-backed posts).
         """
-        from pathlib import Path
-        from config import settings
-        
         try:
-            uploads_base = Path(settings.UPLOAD_DIR)
-            team_posts_dir = uploads_base / "Teams" / team_id / "posts"
-            
+            from clients.document_service_client import get_document_service_client
+
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
             deleted_count = 0
             failed_count = 0
-            
+
             for att in attachments:
-                # Get filename from file_path
-                file_path_str = att.get("file_path", "")
-                
-                if file_path_str:
-                    # Extract filename from path like /api/teams/{team_id}/posts/attachments/{filename}
-                    # The actual file is at: uploads/Teams/{team_id}/posts/{filename}
-                    filename = file_path_str.split("/")[-1]
-                    
-                    if filename:
-                        file_path = team_posts_dir / filename
-                        
-                        try:
-                            if file_path.exists():
-                                file_path.unlink()
-                                deleted_count += 1
-                                logger.info(f"Deleted attachment file: {file_path}")
-                            else:
-                                logger.warning(f"Attachment file not found: {file_path}")
-                                failed_count += 1
-                        except Exception as e:
-                            logger.error(f"Failed to delete attachment file {file_path}: {e}")
-                            failed_count += 1
-            
+                doc_id = att.get("document_id")
+                fp = att.get("file_path", "") or ""
+                if not doc_id and "/attachments/doc/" in fp:
+                    doc_id = fp.split("/attachments/doc/")[-1].split("?")[0].strip()
+                if not doc_id:
+                    logger.warning("Attachment cleanup: no document_id for %s", fp)
+                    failed_count += 1
+                    continue
+                try:
+                    ok, _data, err = await dsc.delete_file_json(
+                        acting_user_id,
+                        {"document_id": doc_id, "user_id": acting_user_id},
+                    )
+                    if ok:
+                        deleted_count += 1
+                        logger.info("Deleted team attachment document %s", doc_id)
+                    else:
+                        logger.warning(
+                            "delete_file_json failed for %s: %s",
+                            doc_id,
+                            err,
+                        )
+                        failed_count += 1
+                except Exception as e:
+                    logger.error("Failed to delete attachment %s: %s", doc_id, e)
+                    failed_count += 1
+
             if deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} attachment files for team {team_id}")
+                logger.info("Cleaned up %s team attachment documents for team %s", deleted_count, team_id)
             if failed_count > 0:
-                logger.warning(f"Failed to delete {failed_count} attachment files for team {team_id}")
-                
+                logger.warning("Failed to delete %s team attachment documents for team %s", failed_count, team_id)
+
         except Exception as e:
             logger.error(f"Failed to cleanup attachment files for team {team_id}: {e}")
             # Don't raise - attachment cleanup shouldn't fail post deletion

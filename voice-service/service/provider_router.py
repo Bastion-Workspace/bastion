@@ -10,6 +10,7 @@ from providers.stt.base_stt_provider import BaseSTTProvider
 from providers.stt.whisper_provider import WhisperProvider
 from providers.tts.base_tts_provider import BaseTTSProvider
 from providers.tts.elevenlabs_provider import ElevenLabsProvider
+from providers.tts.hedra_provider import HedraProvider
 from providers.tts.openai_provider import OpenAIProvider
 from providers.tts.piper_provider import PiperProvider
 
@@ -21,6 +22,7 @@ _tts_instances: dict = {}
 _STT_REGISTRY = {"whisper": WhisperProvider}
 _TTS_REGISTRY = {
     "elevenlabs": ElevenLabsProvider,
+    "hedra": HedraProvider,
     "openai": OpenAIProvider,
     "piper": PiperProvider,
 }

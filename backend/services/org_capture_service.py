@@ -58,7 +58,7 @@ class OrgCaptureService:
         """
         Find or create inbox.org for user
         
-        **BULLY!** Smart discovery - find existing inbox or create new one!
+        Resolve or create the user's inbox document.
         
         Strategy:
         1. Check user's org-mode settings for configured inbox_file
@@ -68,89 +68,83 @@ class OrgCaptureService:
         5. Save discovered/created location to settings for future use
         """
         try:
-            # Check org-mode settings for configured inbox
+            from services import ds_upload_library_fs as dsf
             from services.org_settings_service import get_org_settings_service
-            
+
             org_settings_service = await get_org_settings_service()
             settings_obj = await org_settings_service.get_settings(user_id)
-            
+
             user_base_dir = self.upload_dir / "Users" / username
-            
-            # If inbox_file is configured in settings, use it
+
             if settings_obj.inbox_file:
                 inbox_path = user_base_dir / settings_obj.inbox_file
-                if inbox_path.exists():
+                if await dsf.exists(user_id, inbox_path):
                     logger.info(f"📝 Using configured inbox: {inbox_path}")
                     return inbox_path
-                else:
-                    logger.warning(f"⚠️ Configured inbox not found: {inbox_path}, searching...")
-            
-            # Search for existing inbox.org in user's directory tree
-            if user_base_dir.exists():
-                logger.info(f"🔍 Searching for inbox.org in {user_base_dir}")
-                inbox_files = list(user_base_dir.rglob("inbox.org"))
-                # Exclude inbox.org inside .versions (historical snapshots)
-                inbox_files = [p for p in inbox_files if "/.versions/" not in str(p) and "\\.versions\\" not in str(p)]
-                
-                if inbox_files:
-                    # Sort by path depth (prefer deeper paths like OrgMode/inbox.org over root inbox.org)
-                    # Then alphabetically for consistency
-                    inbox_files.sort(key=lambda p: (-len(p.parts), str(p)))
-                    
-                    # Found existing inbox.org!
-                    inbox_path = inbox_files[0]
-                    logger.info(f"✅ Found existing inbox.org: {inbox_path}")
-                    
-                    if len(inbox_files) > 1:
-                        logger.warning(f"⚠️ Multiple inbox.org files found, using first: {inbox_path}")
-                        logger.warning(f"   Other locations: {[str(f) for f in inbox_files[1:]]}")
-                    
-                    # Save discovered location to settings
-                    relative_path = inbox_path.relative_to(user_base_dir)
-                    from models.org_settings_models import OrgModeSettingsUpdate
-                    await org_settings_service.create_or_update_settings(
-                        user_id,
-                        OrgModeSettingsUpdate(inbox_file=str(relative_path))
-                    )
-                    logger.info(f"💾 Saved inbox location to settings: {relative_path}")
-                    
-                    return inbox_path
-            
-            # No existing inbox found - create new one at root of user directory
-            if not user_base_dir.exists():
-                user_base_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"📁 Created user directory: {user_base_dir}")
-            
+                logger.warning(f"⚠️ Configured inbox not found: {inbox_path}, searching...")
+
+            inbox_files: list[Path] = []
+            if await dsf.is_dir(user_id, user_base_dir):
+                logger.info(f"🔍 Searching for inbox.org under {user_base_dir} (document-service)")
+                for p in await dsf.walk_org_files(user_id, username, include_archives=True):
+                    if p.name.lower() != "inbox.org":
+                        continue
+                    if "/.versions/" in str(p).replace("\\", "/"):
+                        continue
+                    inbox_files.append(p)
+
+            if inbox_files:
+                inbox_files.sort(key=lambda p: (-len(p.parts), str(p)))
+                inbox_path = inbox_files[0]
+                logger.info(f"✅ Found existing inbox.org: {inbox_path}")
+                if len(inbox_files) > 1:
+                    logger.warning(f"⚠️ Multiple inbox.org files found, using first: {inbox_path}")
+                    logger.warning(f"   Other locations: {[str(f) for f in inbox_files[1:]]}")
+
+                relative_path = inbox_path.relative_to(user_base_dir)
+                from models.org_settings_models import OrgModeSettingsUpdate
+
+                await org_settings_service.create_or_update_settings(
+                    user_id,
+                    OrgModeSettingsUpdate(inbox_file=str(relative_path)),
+                )
+                logger.info(f"💾 Saved inbox location to settings: {relative_path}")
+                return inbox_path
+
             inbox_path = user_base_dir / "inbox.org"
-            inbox_path.touch()
-            logger.info(f"📝 Created new inbox.org at {inbox_path}")
-            
-            # Save new location to settings
+            if not await dsf.exists(user_id, inbox_path):
+                await dsf.write_text(user_id, inbox_path, "")
+            logger.info(f"📝 Ensured inbox.org at {inbox_path}")
+
             from models.org_settings_models import OrgModeSettingsUpdate
+
             await org_settings_service.create_or_update_settings(
                 user_id,
-                OrgModeSettingsUpdate(inbox_file="inbox.org")
+                OrgModeSettingsUpdate(inbox_file="inbox.org"),
             )
-            logger.info(f"💾 Saved inbox location to settings: inbox.org")
-            
+            logger.info("💾 Saved inbox location to settings: inbox.org")
             return inbox_path
-            
+
         except Exception as e:
             logger.error(f"❌ Error finding/creating inbox: {e}")
             import traceback
+
             logger.error(f"   Traceback: {traceback.format_exc()}")
-            
-            # If we successfully found an inbox before the error, use it!
-            # The error might be in settings save, not inbox discovery
-            if 'inbox_path' in locals() and inbox_path and inbox_path.exists():
+
+            from services import ds_upload_library_fs as dsf
+
+            if "inbox_path" in locals() and inbox_path and await dsf.exists(user_id, inbox_path):
                 logger.warning(f"⚠️ Using found inbox despite error: {inbox_path}")
                 return inbox_path
-            
-            # Otherwise fallback to simple path
+
             user_base_dir = self.upload_dir / "Users" / username
-            user_base_dir.mkdir(parents=True, exist_ok=True)
             fallback_path = user_base_dir / "inbox.org"
-            logger.warning(f"⚠️ Fallback: Creating inbox at {fallback_path}")
+            try:
+                if not await dsf.exists(user_id, fallback_path):
+                    await dsf.write_text(user_id, fallback_path, "")
+            except Exception:
+                pass
+            logger.warning(f"⚠️ Fallback: inbox at {fallback_path}")
             return fallback_path
 
     async def _document_id_for_path(
@@ -182,7 +176,7 @@ class OrgCaptureService:
         """
         Capture content to user's inbox.org
         
-        **BULLY!** Quick capture like Emacs org-capture!
+        Append a capture entry in org-capture style.
         
         Args:
             user_id: User ID
@@ -231,17 +225,17 @@ class OrgCaptureService:
                         verr,
                     )
 
-            # Append to inbox.org
-            with open(inbox_path, 'a', encoding='utf-8') as f:
-                # Add newline if file isn't empty
-                if inbox_path.stat().st_size > 0:
-                    f.write('\n')
-                f.write(entry)
-                f.write('\n')
-            
-            # Count lines to get approximate line number
-            with open(inbox_path, 'r', encoding='utf-8') as f:
-                line_count = len(f.readlines())
+            from services import ds_upload_library_fs as dsf
+
+            cur = ""
+            try:
+                cur = await dsf.read_text(user_id, inbox_path)
+            except FileNotFoundError:
+                pass
+            suffix = (("\n" if cur.strip() else "") + entry + "\n")
+            await dsf.append_text(user_id, inbox_path, suffix)
+
+            line_count = len((await dsf.read_text(user_id, inbox_path)).splitlines())
             
             logger.info(f"✅ CAPTURE SUCCESS: Added {request.template_type} to {inbox_path.name}")
             
@@ -272,7 +266,7 @@ class OrgCaptureService:
         """
         Capture content to a specific org file
 
-        **BULLY!** Capture to any org file you want!
+        Append a capture entry to the specified org file.
 
         Args:
             user_id: User ID
@@ -293,8 +287,7 @@ class OrgCaptureService:
             user_dir = self.upload_dir / "Users" / username
             target_path = user_dir / target_file
 
-            # Create user directory if it doesn't exist
-            user_dir.mkdir(parents=True, exist_ok=True)
+            from services import ds_upload_library_fs as dsf
 
             # Format the entry based on template (with user's timezone)
             entry = await self._format_entry(request, user_id)
@@ -313,17 +306,15 @@ class OrgCaptureService:
                         verr,
                     )
 
-            # Append to target file
-            with open(target_path, 'a', encoding='utf-8') as f:
-                # Add newline if file isn't empty
-                if target_path.exists() and target_path.stat().st_size > 0:
-                    f.write('\n')
-                f.write(entry)
-                f.write('\n')
+            cur = ""
+            try:
+                cur = await dsf.read_text(user_id, target_path)
+            except FileNotFoundError:
+                pass
+            suffix = (("\n" if cur.strip() else "") + entry + "\n")
+            await dsf.append_text(user_id, target_path, suffix)
 
-            # Count lines to get approximate line number
-            with open(target_path, 'r', encoding='utf-8') as f:
-                line_count = len(f.readlines())
+            line_count = len((await dsf.read_text(user_id, target_path)).splitlines())
 
             logger.info(f"✅ CAPTURE SUCCESS: Added {request.template_type} to {target_file}")
 
@@ -349,7 +340,7 @@ class OrgCaptureService:
         """
         Format entry based on template type
         
-        **By George!** We format like BeOrg - clean and simple with user's timezone!
+        Format timestamps using the user's timezone (BeOrg-style simplicity).
         """
         # Get user's timezone preference
         from services.settings_service import SettingsService
@@ -374,7 +365,7 @@ class OrgCaptureService:
         
         # Format based on template type
         if request.template_type == "todo":
-            # TODO entry format - BeOrg style
+            # Entry format aligns with org-capture; BeOrg-style refinements may follow.
             todo_state = "TODO"
             
             # Add priority if specified

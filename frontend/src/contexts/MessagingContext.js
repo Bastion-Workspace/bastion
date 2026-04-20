@@ -6,6 +6,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import messagingService from '../services/messagingService';
 import { useAuth } from './AuthContext';
 import tabNotificationManager from '../utils/tabNotification';
+import { devLog } from '../utils/devConsole';
 
 const MessagingContext = createContext();
 
@@ -20,13 +21,19 @@ export const useMessaging = () => {
 export const MessagingProvider = ({ children }) => {
   const { user, isAuthenticated, loading: authLoading } = useAuth();
   
-  console.log('💬 MessagingProvider Render:', { isAuthenticated, user: user?.user_id, authLoading });
+  devLog('💬 MessagingProvider Render:', { isAuthenticated, user: user?.user_id, authLoading });
   
   // State
   const [rooms, setRooms] = useState([]);
   const [currentRoomId, setCurrentRoomId] = useState(null);
   const [messages, setMessages] = useState({}); // room_id -> messages array
   const [presence, setPresence] = useState({}); // user_id -> presence info
+  /** peer_id -> { [user_address]: { status, last_seen_at } } from federated_presence_batch */
+  const [federatedPresenceByPeer, setFederatedPresenceByPeer] = useState({});
+  /** message_id -> extra attachment rows merged for federated attachment_added WS */
+  const [federatedAttachmentsByMessage, setFederatedAttachmentsByMessage] = useState({});
+  /** room_id -> { user_address, last_read_at } */
+  const [federatedReadReceiptByRoom, setFederatedReadReceiptByRoom] = useState({});
   const [unreadCounts, setUnreadCounts] = useState({}); // room_id -> count
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isMessagingFullScreen, setIsMessagingFullScreen] = useState(() => {
@@ -38,11 +45,13 @@ export const MessagingProvider = ({ children }) => {
       return false;
     }
   });
+  const [typingUsersMap, setTypingUsersMap] = useState({}); // room_id -> { user_id -> { display_name, timestamp } }
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   
   const presenceUpdateInterval = useRef(null);
   const processedMessageIds = useRef(new Set());
+  const typingClearTimers = useRef({});
 
   // =====================
   // ROOM OPERATIONS
@@ -50,15 +59,15 @@ export const MessagingProvider = ({ children }) => {
 
   const loadRooms = useCallback(async () => {
     if (!isAuthenticated) {
-      console.log('💬 Skipping loadRooms - not authenticated');
+      devLog('💬 Skipping loadRooms - not authenticated');
       return;
     }
     
     try {
       setIsLoading(true);
-      console.log('Loading messaging rooms...');
+      devLog('Loading messaging rooms...');
       const userRooms = await messagingService.getUserRooms();
-      console.log(`✅ Loaded ${userRooms.length} rooms:`, userRooms);
+      devLog(`✅ Loaded ${userRooms.length} rooms:`, userRooms);
       setRooms(userRooms);
       
       // Load initial presence for all participants in all rooms
@@ -72,7 +81,7 @@ export const MessagingProvider = ({ children }) => {
       });
       
       if (participantIds.size > 0) {
-        console.log(`Fetching initial presence for ${participantIds.size} participants...`);
+        devLog(`Fetching initial presence for ${participantIds.size} participants...`);
         // We can fetch them individually or if there's a bulk endpoint use that
         // For now, let's fetch them in parallel
         Promise.all(Array.from(participantIds).map(id => messagingService.getUserPresence(id)))
@@ -82,7 +91,7 @@ export const MessagingProvider = ({ children }) => {
               if (p) presenceMap[p.user_id] = p;
             });
             setPresence(prev => ({ ...prev, ...presenceMap }));
-            console.log('✅ Initial presence loaded');
+            devLog('✅ Initial presence loaded');
           })
           .catch(err => console.error('❌ Failed to load initial presence:', err));
       }
@@ -228,17 +237,15 @@ export const MessagingProvider = ({ children }) => {
     }
   }, []);
 
-  const sendMessage = useCallback(async (roomId, content, messageType = 'text', metadata = null) => {
+  const sendMessage = useCallback(async (roomId, content, messageType = 'text', metadata = null, mentions = null, replyToMessageId = null) => {
     try {
-      const newMessage = await messagingService.sendMessage(roomId, content, messageType, metadata);
+      const newMessage = await messagingService.sendMessage(roomId, content, messageType, metadata, mentions, replyToMessageId);
       
-      // Add message to local state
       setMessages(prev => ({
         ...prev,
         [roomId]: [...(prev[roomId] || []), newMessage]
       }));
       
-      // Update room's last message time
       setRooms(prev => prev.map(room =>
         room.room_id === roomId
           ? { ...room, last_message_at: newMessage.created_at }
@@ -247,7 +254,7 @@ export const MessagingProvider = ({ children }) => {
       
       return newMessage;
     } catch (error) {
-      console.error('❌ Failed to send message:', error);
+      console.error('Failed to send message:', error);
       throw error;
     }
   }, []);
@@ -263,6 +270,24 @@ export const MessagingProvider = ({ children }) => {
       }));
     } catch (error) {
       console.error('❌ Failed to delete message:', error);
+      throw error;
+    }
+  }, []);
+
+  const editMessage = useCallback(async (roomId, messageId, content) => {
+    try {
+      const updated = await messagingService.editMessage(roomId, messageId, content);
+      setMessages(prev => ({
+        ...prev,
+        [roomId]: (prev[roomId] || []).map(msg =>
+          msg.message_id === messageId
+            ? { ...msg, content: updated.content, is_edited: true, edited_at: updated.edited_at }
+            : msg
+        )
+      }));
+      return updated;
+    } catch (error) {
+      console.error('Failed to edit message:', error);
       throw error;
     }
   }, []);
@@ -348,11 +373,9 @@ export const MessagingProvider = ({ children }) => {
     if (!isAuthenticated) return;
     
     const handleNewMessage = (message) => {
-      // De-duplication check: Skip if we've already processed this message ID
       if (!message.message_id) {
-        console.warn('💬 Received message without message_id, skipping deduplication check');
+        console.warn('Received message without message_id, skipping deduplication check');
       } else if (processedMessageIds.current.has(message.message_id)) {
-        console.log(`💬 Skipping duplicate message ${message.message_id} in room WebSocket handler`);
         return;
       }
       if (message.message_id) {
@@ -364,7 +387,6 @@ export const MessagingProvider = ({ children }) => {
         [roomId]: [...(prev[roomId] || []), message]
       }));
       
-      // Increment unread count if not current room
       if (roomId !== currentRoomId) {
         setUnreadCounts(prev => ({
           ...prev,
@@ -372,7 +394,6 @@ export const MessagingProvider = ({ children }) => {
         }));
       }
       
-      // Update room's last message time and check for notifications
       setRooms(prev => {
         const updated = prev.map(room =>
           room.room_id === roomId
@@ -380,7 +401,6 @@ export const MessagingProvider = ({ children }) => {
             : room
         ).sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at));
         
-        // Flash tab notification if not current room and not muted
         if (roomId !== currentRoomId) {
           const room = updated.find(r => r.room_id === roomId);
           const notificationSettings = room?.notification_settings || {};
@@ -403,9 +423,46 @@ export const MessagingProvider = ({ children }) => {
         }
       }));
     };
+
+    const handleTyping = (data) => {
+      const typingUserId = data.user_id;
+      if (typingUserId === user?.user_id) return;
+
+      if (data.is_typing) {
+        const displayName = data.display_name || typingUserId;
+        setTypingUsersMap(prev => ({
+          ...prev,
+          [roomId]: {
+            ...(prev[roomId] || {}),
+            [typingUserId]: { display_name: displayName, timestamp: Date.now() }
+          }
+        }));
+        const timerKey = `${roomId}:${typingUserId}`;
+        if (typingClearTimers.current[timerKey]) clearTimeout(typingClearTimers.current[timerKey]);
+        typingClearTimers.current[timerKey] = setTimeout(() => {
+          setTypingUsersMap(prev => {
+            const roomTyping = { ...(prev[roomId] || {}) };
+            delete roomTyping[typingUserId];
+            return { ...prev, [roomId]: roomTyping };
+          });
+          delete typingClearTimers.current[timerKey];
+        }, 3000);
+      } else {
+        setTypingUsersMap(prev => {
+          const roomTyping = { ...(prev[roomId] || {}) };
+          delete roomTyping[typingUserId];
+          return { ...prev, [roomId]: roomTyping };
+        });
+        const timerKey = `${roomId}:${typingUserId}`;
+        if (typingClearTimers.current[timerKey]) {
+          clearTimeout(typingClearTimers.current[timerKey]);
+          delete typingClearTimers.current[timerKey];
+        }
+      }
+    };
     
-    messagingService.connectToRoom(roomId, handleNewMessage, handlePresenceUpdate);
-  }, [isAuthenticated, currentRoomId]);
+    messagingService.connectToRoom(roomId, handleNewMessage, handlePresenceUpdate, handleTyping);
+  }, [isAuthenticated, currentRoomId, user]);
 
   const disconnectFromRoom = useCallback((roomId) => {
     messagingService.disconnectFromRoom(roomId);
@@ -494,12 +551,16 @@ export const MessagingProvider = ({ children }) => {
   const totalUnreadCount = unreadCountValues.reduce((sum, count) => sum + count, 0);
   
   if (totalUnreadCount > 0) {
-    console.log(`📊 totalUnreadCount updated: ${totalUnreadCount} across ${unreadCountValues.length} rooms`);
+    devLog(`📊 totalUnreadCount updated: ${totalUnreadCount} across ${unreadCountValues.length} rooms`);
   }
 
   const currentRoom = rooms.find(r => r.room_id === currentRoomId);
-
   const currentMessages = messages[currentRoomId] || [];
+  const currentTypingMap = typingUsersMap[currentRoomId] || {};
+  const typingUsers = Object.entries(currentTypingMap).map(([uid, info]) => ({
+    user_id: uid,
+    display_name: info.display_name,
+  }));
 
   // =====================
   // EFFECTS
@@ -507,15 +568,18 @@ export const MessagingProvider = ({ children }) => {
 
   // Load rooms on mount/auth change
   useEffect(() => {
-    console.log(`💬 MessagingProvider Auth Effect: isAuthenticated=${isAuthenticated}, user=${user?.user_id}`);
+    devLog(`💬 MessagingProvider Auth Effect: isAuthenticated=${isAuthenticated}, user=${user?.user_id}`);
     if (isAuthenticated && user) {
       loadRooms();
     } else if (!isAuthenticated) {
       // Clear state on logout
-      console.log('💬 Clearing messaging state (not authenticated)');
+      devLog('💬 Clearing messaging state (not authenticated)');
       setRooms([]);
       setMessages({});
       setPresence({});
+      setFederatedPresenceByPeer({});
+      setFederatedAttachmentsByMessage({});
+      setFederatedReadReceiptByRoom({});
       setUnreadCounts({});
       setCurrentRoomId(null);
     }
@@ -524,7 +588,7 @@ export const MessagingProvider = ({ children }) => {
   // Connect user WebSocket for global notifications
   useEffect(() => {
     if (isAuthenticated && user) {
-      console.log('💬 Initializing User WebSocket connection...');
+      devLog('💬 Initializing User WebSocket connection...');
       messagingService.connectUserWebSocket();
       
       return () => {
@@ -569,24 +633,109 @@ export const MessagingProvider = ({ children }) => {
     return unregister;
   }, []);
 
+  useEffect(() => {
+    const unregister = messagingService.registerFederatedPresenceHandler((data) => {
+      if (data.type !== 'federated_presence_batch' || !Array.isArray(data.entries)) return;
+      setFederatedPresenceByPeer((prev) => {
+        const next = { ...prev };
+        for (const ent of data.entries) {
+          const pid = ent.peer_id;
+          const addr = ent.user_address;
+          if (!pid || !addr) continue;
+          next[pid] = { ...(next[pid] || {}) };
+          next[pid][addr] = {
+            status: ent.status || 'offline',
+            last_seen_at: ent.last_seen_at || null,
+          };
+        }
+        return next;
+      });
+    });
+    return unregister;
+  }, []);
+
   // Register room update handler - stable registration
   useEffect(() => {
     if (!isAuthenticated) return;
     
-    console.log('💬 Registering global room update handler');
+    devLog('💬 Registering global room update handler');
     const unregister = messagingService.registerRoomUpdateHandler((updateData) => {
-      console.log('💬 Room update received via WebSocket:', updateData);
+      devLog('💬 Room update received via WebSocket:', updateData);
       
       if (updateData.type === 'room_updated') {
-        // Room name changed
         setRooms(prev => prev.map(room =>
           room.room_id === updateData.room_id
             ? { ...room, room_name: updateData.room_name }
             : room
         ));
       } else if (updateData.type === 'participant_added') {
-        // Participant added - reload room to get updated participant list
         loadRooms();
+      } else if (updateData.type === 'message_edited') {
+        const edited = updateData.message;
+        if (edited && edited.room_id) {
+          setMessages(prev => ({
+            ...prev,
+            [edited.room_id]: (prev[edited.room_id] || []).map(msg =>
+              msg.message_id === edited.message_id
+                ? { ...msg, content: edited.content, is_edited: true, edited_at: edited.edited_at }
+                : msg
+            )
+          }));
+        }
+      } else if (updateData.type === 'reaction_update') {
+        const { room_id: rid, message_id: mid, emoji, action, federated_user_id: fid } = updateData;
+        if (!rid || !mid || !emoji) return;
+        setMessages((prev) => ({
+          ...prev,
+          [rid]: (prev[rid] || []).map((msg) => {
+            if (msg.message_id !== mid) return msg;
+            let reactions = [...(msg.reactions || [])];
+            if (action === 'remove') {
+              reactions = reactions.filter(
+                (r) => !(r.emoji === emoji && String(r.federated_user_id || '') === String(fid || ''))
+              );
+            } else {
+              const exists = reactions.some(
+                (r) => r.emoji === emoji && String(r.federated_user_id || '') === String(fid || '')
+              );
+              if (!exists) {
+                reactions.push({
+                  emoji,
+                  user_id: null,
+                  federated_user_id: fid,
+                  reaction_id: `fed-${fid}-${emoji}`,
+                });
+              }
+            }
+            return { ...msg, reactions };
+          }),
+        }));
+      } else if (updateData.type === 'attachment_added') {
+        const mid = updateData.message_id;
+        const atts = updateData.attachments || [];
+        if (!mid || !atts.length) return;
+        setFederatedAttachmentsByMessage((prev) => {
+          const existing = prev[mid] || [];
+          const seen = new Set(existing.map((a) => a.attachment_id));
+          const merged = [...existing];
+          for (const a of atts) {
+            if (a.attachment_id && !seen.has(a.attachment_id)) {
+              merged.push(a);
+              seen.add(a.attachment_id);
+            }
+          }
+          return { ...prev, [mid]: merged };
+        });
+      } else if (updateData.type === 'federated_read_receipt') {
+        const rid = updateData.room_id;
+        if (!rid) return;
+        setFederatedReadReceiptByRoom((prev) => ({
+          ...prev,
+          [rid]: {
+            user_address: updateData.user_address,
+            last_read_at: updateData.last_read_at,
+          },
+        }));
       } else if (updateData.type === 'new_message') {
         // New message received - update unread count and timestamp
         const message = updateData.message;
@@ -594,12 +743,12 @@ export const MessagingProvider = ({ children }) => {
         
         // De-duplication check: Skip if we've already processed this message ID
         if (processedMessageIds.current.has(message.message_id)) {
-          console.log(`💬 Skipping duplicate message ${message.message_id}`);
+          devLog(`💬 Skipping duplicate message ${message.message_id}`);
           return;
         }
         processedMessageIds.current.add(message.message_id);
         
-        console.log(`💬 New message received via WebSocket for room ${roomId}:`, message);
+        devLog(`💬 New message received via WebSocket for room ${roomId}:`, message);
         
         // Update room timestamp
         setRooms(prev => {
@@ -639,7 +788,7 @@ export const MessagingProvider = ({ children }) => {
               ...prev,
               [roomId]: (prev[roomId] || 0) + 1
             };
-            console.log(`📊 Updated unread counts for room ${roomId}: ${newCounts[roomId]}`);
+            devLog(`📊 Updated unread counts for room ${roomId}: ${newCounts[roomId]}`);
             return newCounts;
           });
           
@@ -661,7 +810,7 @@ export const MessagingProvider = ({ children }) => {
   // Register new room handler
   useEffect(() => {
     const unregister = messagingService.registerNewRoomHandler((data) => {
-      console.log('💬 New room received:', data);
+      devLog('💬 New room received:', data);
       
       // Add new room to list
       setRooms(prev => [data.room, ...prev]);
@@ -684,6 +833,10 @@ export const MessagingProvider = ({ children }) => {
     currentRoom,
     messages: currentMessages,
     presence,
+    federatedPresenceByPeer,
+    federatedAttachmentsByMessage,
+    federatedReadReceiptByRoom,
+    typingUsers,
     unreadCounts,
     totalUnreadCount,
     isDrawerOpen,
@@ -703,6 +856,7 @@ export const MessagingProvider = ({ children }) => {
     // Message operations
     loadMessages,
     sendMessage,
+    editMessage,
     deleteMessage,
     addReaction,
     removeReaction,

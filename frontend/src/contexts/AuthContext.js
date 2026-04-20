@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import apiService from '../services/apiService';
+import { lockAllRegistered } from '../services/encryptionSessionRegistry';
 
 const AuthContext = createContext(null);
 
@@ -71,6 +72,11 @@ export const AuthProvider = ({ children }) => {
     } catch (error) {
       console.error('Logout error:', error);
     } finally {
+      try {
+        await lockAllRegistered();
+      } catch {
+        /* best-effort */
+      }
       // Clear local state regardless of API call success
       localStorage.removeItem('auth_token');
       setUser(null);

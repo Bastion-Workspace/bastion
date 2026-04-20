@@ -182,7 +182,7 @@ class Crawl4AIWebTools:
                                 content_blocks = extracted_data
                             elif isinstance(extracted_data, dict):
                                 content_blocks = [extracted_data]
-                        except:
+                        except Exception:
                             content_blocks = [{"content": extracted_content, "type": "text"}]
                     
                     # Build metadata
@@ -733,25 +733,4 @@ async def crawl_web_content(
         word_count_threshold=word_count_threshold,
         user_id=user_id,
         max_urls=max_urls
-    )
-
-async def crawl_site(
-    seed_url: str,
-    query_criteria: str,
-    max_pages: int = 50,
-    max_depth: int = 2,
-    allowed_path_prefix: Optional[str] = None,
-    include_pdfs: bool = False,
-    user_id: str = None
-) -> Dict[str, Any]:
-    """Module-level wrapper for crawl_site tool"""
-    instance = await get_crawl4ai_instance()
-    return await instance.crawl_site(
-        seed_url=seed_url,
-        query_criteria=query_criteria,
-        max_pages=max_pages,
-        max_depth=max_depth,
-        allowed_path_prefix=allowed_path_prefix,
-        include_pdfs=include_pdfs,
-        user_id=user_id
     )

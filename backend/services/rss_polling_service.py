@@ -259,7 +259,7 @@ class RSSPollingService:
         """
         Validate feed URL before fetching.
         
-        **ROOSEVELT FIX**: Prevents attempting to fetch invalid URLs that would fail anyway.
+        Skip feeds with invalid or empty URLs
         """
         try:
             from urllib.parse import urlparse
@@ -272,7 +272,7 @@ class RSSPollingService:
         """
         Poll a single feed with timeout protection.
         
-        **ROOSEVELT FIX**: Prevents hung feeds from blocking the entire polling cycle.
+        Isolate hung feeds so one feed cannot block the poll cycle
         Default timeout is 5 minutes per feed.
         """
         try:
@@ -428,11 +428,6 @@ class RSSPollingService:
                     save_success = await self._save_article(article)
                     if save_success:
                         articles_added += 1
-                        # Also upsert a simple News headline so it surfaces in News API
-                        try:
-                            await self._upsert_news_from_rss(article, feed)
-                        except Exception as news_e:
-                            logger.warning(f"⚠️ RSS AGENT: Failed to upsert news from RSS article {article.article_id}: {news_e}")
                     else:
                         logger.error(f"📡 RSS AGENT: Failed to save article: {article.title}")
                     
@@ -463,96 +458,6 @@ class RSSPollingService:
                 await rss_service.mark_feed_polling(feed.feed_id, is_polling=False)
             except Exception as cleanup_error:
                 logger.error(f"❌ RSS AGENT ERROR: Failed to cleanup polling status for {feed.feed_id}: {cleanup_error}")
-
-    async def _upsert_news_from_rss(self, article: "RSSArticle", feed: "RSSFeed") -> None:
-        """Create a minimal News article from an RSS article and upsert into NewsService."""
-        try:
-            from services.service_container import get_service_container
-            from models.news_models import NewsArticleSynth, NewsSourceRef
-
-            service_container = await get_service_container()
-            news_service = getattr(service_container, 'news_service', None)
-            if not news_service:
-                return
-
-            # Build a conservative lede and body
-            lede = (article.description or article.full_content or "").strip()
-            if len(lede) > 280:
-                lede = (lede[:277] + "...").strip()
-
-            # Ensure we have robust full content: fetch if missing/too short
-            try:
-                need_full = not article.full_content or len(article.full_content.strip()) < 800
-                if need_full:
-                    fc_text, fc_html, fc_images = await self.extract_full_content(article.link)
-                    if fc_text or fc_html:
-                        article.full_content = self._html_to_plain_text(fc_text or fc_html or "")
-                        if fc_html:
-                            article.full_content_html = self._sanitize_article_html(fc_html, article.link)
-                        if fc_images:
-                            article.images = fc_images
-            except Exception:
-                pass
-
-            # Enforce freshness before News upsert (skip very old items)
-            try:
-                from services.settings_service import settings_service
-                if not getattr(settings_service, "_initialized", False):
-                    await settings_service.initialize()
-                recency_minutes = int(await settings_service.get_setting("news.recency_minutes", 60))
-                if article.published_date:
-                    age = (datetime.utcnow() - article.published_date).total_seconds() / 60.0
-                    if age > recency_minutes:
-                        logger.info(f"⏱️ Skipping News upsert for stale article {article.article_id} (> {recency_minutes} min)")
-                        # Still save RSS article but skip News upsert
-                        # Fall through without building body; balanced_body unused when skipping
-                        pass
-            except Exception:
-                pass
-
-            # Build a conservative body by stripping common footer boilerplate and images
-            def _strip_boilerplate(text: str) -> str:
-                if not text:
-                    return ""
-                import re as _re
-                t = text
-                # Remove 'The post ... appeared first on ...' and variants
-                t = _re.sub(r"\bThe post\s+.*?\s+appeared first on\s+.*$", "", t, flags=_re.IGNORECASE)
-                t = _re.sub(r"\s*appeared first on\s+.*$", "", t, flags=_re.IGNORECASE)
-                # Remove leading/trailing inline image tag fragments
-                t = _re.sub(r"^\s*<img[^>]*>\s*", "", t, flags=_re.IGNORECASE)
-                t = _re.sub(r"^\s*<[^>]*attachment-post[^>]*>\s*", "", t, flags=_re.IGNORECASE)
-                return t.strip()
-
-            # Prefer full content if present after extraction
-            body_source = article.full_content or article.description or ""
-            balanced_body = _strip_boilerplate(body_source.strip()) or article.title
-
-            citation = NewsSourceRef(
-                name=feed.feed_name,
-                url=article.link,
-                published_at=article.published_date.isoformat() if article.published_date else None,
-            )
-
-            # Compute severity (single-source → likely normal)
-            severity = news_service.compute_severity([citation], [article.published_date] if article.published_date else [])
-
-            news = NewsArticleSynth(
-                id=article.article_id,
-                title=article.title,
-                lede=lede or article.title,
-                balanced_body=balanced_body,
-                key_points=[],
-                citations=[citation],
-                diversity_score=0.0,
-                severity=severity,
-                images=article.images,
-            )
-
-            await news_service.upsert_article(news)
-        except Exception as e:
-            # Log and continue; failure here should not impact RSS ingest
-            logger.warning(f"⚠️ Failed to upsert News from RSS: {e}")
     
     def _feed_needs_polling(self, feed: RSSFeed) -> bool:
         """Check if a feed needs polling based on its check interval"""

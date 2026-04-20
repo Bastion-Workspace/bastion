@@ -4,12 +4,15 @@ Extracted from main.py to improve modularity
 """
 
 import logging
-import os
+import mimetypes
 import re
 import uuid
+from io import BytesIO
 from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, Depends, Request, File, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from models.api_models import (
     LoginRequest, LoginResponse, UserCreateRequest, UserUpdateRequest,
     PasswordChangeRequest, UserResponse, UsersListResponse, AuthenticatedUserResponse
@@ -17,6 +20,8 @@ from models.api_models import (
 from services.auth_service import auth_service
 from utils.auth_middleware import get_current_user, require_admin
 from config import settings
+from clients.document_service_client import get_document_service_client
+from services.service_container import get_service_container
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +137,23 @@ async def update_profile(
 ):
     """Update current user's profile (email, display_name). Same field admins see in User Management."""
     try:
-        # Only allow email and display_name for self-update
+        # Only allow safe self-service fields (federation toggle when feature is on)
+        fed_on = getattr(settings, "FEDERATION_ENABLED", False)
         request = UserUpdateRequest(
             email=update_request.email,
             display_name=update_request.display_name,
             avatar_url=None,
             role=None,
             is_active=None,
+            federation_discoverable=(
+                update_request.federation_discoverable if fed_on else None
+            ),
+            federation_share_read_receipts=(
+                update_request.federation_share_read_receipts if fed_on else None
+            ),
+            federation_share_presence=(
+                update_request.federation_share_presence if fed_on else None
+            ),
         )
         result = await auth_service.update_user(current_user.user_id, request)
         if not result:
@@ -263,30 +278,30 @@ async def upload_user_avatar(
         
         # Sanitize filename
         sanitized_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename)
-        
-        # Create user avatars directory
-        uploads_base = Path(os.getenv("UPLOAD_DIR", "/opt/bastion/uploads"))
-        avatars_dir = uploads_base / "Users" / user_id / "avatars"
-        avatars_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate unique filename
         file_ext = Path(sanitized_filename).suffix
         unique_filename = f"avatar_{uuid.uuid4()}{file_ext}"
-        file_path = avatars_dir / unique_filename
-        
-        # Save file
-        with open(file_path, "wb") as f:
-            f.write(content)
-        
-        # Update user's avatar_url in database
-        avatar_url = f"/api/auth/users/{user_id}/avatar/{unique_filename}"
+        rel_name = f"avatars/{unique_filename}"
+
+        buf = BytesIO(content)
+        wrapped = StarletteUploadFile(filename=rel_name, file=buf)
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        try:
+            up = await dsc.upload_via_document_service(
+                wrapped,
+                doc_type="image",
+                user_id=user_id,
+                exempt_from_vectorization=True,
+            )
+        except Exception as e:
+            logger.error(f"Avatar upload to document-service failed: {e}")
+            raise HTTPException(status_code=500, detail="Failed to upload avatar")
+
+        avatar_url = f"/api/auth/users/{user_id}/avatar/doc/{up.document_id}"
         update_request = UserUpdateRequest(avatar_url=avatar_url)
         result = await auth_service.update_user(user_id, update_request)
         
         if not result:
-            # Cleanup file if update failed
-            if file_path.exists():
-                file_path.unlink()
             raise HTTPException(status_code=500, detail="Failed to update avatar URL")
         
         return {
@@ -301,32 +316,64 @@ async def upload_user_avatar(
         raise HTTPException(status_code=500, detail="Failed to upload avatar")
 
 
+@router.get("/api/auth/users/{user_id}/avatar/doc/{document_id}")
+async def get_user_avatar_by_document(
+    user_id: str,
+    document_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Serve user avatar from document-service (library binary)."""
+    try:
+        async def _gen():
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            async for chunk in dsc.download_document_stream(document_id, user_id):
+                if chunk.data:
+                    yield chunk.data
+
+        return StreamingResponse(_gen(), media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve user avatar (doc): {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve avatar")
+
+
 @router.get("/api/auth/users/{user_id}/avatar/{filename}")
 async def get_user_avatar(
     user_id: str,
     filename: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Serve user avatar image"""
+    """Serve user avatar by stored filename (legacy) or resolve via DB and stream from DS."""
     try:
-        # Users can view any user's avatar
-        uploads_base = Path(os.getenv("UPLOAD_DIR", "/opt/bastion/uploads"))
-        file_path = uploads_base / "Users" / user_id / "avatars" / filename
-        
-        if not file_path.exists():
+        container = await get_service_container()
+        document_service = container.document_service
+        doc = None
+        for candidate in (f"avatars/{filename}", filename):
+            doc = await document_service.document_repository.find_by_filename_and_context(
+                filename=candidate,
+                user_id=user_id,
+                collection_type="user",
+                folder_id=None,
+            )
+            if doc:
+                break
+        if not doc:
             raise HTTPException(status_code=404, detail="Avatar not found")
-        
-        # Determine media type
-        import mimetypes
-        media_type, _ = mimetypes.guess_type(str(file_path))
+
+        media_type, _ = mimetypes.guess_type(filename)
         if not media_type:
             media_type = "image/jpeg"
-        
-        return FileResponse(
-            path=str(file_path),
-            media_type=media_type,
-            filename=filename
-        )
+
+        async def _gen():
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            async for chunk in dsc.download_document_stream(doc.document_id, user_id):
+                if chunk.data:
+                    yield chunk.data
+
+        return StreamingResponse(_gen(), media_type=media_type)
     
     except HTTPException:
         raise

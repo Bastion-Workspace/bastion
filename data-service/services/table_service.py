@@ -4,7 +4,7 @@ import os
 import tempfile
 import uuid
 import re
-from datetime import datetime
+from datetime import date, datetime, timezone
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import json
@@ -20,12 +20,17 @@ SCHEMA_TYPE_TO_PG = {
     'TEXT': 'TEXT',
     'INTEGER': 'BIGINT',
     'REAL': 'DOUBLE PRECISION',
+    'FLOAT': 'DOUBLE PRECISION',
     'BOOLEAN': 'BOOLEAN',
     'TIMESTAMP': 'TIMESTAMP WITH TIME ZONE',
     'DATE': 'DATE',
     'JSON': 'JSONB',
+    'REFERENCE': 'JSONB',
 }
 DEFAULT_PG_TYPE = 'TEXT'
+
+BASTION_REF_KEY = "_bastion_ref"
+REF_SCHEMA_VERSION = 1
 
 
 class TableService:
@@ -152,6 +157,541 @@ class TableService:
             user_team_ids=user_team_ids
         )
         logger.info(f"Dropped native table: {schema_name}.{table_name}")
+
+    def _schema_column_defs_by_name(self, schema: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Map schema column name -> column definition dict."""
+        if not schema or not isinstance(schema, dict):
+            return {}
+        cols = schema.get("columns") or []
+        if not isinstance(cols, list):
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for col in cols:
+            if not isinstance(col, dict):
+                continue
+            name = col.get("name")
+            if not name:
+                continue
+            out[str(name)] = col
+        return out
+
+    def _pg_type_for_schema_col(self, col_def: Dict[str, Any]) -> str:
+        col_type = str(col_def.get("type") or "TEXT").upper()
+        return SCHEMA_TYPE_TO_PG.get(col_type, DEFAULT_PG_TYPE)
+
+    def _coerce_cell_json_value(self, value: Any) -> Any:
+        """Parse JSON string cell values (e.g. from APIs) into Python objects."""
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return value
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    def _extract_bastion_ref_inner(self, value: Any) -> Optional[Dict[str, Any]]:
+        if value is None:
+            return None
+        value = self._coerce_cell_json_value(value)
+        if not isinstance(value, dict):
+            return None
+        inner = value.get(BASTION_REF_KEY)
+        if isinstance(inner, dict):
+            return inner
+        if value.get("table_id") and value.get("row_id"):
+            return value
+        return None
+
+    def _preview_subset_from_row_data(
+        self, row_data: Dict[str, Any], label_field: str, max_keys: int = 4
+    ) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        n = 0
+        for k, v in row_data.items():
+            if k == label_field or n >= max_keys:
+                continue
+            if v is None or isinstance(v, (dict, list)):
+                continue
+            out[str(k)] = v.isoformat() if hasattr(v, "isoformat") else v
+            n += 1
+        return out
+
+    async def _get_row_snapshot(
+        self,
+        table_id: str,
+        row_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        table = await self.get_table(table_id, user_id=user_id, user_team_ids=user_team_ids)
+        if not table:
+            return None
+        storage_type = table.get("storage_type") or "jsonb"
+        schema_raw = table.get("schema_json")
+        schema = json.loads(schema_raw) if isinstance(schema_raw, str) else (schema_raw or {})
+
+        if storage_type == "native":
+            workspace_id = await self._get_workspace_id_for_database(
+                table["database_id"], user_id=user_id, user_team_ids=user_team_ids
+            )
+            if not workspace_id:
+                return None
+            schema_name = self._workspace_schema_name(workspace_id)
+            is_schema_only = table.get("_schema_only") is True
+            physical_name = table_id if is_schema_only else f't_{table_id.replace("-", "_")}'
+            cols = [
+                str(c["name"])
+                for c in (schema.get("columns") or [])
+                if isinstance(c, dict) and c.get("name")
+            ]
+            if not cols:
+                q = (
+                    f'SELECT row_id FROM "{schema_name}"."{physical_name}" '
+                    f'WHERE row_id = $1'
+                )
+                row = await self.db.fetchrow(
+                    q, row_id, user_id=user_id, user_team_ids=user_team_ids
+                )
+                if not row:
+                    return None
+                return {"row_id": str(row["row_id"]), "row_data": {}}
+            safe = [self._sanitize_sql_identifier(c) for c in cols]
+            sel = ", ".join(f'"{s}"' for s in safe)
+            q = (
+                f'SELECT row_id, {sel} FROM "{schema_name}"."{physical_name}" '
+                f'WHERE row_id = $1'
+            )
+            row = await self.db.fetchrow(
+                q, row_id, user_id=user_id, user_team_ids=user_team_ids
+            )
+            if not row:
+                return None
+            rd: Dict[str, Any] = {}
+            for k in row.keys():
+                if k == "row_id":
+                    continue
+                v = row[k]
+                rd[k] = v.isoformat() if v is not None and hasattr(v, "isoformat") else v
+            return {"row_id": str(row["row_id"]), "row_data": rd}
+
+        r = await self.db.fetchrow(
+            """
+            SELECT row_id, row_data FROM custom_data_rows
+            WHERE table_id = $1 AND row_id = $2
+            """,
+            table_id,
+            row_id,
+            user_id=user_id,
+            user_team_ids=user_team_ids,
+        )
+        if not r:
+            return None
+        rd = json.loads(r["row_data"]) if isinstance(r["row_data"], str) else r["row_data"]
+        if not isinstance(rd, dict):
+            rd = {}
+        return {"row_id": r["row_id"], "row_data": rd}
+
+    async def _batch_fetch_row_data_for_table(
+        self,
+        table_id: str,
+        row_ids: List[str],
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        uniq = list(dict.fromkeys([x for x in row_ids if x]))
+        if not uniq:
+            return {}
+        table = await self.get_table(table_id, user_id=user_id, user_team_ids=user_team_ids)
+        if not table:
+            return {}
+        storage_type = table.get("storage_type") or "jsonb"
+        schema_raw = table.get("schema_json")
+        schema = json.loads(schema_raw) if isinstance(schema_raw, str) else (schema_raw or {})
+        out: Dict[str, Dict[str, Any]] = {}
+
+        if storage_type == "native":
+            workspace_id = await self._get_workspace_id_for_database(
+                table["database_id"], user_id=user_id, user_team_ids=user_team_ids
+            )
+            if not workspace_id:
+                return {}
+            schema_name = self._workspace_schema_name(workspace_id)
+            is_schema_only = table.get("_schema_only") is True
+            physical_name = table_id if is_schema_only else f't_{table_id.replace("-", "_")}'
+            cols = [
+                str(c["name"])
+                for c in (schema.get("columns") or [])
+                if isinstance(c, dict) and c.get("name")
+            ]
+            if not cols:
+                rows = await self.db.fetch(
+                    f'SELECT row_id FROM "{schema_name}"."{physical_name}" '
+                    f'WHERE row_id = ANY($1::varchar[])',
+                    uniq,
+                    user_id=user_id,
+                    user_team_ids=user_team_ids,
+                )
+                for row in rows:
+                    out[str(row["row_id"])] = {}
+                return out
+            safe = [self._sanitize_sql_identifier(c) for c in cols]
+            sel = ", ".join(f'"{s}"' for s in safe)
+            q = (
+                f'SELECT row_id, {sel} FROM "{schema_name}"."{physical_name}" '
+                f'WHERE row_id = ANY($1::varchar[])'
+            )
+            rows = await self.db.fetch(
+                q, uniq, user_id=user_id, user_team_ids=user_team_ids
+            )
+            for row in rows:
+                rd: Dict[str, Any] = {}
+                for k in row.keys():
+                    if k == "row_id":
+                        continue
+                    v = row[k]
+                    rd[k] = v.isoformat() if v is not None and hasattr(v, "isoformat") else v
+                out[str(row["row_id"])] = rd
+            return out
+
+        rows = await self.db.fetch(
+            """
+            SELECT row_id, row_data FROM custom_data_rows
+            WHERE table_id = $1 AND row_id = ANY($2::varchar[])
+            """,
+            table_id,
+            uniq,
+            user_id=user_id,
+            user_team_ids=user_team_ids,
+        )
+        for r in rows:
+            rd = json.loads(r["row_data"]) if isinstance(r["row_data"], str) else r["row_data"]
+            if not isinstance(rd, dict):
+                rd = {}
+            out[str(r["row_id"])] = rd
+        return out
+
+    async def _normalize_reference_column_value(
+        self,
+        source_table: Dict[str, Any],
+        col_def: Dict[str, Any],
+        value: Any,
+        user_id: Optional[str],
+        user_team_ids: Optional[List[str]] = None,
+    ) -> Any:
+        ctype = str(col_def.get("type") or "TEXT").upper()
+        if ctype != "REFERENCE":
+            return value
+        ref_block = col_def.get("ref") if isinstance(col_def.get("ref"), dict) else {}
+        target_table_id = ref_block.get("target_table_id")
+        if not target_table_id:
+            raise ValueError(
+                f'REFERENCE column "{col_def.get("name")}" requires ref.target_table_id in schema'
+            )
+        if value is None or value == "" or value == {}:
+            return None
+        inner = self._extract_bastion_ref_inner(value)
+        if inner is None:
+            raise ValueError(
+                f'REFERENCE column "{col_def.get("name")}" expects an object with '
+                f'"{BASTION_REF_KEY}" (table_id, row_id, …)'
+            )
+        tid = str(inner.get("table_id") or target_table_id)
+        rid = inner.get("row_id")
+        if not rid:
+            raise ValueError("REFERENCE value requires row_id")
+        rid = str(rid)
+        if tid != str(target_table_id):
+            raise ValueError("REFERENCE table_id does not match column ref.target_table_id")
+        target = await self.get_table(tid, user_id=user_id, user_team_ids=user_team_ids)
+        if not target:
+            raise ValueError("Referenced table not found")
+        if target.get("database_id") != source_table.get("database_id"):
+            raise ValueError("REFERENCE target must be in the same database as the source table")
+        snap = await self._get_row_snapshot(tid, rid, user_id=user_id, user_team_ids=user_team_ids)
+        if not snap:
+            raise ValueError("Referenced row does not exist")
+        rd = snap["row_data"]
+        label_field = str(ref_block.get("label_field") or "name")
+        label_val = rd.get(label_field)
+        if label_val is None or (isinstance(label_val, str) and not label_val.strip()):
+            label_val = None
+            for _k, v in rd.items():
+                if v is None:
+                    continue
+                if isinstance(v, (dict, list)):
+                    continue
+                s = v.isoformat() if hasattr(v, "isoformat") else str(v)
+                if s.strip():
+                    label_val = s
+                    break
+        if label_val is None:
+            label_val = rid
+        else:
+            label_val = (
+                label_val.isoformat()
+                if hasattr(label_val, "isoformat")
+                else str(label_val)
+            )
+        preview = self._preview_subset_from_row_data(rd, label_field)
+        canonical = {
+            "v": REF_SCHEMA_VERSION,
+            "table_id": tid,
+            "row_id": rid,
+            "label": label_val,
+        }
+        if preview:
+            canonical["preview"] = preview
+        return {BASTION_REF_KEY: canonical}
+
+    async def _normalize_row_reference_fields(
+        self,
+        source_table: Dict[str, Any],
+        schema: Dict[str, Any],
+        row_data: Dict[str, Any],
+        user_id: Optional[str],
+        user_team_ids: Optional[List[str]] = None,
+        only_keys: Optional[set] = None,
+    ) -> Dict[str, Any]:
+        out = dict(row_data)
+        for col in schema.get("columns") or []:
+            if not isinstance(col, dict) or not col.get("name"):
+                continue
+            if str(col.get("type") or "").upper() != "REFERENCE":
+                continue
+            name = str(col["name"])
+            if only_keys is not None and name not in only_keys:
+                continue
+            if name not in out:
+                continue
+            out[name] = await self._normalize_reference_column_value(
+                source_table, col, out[name], user_id, user_team_ids=user_team_ids
+            )
+        return out
+
+    async def _hydrate_reference_columns_inplace(
+        self,
+        source_table: Dict[str, Any],
+        schema: Dict[str, Any],
+        data_rows: List[Dict[str, Any]],
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None,
+    ) -> None:
+        ref_cols = [
+            c
+            for c in (schema.get("columns") or [])
+            if isinstance(c, dict)
+            and str(c.get("type") or "").upper() == "REFERENCE"
+            and isinstance(c.get("ref"), dict)
+            and c["ref"].get("target_table_id")
+        ]
+        if not ref_cols or not data_rows:
+            return
+        for col in ref_cols:
+            col_name = str(col["name"])
+            target_table_id = str(col["ref"]["target_table_id"])
+            label_field = str(col["ref"].get("label_field") or "name")
+            row_ids_needed: List[str] = []
+            for row in data_rows:
+                rd = row.get("row_data") or {}
+                raw = rd.get(col_name)
+                raw = self._coerce_cell_json_value(raw)
+                inner = self._extract_bastion_ref_inner(raw)
+                if not inner:
+                    continue
+                if str(inner.get("table_id") or "") != target_table_id:
+                    continue
+                rid = inner.get("row_id")
+                if rid:
+                    row_ids_needed.append(str(rid))
+            snapshots = await self._batch_fetch_row_data_for_table(
+                target_table_id, row_ids_needed, user_id=user_id, user_team_ids=user_team_ids
+            )
+            for row in data_rows:
+                rd = row.get("row_data") or {}
+                raw = rd.get(col_name)
+                raw = self._coerce_cell_json_value(raw)
+                inner = self._extract_bastion_ref_inner(raw)
+                if not inner or str(inner.get("table_id") or "") != target_table_id:
+                    continue
+                rid = str(inner.get("row_id") or "")
+                sdata = snapshots.get(rid)
+                if not sdata:
+                    continue
+                label_val = sdata.get(label_field)
+                if label_val is None or (isinstance(label_val, str) and not label_val.strip()):
+                    label_val = None
+                    for _k, v in sdata.items():
+                        if v is None or isinstance(v, (dict, list)):
+                            continue
+                        s = v.isoformat() if hasattr(v, "isoformat") else str(v)
+                        if s.strip():
+                            label_val = s
+                            break
+                if label_val is None:
+                    label_val = rid
+                else:
+                    label_val = (
+                        label_val.isoformat()
+                        if hasattr(label_val, "isoformat")
+                        else str(label_val)
+                    )
+                preview = self._preview_subset_from_row_data(sdata, label_field)
+                inner_new = {
+                    "v": REF_SCHEMA_VERSION,
+                    "table_id": target_table_id,
+                    "row_id": rid,
+                    "label": label_val,
+                }
+                if preview:
+                    inner_new["preview"] = preview
+                rd[col_name] = {BASTION_REF_KEY: inner_new}
+                row["row_data"] = rd
+
+    async def resolve_workspace_link(
+        self,
+        user_id: str,
+        ref_payload: Any,
+    ) -> Dict[str, Any]:
+        """Resolve a stored _bastion_ref (or inner object) to current label and preview."""
+        inner = self._extract_bastion_ref_inner(ref_payload)
+        if not inner:
+            return {
+                "success": False,
+                "error": "Invalid reference payload",
+                "row_found": False,
+                "label": "",
+                "preview": {},
+                "table_id": "",
+                "row_id": "",
+            }
+        tid = str(inner.get("table_id") or "")
+        rid = str(inner.get("row_id") or "")
+        if not tid or not rid:
+            return {
+                "success": False,
+                "error": "Missing table_id or row_id",
+                "row_found": False,
+                "label": "",
+                "preview": {},
+                "table_id": tid,
+                "row_id": rid,
+            }
+        snap = await self._get_row_snapshot(tid, rid, user_id=user_id, user_team_ids=None)
+        if not snap:
+            return {
+                "success": True,
+                "error": "",
+                "row_found": False,
+                "label": inner.get("label") or rid,
+                "preview": inner.get("preview") if isinstance(inner.get("preview"), dict) else {},
+                "table_id": tid,
+                "row_id": rid,
+            }
+        rd = snap["row_data"]
+        label_field = "name"
+        label_val = rd.get(label_field)
+        if label_val is None or (isinstance(label_val, str) and not label_val.strip()):
+            label_val = inner.get("label") or rid
+            for _k, v in rd.items():
+                if v is None or isinstance(v, (dict, list)):
+                    continue
+                s = v.isoformat() if hasattr(v, "isoformat") else str(v)
+                if s.strip():
+                    label_val = s
+                    break
+        else:
+            label_val = (
+                label_val.isoformat()
+                if hasattr(label_val, "isoformat")
+                else str(label_val)
+            )
+        preview = self._preview_subset_from_row_data(rd, "name")
+        return {
+            "success": True,
+            "error": "",
+            "row_found": True,
+            "label": str(label_val),
+            "preview": preview,
+            "table_id": tid,
+            "row_id": rid,
+        }
+
+    async def _sync_native_table_schema(
+        self,
+        *,
+        conn,
+        workspace_id: str,
+        table_id: str,
+        old_schema: Optional[Dict[str, Any]],
+        new_schema: Optional[Dict[str, Any]],
+    ) -> None:
+        """
+        Ensure the physical native table matches schema_json by applying ALTER TABLE changes.
+
+        This sync is best-effort and assumes table_id is a Bastion-managed native table.
+        """
+        schema_name = self._workspace_schema_name(workspace_id)
+        table_name = f't_{table_id.replace("-", "_")}'
+
+        old_cols = self._schema_column_defs_by_name(old_schema)
+        new_cols = self._schema_column_defs_by_name(new_schema)
+
+        removed = [c for c in old_cols.keys() if c not in new_cols]
+        added = [c for c in new_cols.keys() if c not in old_cols]
+        common = [c for c in new_cols.keys() if c in old_cols]
+
+        # Heuristic rename detection: if exactly one removed and one added with same type/nullability.
+        renames: List[tuple[str, str]] = []
+        if len(removed) == 1 and len(added) == 1:
+            old_def = old_cols.get(removed[0]) or {}
+            new_def = new_cols.get(added[0]) or {}
+            if (
+                str(old_def.get("type") or "").upper() == str(new_def.get("type") or "").upper()
+                and bool(old_def.get("nullable", True)) == bool(new_def.get("nullable", True))
+            ):
+                renames.append((removed[0], added[0]))
+                removed = []
+                added = []
+
+        # Apply renames first.
+        for old_name, new_name in renames:
+            safe_old = self._sanitize_sql_identifier(old_name)
+            safe_new = self._sanitize_sql_identifier(new_name)
+            await conn.execute(
+                f'ALTER TABLE "{schema_name}"."{table_name}" RENAME COLUMN "{safe_old}" TO "{safe_new}"'
+            )
+
+        # Apply adds.
+        for name in added:
+            col_def = new_cols[name]
+            safe = self._sanitize_sql_identifier(name)
+            pg_type = self._pg_type_for_schema_col(col_def)
+            await conn.execute(
+                f'ALTER TABLE "{schema_name}"."{table_name}" ADD COLUMN "{safe}" {pg_type}'
+            )
+
+        # Apply type changes.
+        for name in common:
+            old_def = old_cols[name]
+            new_def = new_cols[name]
+            old_t = str(old_def.get("type") or "TEXT").upper()
+            new_t = str(new_def.get("type") or "TEXT").upper()
+            if old_t == new_t:
+                continue
+            safe = self._sanitize_sql_identifier(name)
+            pg_type = self._pg_type_for_schema_col(new_def)
+            await conn.execute(
+                f'ALTER TABLE "{schema_name}"."{table_name}" ALTER COLUMN "{safe}" TYPE {pg_type} USING "{safe}"::{pg_type}'
+            )
+
+        # Apply drops last.
+        for name in removed:
+            safe = self._sanitize_sql_identifier(name)
+            await conn.execute(
+                f'ALTER TABLE "{schema_name}"."{table_name}" DROP COLUMN "{safe}"'
+            )
     
     async def create_table(
         self,
@@ -446,42 +986,85 @@ class TableService:
     ) -> Optional[Dict[str, Any]]:
         """Update table metadata (name, description, schema/columns, metadata_json)."""
         try:
-            updates = []
-            params = []
-            if name is not None:
-                params.append(name)
-                updates.append(f"name = ${len(params)}")
-            if description is not None:
-                params.append(description)
-                updates.append(f"description = ${len(params)}")
-            if schema is not None:
-                params.append(json.dumps(schema))
-                updates.append(f"schema_json = ${len(params)}")
-            if metadata is not None:
-                params.append(json.dumps(metadata))
-                updates.append(f"metadata_json = ${len(params)}")
-            if not updates:
+            if name is None and description is None and schema is None and metadata is None:
                 return await self.get_table(table_id, user_id=user_id, user_team_ids=user_team_ids)
-            params.append(datetime.utcnow())
-            updates.append(f"updated_at = ${len(params)}")
-            params.append(user_id)
-            updates.append(f"updated_by = ${len(params)}")
-            params.append(table_id)
-            where_idx = len(params)
-            query = f"""
-                UPDATE custom_tables
-                SET {", ".join(updates)}
-                WHERE table_id = ${where_idx}
-                RETURNING table_id, database_id, name, description, row_count,
-                          schema_json, styling_rules_json, metadata_json, created_at, updated_at, created_by, updated_by
-            """
-            row = await self.db.fetchrow(
-                query,
-                *params,
-                user_id=user_id,
-                user_team_ids=user_team_ids
-            )
-            return self._row_to_dict(row) if row else None
+
+            async with self.db.acquire(user_id=user_id, user_team_ids=user_team_ids) as conn:
+                async with conn.transaction():
+                    existing = await conn.fetchrow(
+                        """
+                        SELECT table_id, database_id, name, schema_json, storage_type
+                        FROM custom_tables
+                        WHERE table_id = $1
+                        """,
+                        table_id,
+                    )
+                    if not existing:
+                        return None
+
+                    old_schema = None
+                    if existing.get("schema_json"):
+                        try:
+                            old_schema = (
+                                json.loads(existing["schema_json"])
+                                if isinstance(existing["schema_json"], str)
+                                else existing["schema_json"]
+                            )
+                        except Exception:
+                            old_schema = None
+
+                    updates = []
+                    params = []
+                    if name is not None:
+                        params.append(name)
+                        updates.append(f"name = ${len(params)}")
+                    if description is not None:
+                        params.append(description)
+                        updates.append(f"description = ${len(params)}")
+                    if schema is not None:
+                        params.append(json.dumps(schema))
+                        updates.append(f"schema_json = ${len(params)}")
+                    if metadata is not None:
+                        params.append(json.dumps(metadata))
+                        updates.append(f"metadata_json = ${len(params)}")
+
+                    params.append(datetime.utcnow())
+                    updates.append(f"updated_at = ${len(params)}")
+                    params.append(user_id)
+                    updates.append(f"updated_by = ${len(params)}")
+                    params.append(table_id)
+                    where_idx = len(params)
+
+                    query = f"""
+                        UPDATE custom_tables
+                        SET {", ".join(updates)}
+                        WHERE table_id = ${where_idx}
+                        RETURNING table_id, database_id, name, description, row_count,
+                                  schema_json, styling_rules_json, metadata_json, created_at, updated_at, created_by, updated_by, storage_type
+                    """
+                    row = await conn.fetchrow(query, *params)
+                    if not row:
+                        return None
+
+                    # Keep native physical table in sync with schema_json.
+                    storage_type = (row.get("storage_type") or existing.get("storage_type") or "jsonb").lower()
+                    if storage_type == "native" and schema is not None:
+                        workspace_id = await self._get_workspace_id_for_database(
+                            row["database_id"], user_id=user_id, user_team_ids=user_team_ids
+                        )
+                        if workspace_id:
+                            await self._ensure_workspace_schema_exists(
+                                workspace_id, user_id=user_id, user_team_ids=user_team_ids
+                            )
+                            await self._sync_native_table_schema(
+                                conn=conn,
+                                workspace_id=workspace_id,
+                                table_id=table_id,
+                                old_schema=old_schema,
+                                new_schema=schema,
+                            )
+
+                    return self._row_to_dict(row)
         except Exception as e:
             logger.error(f"Failed to update table {table_id}: {e}")
             raise
@@ -675,6 +1258,9 @@ class TableService:
                 'formula_data': {}
             })
 
+        await self._hydrate_reference_columns_inplace(
+            table, schema, data_rows, user_id=user_id, user_team_ids=user_team_ids
+        )
         return self._pack_table_data_response(
             table_id, data_rows, total_rows or 0, offset, limit, schema, prefer_arrow
         )
@@ -698,18 +1284,28 @@ class TableService:
         schema_name = self._workspace_schema_name(workspace_id)
         table_name = f't_{table_id.replace("-", "_")}'
         columns = schema.get('columns') or []
-        data_cols = [c['name'] for c in columns if isinstance(c, dict) and c.get('name')]
-        
+        columns_meta = [
+            c for c in columns if isinstance(c, dict) and c.get("name")
+        ]
+        data_cols = [str(c["name"]) for c in columns_meta]
+
         max_index_q = f'SELECT COALESCE(MAX(row_index), -1) FROM "{schema_name}"."{table_name}"'
         max_index = await self.db.fetchval(max_index_q, user_id=user_id, user_team_ids=user_team_ids)
         new_index = (max_index or 0) + 1
         row_id = str(uuid.uuid4())
-        
+
+        row_data = await self._normalize_row_reference_fields(
+            table, schema, row_data, user_id, user_team_ids=user_team_ids
+        )
+
         col_list = ['row_id', 'row_index'] + [self._sanitize_sql_identifier(c) for c in data_cols]
         placeholders = ', '.join([f'${i+1}' for i in range(len(col_list))])
         cols_quoted = ', '.join(f'"{c}"' for c in col_list)
         insert_sql = f'INSERT INTO "{schema_name}"."{table_name}" ({cols_quoted}) VALUES ({placeholders})'
-        values = [row_id, new_index] + [row_data.get(c) for c in data_cols]
+        values = [row_id, new_index] + [
+            self._coerce_native_cell_value(col_def, row_data.get(col_def["name"]))
+            for col_def in columns_meta
+        ]
         
         await self.db.execute(
             insert_sql, *values,
@@ -745,14 +1341,28 @@ class TableService:
         schema = json.loads(table['schema_json']) if isinstance(table['schema_json'], str) else table['schema_json']
         schema_name = self._workspace_schema_name(workspace_id)
         table_name = f't_{table_id.replace("-", "_")}'
-        data_cols = [c['name'] for c in (schema.get('columns') or []) if isinstance(c, dict) and c.get('name')]
+        columns_meta = [
+            c for c in (schema.get("columns") or []) if isinstance(c, dict) and c.get("name")
+        ]
+        data_cols = [str(c["name"]) for c in columns_meta]
+        row_data = await self._normalize_row_reference_fields(
+            table,
+            schema,
+            row_data,
+            user_id,
+            user_team_ids=user_team_ids,
+            only_keys=set(row_data.keys()),
+        )
         set_parts = []
         values = []
-        for i, col in enumerate(data_cols):
+        p = 1
+        for col_def in columns_meta:
+            col = col_def["name"]
             if col in row_data:
                 safe = self._sanitize_sql_identifier(col)
-                set_parts.append(f'"{safe}" = ${i+1}')
-                values.append(row_data[col])
+                set_parts.append(f'"{safe}" = ${p}')
+                values.append(self._coerce_native_cell_value(col_def, row_data[col]))
+                p += 1
         if not set_parts:
             row = await self.db.fetchrow(
                 f'SELECT row_id, row_index FROM "{schema_name}"."{table_name}" WHERE row_id = $1',
@@ -763,7 +1373,7 @@ class TableService:
             return None
         values.append(row_id)
         set_sql = ', '.join(set_parts)
-        update_sql = f'UPDATE "{schema_name}"."{table_name}" SET {set_sql} WHERE row_id = ${len(values)} RETURNING row_id, row_index, ' + ', '.join(f'"{self._sanitize_sql_identifier(c)}"' for c in data_cols)
+        update_sql = f'UPDATE "{schema_name}"."{table_name}" SET {set_sql} WHERE row_id = ${p} RETURNING row_id, row_index, ' + ', '.join(f'"{self._sanitize_sql_identifier(c)}"' for c in data_cols)
         row = await self.db.fetchrow(update_sql, *values, user_id=user_id, user_team_ids=user_team_ids)
         if not row:
             return None
@@ -782,8 +1392,15 @@ class TableService:
     ) -> Optional[Dict[str, Any]]:
         """Update a single cell in a native table."""
         schema = json.loads(table['schema_json']) if isinstance(table['schema_json'], str) else table['schema_json']
-        data_cols = [c['name'] for c in (schema.get('columns') or []) if isinstance(c, dict) and c.get('name')]
-        if column_name not in data_cols:
+        columns_meta = [
+            c for c in (schema.get("columns") or []) if isinstance(c, dict) and c.get("name")
+        ]
+        data_cols = [str(c["name"]) for c in columns_meta]
+        col_def = next(
+            (c for c in columns_meta if str(c.get("name")) == column_name),
+            None,
+        )
+        if column_name not in data_cols or not col_def:
             return None
         workspace_id = await self._get_workspace_id_for_database(
             table['database_id'], user_id=user_id, user_team_ids=user_team_ids
@@ -795,7 +1412,11 @@ class TableService:
         safe_col = self._sanitize_sql_identifier(column_name)
         return_cols = ', '.join(f'"{self._sanitize_sql_identifier(c)}"' for c in data_cols)
         update_sql = f'UPDATE "{schema_name}"."{table_name}" SET "{safe_col}" = $1 WHERE row_id = $2 RETURNING row_id, row_index, {return_cols}'
-        row = await self.db.fetchrow(update_sql, value, row_id, user_id=user_id, user_team_ids=user_team_ids)
+        value = await self._normalize_reference_column_value(
+            table, col_def, value, user_id, user_team_ids=user_team_ids
+        )
+        coerced = self._coerce_native_cell_value(col_def, value)
+        row = await self.db.fetchrow(update_sql, coerced, row_id, user_id=user_id, user_team_ids=user_team_ids)
         if not row:
             return None
         row_data_out = {k: row[k] for k in row.keys() if k not in ('row_id', 'row_index')}
@@ -946,6 +1567,9 @@ class TableService:
                     'formula_data': formula_data  # Include formula data for frontend
                 })
             
+            await self._hydrate_reference_columns_inplace(
+                table, schema, data_rows, user_id=user_id, user_team_ids=user_team_ids
+            )
             return self._pack_table_data_response(
                 table_id,
                 data_rows,
@@ -1005,6 +1629,10 @@ class TableService:
                     # Don't store formula in row_data, will be evaluated
                 else:
                     actual_row_data[key] = value
+
+            actual_row_data = await self._normalize_row_reference_fields(
+                table, schema, actual_row_data, user_id, user_team_ids=None
+            )
             
             # Insert row
             insert_query = """
@@ -1041,15 +1669,43 @@ class TableService:
     def _coerce_native_cell_value(
         self, col_def: Dict[str, Any], value: Any
     ) -> Any:
-        """Normalize a cell value for insertion into a typed native column."""
+        """Normalize a cell value for insertion into a typed native column (asyncpg expects native types, not strings)."""
         if value is None:
             return None
         ctype = str(col_def.get("type", "TEXT")).upper()
         if ctype == "JSON":
             if isinstance(value, (dict, list)):
                 return json.dumps(value)
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                try:
+                    return json.dumps(json.loads(s))
+                except json.JSONDecodeError:
+                    return value
+            return value
+        if ctype == "REFERENCE":
+            if isinstance(value, dict):
+                return json.dumps(value)
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                try:
+                    return json.dumps(json.loads(s))
+                except json.JSONDecodeError:
+                    return value
             return value
         if ctype == "INTEGER":
+            if isinstance(value, str):
+                s = value.strip()
+                if s == "":
+                    return None
+                try:
+                    return int(s, 10)
+                except ValueError:
+                    return value
             if hasattr(value, "item"):
                 try:
                     return int(value.item())
@@ -1060,6 +1716,14 @@ class TableService:
             except (TypeError, ValueError):
                 return value
         if ctype == "REAL":
+            if isinstance(value, str):
+                s = value.strip()
+                if s == "":
+                    return None
+                try:
+                    return float(s)
+                except ValueError:
+                    return value
             if hasattr(value, "item"):
                 try:
                     return float(value.item())
@@ -1070,12 +1734,44 @@ class TableService:
             except (TypeError, ValueError):
                 return value
         if ctype == "BOOLEAN":
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("true", "1", "yes", "on", "t", "y"):
+                    return True
+                if v in ("false", "0", "no", "off", ""):
+                    return False
+                return value
             if hasattr(value, "item"):
                 try:
                     return bool(value.item())
                 except (TypeError, ValueError):
                     pass
             return bool(value)
+        if ctype == "DATE":
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                try:
+                    return date.fromisoformat(s[:10])
+                except ValueError:
+                    return value
+            return value
+        if ctype == "TIMESTAMP":
+            if isinstance(value, str):
+                s = value.strip()
+                if not s:
+                    return None
+                try:
+                    if s.endswith("Z"):
+                        s = s[:-1] + "+00:00"
+                    dt = datetime.fromisoformat(s)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt
+                except ValueError:
+                    return value
+            return value
         return value
 
     async def _bulk_insert_native_rows(
@@ -1119,8 +1815,11 @@ class TableService:
             for idx, row in enumerate(batch):
                 row_id = str(uuid.uuid4())
                 ri = start_idx + total_inserted + idx
+                row_norm = await self._normalize_row_reference_fields(
+                    table, schema, dict(row), user_id, user_team_ids=None
+                )
                 vals = [
-                    self._coerce_native_cell_value(col_def, row.get(orig))
+                    self._coerce_native_cell_value(col_def, row_norm.get(orig))
                     for orig, col_def in zip(data_cols, columns_meta)
                 ]
                 records.append(tuple([row_id, ri] + vals))
@@ -1196,11 +1895,14 @@ class TableService:
                 for idx, row_data in enumerate(batch):
                     row_id = str(uuid.uuid4())
                     row_index = start_index + total_inserted + idx
+                    row_norm = await self._normalize_row_reference_fields(
+                        table, schema, dict(row_data), user_id, user_team_ids=None
+                    )
                     args_list.append(
                         (
                             row_id,
                             table_id,
-                            json.dumps(row_data),
+                            json.dumps(row_norm),
                             row_index,
                             now,
                             now,
@@ -1636,11 +2338,14 @@ class TableService:
                     user_id=user_id,
                     user_team_ids=None
                 )
+            schema = json.loads(table['schema_json']) if isinstance(table['schema_json'], str) else table['schema_json']
             # Get current formula_data
-            current_query = "SELECT formula_data FROM custom_data_rows WHERE row_id = $1 AND table_id = $2"
+            current_query = "SELECT row_data, formula_data FROM custom_data_rows WHERE row_id = $1 AND table_id = $2"
             current_result = await self.db.fetchrow(current_query, row_id, table_id)
+            if not current_result:
+                return None
             current_formula_data = {}
-            if current_result and current_result.get('formula_data'):
+            if current_result.get('formula_data'):
                 current_formula_data = json.loads(current_result['formula_data']) if isinstance(current_result['formula_data'], str) else current_result['formula_data']
             
             # Merge formula updates
@@ -1657,6 +2362,22 @@ class TableService:
                     # Remove from formula_data if it was a formula before
                     if key in current_formula_data:
                         del current_formula_data[key]
+
+            existing_rd: Dict[str, Any] = {}
+            if current_result and current_result.get('row_data'):
+                existing_rd = json.loads(current_result['row_data']) if isinstance(current_result['row_data'], str) else current_result['row_data']
+                if not isinstance(existing_rd, dict):
+                    existing_rd = {}
+            merged_rd = dict(existing_rd)
+            merged_rd.update(actual_row_data)
+            merged_rd = await self._normalize_row_reference_fields(
+                table,
+                schema,
+                merged_rd,
+                user_id,
+                user_team_ids=None,
+                only_keys=set(row_data.keys()),
+            )
             
             query = """
                 UPDATE custom_data_rows
@@ -1668,7 +2389,7 @@ class TableService:
             formula_json = json.dumps(current_formula_data) if current_formula_data else None
             row = await self.db.fetchrow(
                 query,
-                json.dumps(actual_row_data),
+                json.dumps(merged_rd),
                 formula_json,
                 datetime.utcnow(),
                 user_id,
@@ -1716,6 +2437,12 @@ class TableService:
                     user_id=user_id,
                     user_team_ids=None
                 )
+            schema = json.loads(table['schema_json']) if isinstance(table['schema_json'], str) else table['schema_json']
+            col_def = None
+            for c in schema.get("columns") or []:
+                if isinstance(c, dict) and str(c.get("name")) == column_name:
+                    col_def = c
+                    break
             # Get current row data and formula_data
             query = "SELECT row_data, formula_data FROM custom_data_rows WHERE row_id = $1 AND table_id = $2"
             result = await self.db.fetchrow(query, row_id, table_id)
@@ -1741,6 +2468,10 @@ class TableService:
                 # Don't store formula in row_data
             else:
                 # Regular value - remove from formula_data if present
+                if col_def and str(col_def.get("type") or "").upper() == "REFERENCE":
+                    value = await self._normalize_reference_column_value(
+                        table, col_def, value, user_id, user_team_ids=None
+                    )
                 row_data[column_name] = value
                 if column_name in formula_data:
                     del formula_data[column_name]
@@ -1839,7 +2570,7 @@ class TableService:
                 if pd.api.types.is_integer_dtype(dtype):
                     col_type = 'INTEGER'
                 elif pd.api.types.is_float_dtype(dtype):
-                    col_type = 'FLOAT'
+                    col_type = 'REAL'
                 elif pd.api.types.is_bool_dtype(dtype):
                     col_type = 'BOOLEAN'
                 elif pd.api.types.is_datetime64_any_dtype(dtype):

@@ -45,6 +45,7 @@ function NotificationDropdown({ anchorEl, open, onClose }) {
   const getBorderColor = (item) => {
     if (item.subtype === 'schedule_paused') return 'error.main';
     if (item.subtype === 'model_configuration') return 'warning.main';
+    if (item.subtype === 'chat_completion') return 'primary.main';
     return 'success.main';
   };
 

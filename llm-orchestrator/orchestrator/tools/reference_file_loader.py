@@ -76,7 +76,7 @@ async def load_file_by_path(
     try:
         from orchestrator.backend_tool_client import get_backend_tool_client
         
-        logger.info(f"📄 Loading referenced file via path resolution: {ref_path}")
+        logger.debug(f"📄 Loading referenced file via path resolution: {ref_path}")
         
         # Get base path from active editor's canonical_path
         base_path = None
@@ -86,7 +86,7 @@ async def load_file_by_path(
                 try:
                     from pathlib import Path
                     base_path = str(Path(canonical_path).parent)
-                    logger.info(f"📄 Base path from active editor: {base_path}")
+                    logger.debug(f"📄 Base path from active editor: {base_path}")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to extract base path from canonical_path: {e}")
 
@@ -101,7 +101,7 @@ async def load_file_by_path(
             try:
                 from pathlib import Path
                 base_path = str(Path(base_filename).parent)
-                logger.info(f"📄 Base path from base_filename: {base_path}")
+                logger.debug(f"📄 Base path from base_filename: {base_path}")
             except Exception:
                 pass
 
@@ -114,7 +114,7 @@ async def load_file_by_path(
         if not ref_path.startswith('./') and not ref_path.startswith('../') and '/' not in ref_path and '\\' not in ref_path:
             # Bare filename - assume same directory
             normalized_ref = f"./{ref_path}"
-            logger.info(f"📄 Normalized bare filename to relative path: {ref_path} -> {normalized_ref}")
+            logger.debug(f"📄 Normalized bare filename to relative path: {ref_path} -> {normalized_ref}")
         
         # Use backend tool client to find document by path
         client = await get_backend_tool_client()
@@ -153,8 +153,6 @@ async def load_file_by_path(
         resolved_path = doc_info.get("resolved_path")
         filename = doc_info.get("filename", Path(ref_path).name)
 
-        logger.info(f"Found document {document_id} at {resolved_path}")
-
         # Get full content
         content_result = await get_document_content_tool(document_id, user_id)
         content = content_result.get("content", content_result) if isinstance(content_result, dict) else content_result
@@ -173,7 +171,7 @@ async def load_file_by_path(
 
         # Diagnostic: log content fingerprint so we can verify correct document (e.g. outline for book 7 vs 4)
         _preview_for_log = (content.strip() or "")[:200].replace("\n", " ")
-        logger.info(
+        logger.debug(
             "REFERENCE LOADED: ref_path=%s document_id=%s resolved_path=%s len=%s preview=%s",
             ref_path, document_id, resolved_path, len(content), _preview_for_log,
         )
@@ -290,37 +288,37 @@ async def load_referenced_files(
         loaded_files = {}
         
         # Debug logging BEFORE the check
-        logger.info("="*80)
-        logger.info("🔍 REFERENCE FILE LOADER DEBUG:")
-        logger.info(f"   active_editor type: {type(active_editor)}")
-        logger.info(f"   active_editor is None: {active_editor is None}")
+        logger.debug("="*80)
+        logger.debug("🔍 REFERENCE FILE LOADER DEBUG:")
+        logger.debug(f"   active_editor type: {type(active_editor)}")
+        logger.debug(f"   active_editor is None: {active_editor is None}")
         
         if active_editor:
             try:
-                logger.info(f"   active_editor keys: {list(active_editor.keys())}")
-                logger.info(f"   has 'content': {bool(active_editor.get('content'))}")
+                logger.debug(f"   active_editor keys: {list(active_editor.keys())}")
+                logger.debug(f"   has 'content': {bool(active_editor.get('content'))}")
                 content_val = active_editor.get('content', '')
-                logger.info(f"   content type: {type(content_val)}")
-                logger.info(f"   content length: {len(content_val) if content_val else 0}")
-                logger.info(f"   has 'filename': {bool(active_editor.get('filename'))}")
-                logger.info(f"   filename value: {active_editor.get('filename')}")
-                logger.info(f"   has 'frontmatter': {bool(active_editor.get('frontmatter'))}")
+                logger.debug(f"   content type: {type(content_val)}")
+                logger.debug(f"   content length: {len(content_val) if content_val else 0}")
+                logger.debug(f"   has 'filename': {bool(active_editor.get('filename'))}")
+                logger.debug(f"   filename value: {active_editor.get('filename')}")
+                logger.debug(f"   has 'frontmatter': {bool(active_editor.get('frontmatter'))}")
                 frontmatter_debug = active_editor.get('frontmatter', {})
                 if frontmatter_debug:
-                    logger.info(f"   frontmatter type: {type(frontmatter_debug)}")
-                    logger.info(f"   frontmatter keys: {list(frontmatter_debug.keys())}")
-                    logger.info(f"   frontmatter has 'outline': {bool(frontmatter_debug.get('outline'))}")
-                    logger.info(f"   frontmatter['outline'] value: {frontmatter_debug.get('outline')}")
+                    logger.debug(f"   frontmatter type: {type(frontmatter_debug)}")
+                    logger.debug(f"   frontmatter keys: {list(frontmatter_debug.keys())}")
+                    logger.debug(f"   frontmatter has 'outline': {bool(frontmatter_debug.get('outline'))}")
+                    logger.debug(f"   frontmatter['outline'] value: {frontmatter_debug.get('outline')}")
                 else:
-                    logger.info(f"   frontmatter is empty or None")
+                    logger.debug(f"   frontmatter is empty or None")
             except Exception as debug_err:
                 logger.error(f"   DEBUG LOGGING ERROR: {debug_err}")
                 import traceback
                 logger.error(traceback.format_exc())
         else:
-            logger.info(f"   active_editor is falsy (empty dict or None)")
+            logger.debug(f"   active_editor is falsy (empty dict or None)")
         
-        logger.info("="*80)
+        logger.debug("="*80)
         
         # Check if we have an active editor with actual content
         if not active_editor or (not active_editor.get("content") and not active_editor.get("filename") and not active_editor.get("frontmatter")):
@@ -338,11 +336,11 @@ async def load_referenced_files(
         doc_type = frontmatter.get("type", "").lower()
         
         # Debug: Log frontmatter keys to see what's available
-        logger.info(f"📄 Frontmatter keys: {list(frontmatter.keys())}")
+        logger.debug(f"📄 Frontmatter keys: {list(frontmatter.keys())}")
         for key in ["files", "components", "protocols", "schematics", "specifications"]:
             if key in frontmatter:
                 value = frontmatter[key]
-                logger.info(f"📄 Frontmatter['{key}'] = {value} (type: {type(value).__name__})")
+                logger.debug(f"📄 Frontmatter['{key}'] = {value} (type: {type(value).__name__})")
         
         # Only load references if document type matches filter
         if doc_type_filter and doc_type != doc_type_filter:
@@ -423,7 +421,7 @@ async def load_referenced_files(
         logger.info(f"📄 Extracted {len(referenced_paths)} reference path(s) from frontmatter")
         if referenced_paths:
             for path, category in referenced_paths[:5]:  # Log first 5
-                logger.info(f"📄 Reference: {category} -> {path}")
+                logger.debug(f"📄 Reference: {category} -> {path}")
         
         if not referenced_paths:
             logger.info("No referenced files found in frontmatter")
@@ -434,9 +432,7 @@ async def load_referenced_files(
                 "error": None,
                 "formatted": "No referenced files found in frontmatter.",
             }
-        
-        logger.info(f"📄 Found {len(referenced_paths)} referenced file(s) to load")
-        
+
         # Load referenced files in parallel for better performance
         import asyncio
         
@@ -451,7 +447,7 @@ async def load_referenced_files(
                 )
                 
                 if loaded_doc and loaded_doc.get("found"):
-                    logger.info(f"Loaded {category} file: {loaded_doc.get('filename')}")
+                    logger.debug(f"Loaded {category} file: {loaded_doc.get('filename')}")
                     return (category, loaded_doc, None)
                 else:
                     logger.warning(f"Failed to load {category} file: {ref_path}")
@@ -510,7 +506,7 @@ async def load_referenced_files(
                                         if cascade_category not in loaded_files:
                                             loaded_files[cascade_category] = []
                                         loaded_files[cascade_category].append(cascade_doc)
-                                        logger.info(f"Loaded cascaded {cascade_category} file: {cascade_doc.get('filename')}")
+                                        logger.debug(f"Loaded cascaded {cascade_category} file: {cascade_doc.get('filename')}")
                                 except Exception as e:
                                     logger.error(f"❌ Error loading cascaded {cascade_category} file '{cascade_path}': {e}")
                     except Exception as e:

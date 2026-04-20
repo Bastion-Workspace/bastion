@@ -76,11 +76,25 @@ When the user has a document open in the editor, you get a rich set of variables
 | **editor_section_index** | Zero-based index of the current section (e.g. 2 for the third section). |
 | **editor_adjacent_sections** | Previous, current, and next sections combined. Use this to give the agent “context around the cursor” without sending the whole file. |
 | **editor_total_sections** | Total number of sections (at the same heading level) in the file. |
+| **editor_toc** | All heading lines from the open file, one per line (e.g. `## Chapter 1\n## Chapter 2\n...`). Useful as a lightweight structural map the agent can scan without loading the full document. Empty if no file is open or the file has no headings. |
 | **editor_is_first_section** | `"true"` when the cursor is in the first section; empty otherwise. Use `{{#editor_is_first_section}}` to show content only at the start of the document. |
 | **editor_is_last_section** | `"true"` when the cursor is in the last section; empty otherwise. |
 | **editor_ref_count** | Number of loaded ref_* files (as a number). Use `{{#editor_ref_count > 0}}` when you want to include a block only when refs exist. |
 
 Section boundaries are determined by Markdown headings. By default the system uses **heading level 2** (`#` and `##`), so each “section” is a block under a top-level or second-level heading. You can override this per playbook step with the **heading_level** step setting (1–6): set it on any step and the same level is used for the whole run for both the open document and all referenced files (so `editor_current_section`, `editor_refs_*_current`, etc. stay in sync).
+
+### Chat artifact (artifact drawer)
+
+When the user has a **chat artifact** open in the sidebar artifact drawer (HTML, Mermaid, chart, SVG, or React preview), the full source of that artifact is available so the agent can refine it iteratively. If the drawer is closed or no artifact is active, these variables are empty.
+
+| Variable | What it contains |
+|---------|------------------|
+| **previous_artifact** | Full source code of the artifact currently open in the drawer. Empty if none. |
+| **previous_artifact_type** | One of: `html`, `mermaid`, `chart`, `svg`, `react`. Empty if none. |
+| **previous_artifact_title** | Title shown for the artifact in chat. Empty if none. |
+| **previous_artifact_language** | Optional hint for the code view (e.g. `html`, `javascript`, `jsx`, `mermaid`, `svg`). Empty if none. |
+
+The user can open an artifact from a **past message** in the thread and send a follow-up; that artifact becomes `previous_artifact` for that request.
 
 ### Referenced files (ref_*)
 

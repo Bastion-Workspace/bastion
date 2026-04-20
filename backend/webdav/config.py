@@ -33,7 +33,7 @@ def create_webdav_config(auth_controller, filesystem_provider, host="0.0.0.0", p
         "logging": get_logging_config(verbose),
         
         # Provider mapping - map URL path to provider
-        # **ROOSEVELT'S CLEAN FIX:** Mount at "/" because nginx strips /dav prefix
+        # Mount at / because nginx strips /dav prefix
         # nginx: /dav/OrgMode → (strips /dav) → WsgiDAV: /OrgMode
         # Provider at "/" handles all paths, generates clean hrefs
         # Clients add their base URL (/dav) back when making requests
@@ -57,7 +57,7 @@ def create_webdav_config(auth_controller, filesystem_provider, host="0.0.0.0", p
         # Verbose logging
         "verbose": verbose,
         
-        # **ROOSEVELT DEBUG:** Log full request and response bodies to see XML
+        # Log full HTTP/XML bodies when debugging WebDAV
         "enable_log_request_body": True,
         "enable_log_response_body": True,
         
@@ -120,14 +120,14 @@ def get_logging_config(verbose_level=1) -> Dict[str, Any]:
     
     level = level_map.get(verbose_level, logging.INFO)
     
-    # **ROOSEVELT'S BIG STICK:** Force DEBUG logging to see the XML!
+    # Force DEBUG on wsgidav loggers for XML inspection
     # We are setting all levels to DEBUG to override any stubborn defaults.
     debug_level = logging.DEBUG
     
     return {
         "enable": True,
         "version": 1,
-        "disable_existing_loggers": True,  # **BULLY!** The Big Stick! Disable all other loggers!
+        "disable_existing_loggers": True,
         "formatters": {
             "default": {
                 "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -144,7 +144,7 @@ def get_logging_config(verbose_level=1) -> Dict[str, Any]:
             "wsgidav": {
                 "handlers": ["console"],
                 "level": debug_level,
-                "propagate": True,  # **BULLY!** Propagate to see ALL sub-logger messages!
+                "propagate": True,
             },
             "webdav": {
                 "handlers": ["console"],

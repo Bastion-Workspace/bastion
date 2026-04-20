@@ -1,6 +1,6 @@
 """
 Image generation via OpenRouter image-capable models.
-Saves under uploads/web_sources/images and optionally promotes to document_metadata.
+Saves to WEB_SOURCES_ROOT/images/ and optionally promotes to the document library.
 """
 
 import base64
@@ -33,7 +33,7 @@ class ImageGenerationService:
         return self._http_client
 
     async def _ensure_images_dir(self) -> str:
-        images_dir = os.path.join(settings.UPLOAD_DIR, "web_sources", "images")
+        images_dir = os.path.join(settings.WEB_SOURCES_ROOT, "images")
         os.makedirs(images_dir, exist_ok=True)
         return images_dir
 
@@ -52,17 +52,21 @@ class ImageGenerationService:
     ) -> Optional[str]:
         """Create a document record for a generated image (user library). Returns document_id or None."""
         try:
-            from services.document_service_v2 import DocumentService
+            from clients.document_service_client import get_document_service_client
+            from services.service_container import get_service_container
 
             buf = BytesIO(image_bytes)
             buf.seek(0)
             upload = UploadFile(filename=filename, file=buf)
-            doc_service = DocumentService()
-            result = await doc_service.upload_and_process(
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            result = await dsc.upload_via_document_service(
                 upload,
                 doc_type="image",
                 user_id=user_id,
                 folder_id=folder_id,
+                team_id=None,
+                collection_type="user",
             )
             doc_id = result.document_id
             if not doc_id:
@@ -77,7 +81,8 @@ class ImageGenerationService:
                     "height": height,
                 }
             }
-            await doc_service.document_repository.update(
+            container = await get_service_container()
+            await container.document_repository.update(
                 doc_id,
                 user_id=user_id,
                 metadata_json=json.dumps(meta),

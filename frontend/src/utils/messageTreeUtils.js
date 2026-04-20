@@ -99,21 +99,20 @@ export function getNextSibling(tree, messageId, direction) {
 }
 
 /**
- * Walk down choosing child with highest sequence_number at each step.
+ * From a message id, walk down only while there is exactly one child.
+ * Use before getActivePath when current_node_message_id may lag (e.g. still on the
+ * user message while a single assistant reply exists as child) so the path includes descendants.
+ * Stops at a branch (multiple children) so fork navigation stays correct.
+ * @param {{ byId: Map<string, object> }} tree
+ * @param {string} messageId
+ * @returns {string|null}
  */
-export function getDeepestLeaf(tree, messageId) {
-  if (!tree?.byId?.has(messageId)) return null;
+export function extendToLinearLeaf(tree, messageId) {
+  if (!tree?.byId?.has(messageId)) return messageId;
   let cur = tree.byId.get(messageId);
-  while (cur._children && cur._children.length) {
-    const sorted = [...cur._children].sort(
-      (a, b) => (b.sequence_number || 0) - (a.sequence_number || 0)
-    );
-    cur = sorted[0];
+  while (cur._children && cur._children.length === 1) {
+    cur = cur._children[0];
   }
-  return cur.message_id || cur.id;
-}
-
-export function hasBranches(tree, messageId) {
-  const info = getSiblings(tree, messageId);
-  return !!(info && info.total > 1);
+  const id = cur.message_id || cur.id;
+  return id != null ? String(id) : messageId;
 }

@@ -16,9 +16,9 @@ Interactive chat and research run in the **llm-orchestrator** service over gRPC.
 
 **Agent Factory** = DB-backed profiles and playbooks executed by `CustomAgentRunner`; skills are data consumed inside the pipeline, not a separate execution engine.
 
-## Backend agent code (narrow scope)
+## Backend services (data access only)
 
-[backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/) is **deprecated for new work**; only [base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py) remains for legacy subclasses if any.
+The backend does **not** host any agent execution logic. All agent orchestration runs in **llm-orchestrator**.
 
 - **RSS** – Polling and ingestion run in Celery via [backend/services/rss_polling_service.py](mdc:backend/services/rss_polling_service.py) ([rss_tasks.py](mdc:backend/services/celery_tasks/rss_tasks.py)). Interactive RSS management uses the **rss** tool pack ([rss_tools.py](mdc:llm-orchestrator/orchestrator/tools/rss_tools.py)) and optional built-in **RSS Manager** Agent Factory profile; REST remains under `/api/rss`.
 - New agents and orchestration belong under **llm-orchestrator** per [langgraph-best-practices.mdc](mdc:.cursor/rules/langgraph-best-practices.mdc).
@@ -42,7 +42,7 @@ Use conditional edges and clear state contracts; preserve critical keys across n
 
 ## Tool access (backend tools used by agents)
 
-LangGraph tools for the backend live in [backend/services/langgraph_tools/centralized_tool_registry.py](mdc:backend/services/langgraph_tools/centralized_tool_registry.py). Register tools there and scope them by agent type where applicable.
+Backend tool implementations live in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/) and are exposed via [backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py). The orchestrator binds tools per playbook step through [tool_resolution.py](mdc:llm-orchestrator/orchestrator/engines/tool_resolution.py) and the Action I/O Registry.
 
 ## Document batch editing
 

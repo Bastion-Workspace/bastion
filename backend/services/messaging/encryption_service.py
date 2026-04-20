@@ -1,8 +1,8 @@
 """
-Roosevelt's Encryption Service
+Messaging encryption service
 Handles at-rest message encryption with master key management
 
-BULLY! Keep your messages secure like a well-guarded cavalry fort!
+Encrypt and decrypt messaging payloads using configured keys.
 """
 
 import logging

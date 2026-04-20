@@ -1,0 +1,7 @@
+# Vector-service: use Milvus backend (merge with docker-compose.example.yml --profile milvus).
+# See docker/README.md
+services:
+  vector-service:
+    environment:
+      VECTOR_DB_BACKEND: milvus
+      MILVUS_URI: http://milvus:19530

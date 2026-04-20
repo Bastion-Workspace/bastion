@@ -45,7 +45,7 @@ async def _run_batch_scrape(
 
     try:
         from config import settings
-        base_dir = Path(settings.UPLOAD_DIR) / "web_sources" / image_output_folder / user_id
+        base_dir = Path(settings.WEB_SOURCES_ROOT) / image_output_folder / user_id
         base_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         logger.warning("Could not create bulk scrape output dir: %s", e)

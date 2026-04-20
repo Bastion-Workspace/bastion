@@ -173,6 +173,10 @@ class OrgService extends ApiServiceBase {
       params.append('include_deadlines', options.includeDeadlines);
     }
 
+    if (options.includeAppointments !== undefined) {
+      params.append('include_appointments', options.includeAppointments);
+    }
+
     if (options.includeOrgFiles !== undefined) {
       options.includeOrgFiles.forEach((f) => params.append('include_org_files', f));
     }

@@ -1,0 +1,58 @@
+{
+  "id": "finance_briefing_line",
+  "title": "Finance briefing line",
+  "description": "CEO-led line with sector goals, continuity keys, and delivery defaults for recurring market briefs.",
+  "mission_statement": "Produce a concise, source-grounded markets brief that respects user goals (growth, income, risk) and highlights what changed since the last run.",
+  "governance_mode": "hierarchical",
+  "heartbeat_config": {
+    "enabled": false,
+    "schedule_type": "cron",
+    "timezone": "UTC",
+    "require_open_goals": false,
+    "cron_expression": "0 7 * * 1-5",
+    "continuity_workspace_keys": ["brief_rubric", "user_preferences", "current_brief"],
+    "continuity_max_chars_per_key": 8000,
+    "delivery": {
+      "output_sections": [
+        "Executive summary",
+        "What changed since last run",
+        "Macro and rates",
+        "Equities and sectors",
+        "Income and credit",
+        "Risks and watchlist",
+        "Sources and caveats"
+      ],
+      "disclaimer_block": "This output is informational research only, not investment advice. Verify facts and consult a qualified professional before acting.",
+      "publish_workspace_key": "current_brief",
+      "canonical_snapshot_key": "current_brief",
+      "notify_on_success": false,
+      "notify_on_failure": true,
+      "publish_workspace_overwrite": true
+    }
+  },
+  "workspace_seed": {
+    "brief_rubric": "Audience: informed retail or pro-am investor. Tone: direct, neutral, no hype. Cite sources inline where possible. If data is missing, say so explicitly.\n\nUser goals (edit user_preferences key for your profile):\n- Growth vs income tilt\n- Risk tolerance\n- Geography or sector focus",
+    "user_preferences": "Edit this workspace entry with your goals, tickers to watch, and constraints.",
+    "current_brief": ""
+  },
+  "goals": [
+    {
+      "title": "Recurring markets and portfolio brief",
+      "description": "Parent goal for heartbeat-driven briefs. Keep progress below 100% while the line is active, or use briefing mode (require_open_goals=false, already set in template).",
+      "children": [
+        {
+          "title": "Macro, policy, and rates",
+          "description": "Summarize central banks, yields, FX, and macro prints relevant to the user's mandate."
+        },
+        {
+          "title": "Equities and key sectors",
+          "description": "Index-level moves plus 2–4 sectors or themes the user cares about."
+        },
+        {
+          "title": "Income, credit, and alternatives",
+          "description": "Credit spreads, dividend/yield notes, and other carry or defensive angles as relevant."
+        }
+      ]
+    }
+  ]
+}

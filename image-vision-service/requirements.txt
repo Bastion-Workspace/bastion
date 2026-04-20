@@ -1,5 +1,6 @@
-grpcio==1.60.0
-grpcio-tools==1.60.0
+grpcio==1.80.0
+# Required for generated *_pb2.py (grpcio does not install protobuf); align with grpcio-tools 1.80 / backend stack
+protobuf>=6.31.1,<7
 face-recognition==1.3.0
 Pillow==10.2.0
 numpy==1.26.3

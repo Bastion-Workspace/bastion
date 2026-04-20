@@ -7,6 +7,10 @@ import {
   Divider,
   Tooltip,
   CircularProgress,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
 } from '@mui/material';
 import {
   ChevronLeft,
@@ -19,9 +23,14 @@ import {
   Edit,
   ToggleOn,
   ToggleOff,
+  Search,
+  MoreVert,
+  Add,
 } from '@mui/icons-material';
 import ChatMessagesArea from './chat/ChatMessagesArea';
 import ChatInputArea from './chat/ChatInputArea';
+import ArtifactDrawerPanel from './chat/ArtifactDrawerPanel';
+import { artifactTypeIcon } from './chat/artifactTypeIcons';
 import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
 import FloatingHistoryWindow from './FloatingHistoryWindow';
@@ -45,14 +54,18 @@ const ChatSidebar = () => {
     selectConversation,
     createNewConversation,
     messages,
+    activeArtifact,
+    setActiveArtifact,
+    artifactHistory,
+    revertArtifact,
+    artifactCollapsed,
+    setArtifactCollapsed,
+    editorPreference,
+    handleEditorPreferenceChange,
   } = useChatSidebar();
   const { editorState } = useEditor();
   const { darkMode } = useTheme();
-  const editorOpen = !!editorState?.isEditable;
-  const { 
-    editorPreference, 
-    handleEditorPreferenceChange
-  } = useChatSidebar();
+  const editorOpen = !!(editorState?.isEditable || editorState?.content);
 
   const currentDocumentId = editorState?.documentId ?? null;
   const hasPendingEditsForCurrentFile = useMemo(() => {
@@ -66,8 +79,15 @@ const ChatSidebar = () => {
   }, [messages, currentDocumentId]);
 
   const [historyWindowOpen, setHistoryWindowOpen] = useState(false);
+  const [moreMenuAnchor, setMoreMenuAnchor] = useState(null);
   const [tempWidth, setTempWidth] = useState(sidebarWidth); // Local state for resize
+  const [artifactPanelWidth, setArtifactPanelWidth] = useState(320);
+  const [isArtifactResizing, setIsArtifactResizing] = useState(false);
+  const artifactDragRef = useRef({ startX: 0, startW: 320 });
+  const artifactSavedSidebarWidthRef = useRef(null);
+  const sidebarWidthRef = useRef(sidebarWidth);
   const sidebarRef = useRef(null);
+  const chatMessagesAreaRef = useRef(null);
   
   // Use refs to store stable references to avoid stale closures
   const isResizingRef = useRef(false);
@@ -82,6 +102,58 @@ const ChatSidebar = () => {
   useEffect(() => {
     tempWidthRef.current = tempWidth;
   }, [tempWidth]);
+
+  useEffect(() => {
+    sidebarWidthRef.current = sidebarWidth;
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (activeArtifact && !artifactCollapsed) {
+      if (artifactSavedSidebarWidthRef.current === null) {
+        const prevWidth = sidebarWidthRef.current;
+        artifactSavedSidebarWidthRef.current = prevWidth;
+        if (!isFullWidth) {
+          const target = Math.min(Math.floor(window.innerWidth * 0.65), 1000);
+          const newWidth = Math.max(prevWidth, Math.max(280, target));
+          const extraSpace = newWidth - prevWidth;
+          setArtifactPanelWidth(Math.max(320, extraSpace));
+          setSidebarWidth(newWidth);
+        } else {
+          setArtifactPanelWidth(Math.max(320, Math.floor(sidebarWidthRef.current * 0.5)));
+        }
+      }
+    } else {
+      if (artifactSavedSidebarWidthRef.current !== null) {
+        if (!isFullWidth) {
+          setSidebarWidth(artifactSavedSidebarWidthRef.current);
+        }
+        artifactSavedSidebarWidthRef.current = null;
+      }
+      if (!activeArtifact) {
+        setArtifactPanelWidth(320);
+      }
+    }
+  }, [activeArtifact, artifactCollapsed, isFullWidth, setSidebarWidth]);
+
+  useEffect(() => {
+    if (!isArtifactResizing) return undefined;
+    const onMove = (e) => {
+      const el = sidebarRef.current;
+      if (!el) return;
+      const total = el.clientWidth;
+      const dw = e.clientX - artifactDragRef.current.startX;
+      const nw = artifactDragRef.current.startW + dw;
+      const clamped = Math.max(200, Math.min(nw, total - 200));
+      setArtifactPanelWidth(clamped);
+    };
+    const onUp = () => setIsArtifactResizing(false);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [isArtifactResizing]);
 
   useEffect(() => {
     // Ensure setSidebarWidth is a function before assigning to ref
@@ -299,6 +371,12 @@ const ChatSidebar = () => {
     // Don't close history window when clearing conversation
   };
 
+  const handleArtifactResizeStart = useCallback((e) => {
+    e.preventDefault();
+    artifactDragRef.current = { startX: e.clientX, startW: artifactPanelWidth };
+    setIsArtifactResizing(true);
+  }, [artifactPanelWidth]);
+
   const handleExportConversation = async () => {
     if (!currentConversationId || !conversationData?.conversation) {
       console.warn('No conversation to export');
@@ -310,6 +388,23 @@ const ChatSidebar = () => {
     } catch (error) {
       console.error('Failed to export conversation:', error);
     }
+  };
+
+  const closeMoreMenu = () => setMoreMenuAnchor(null);
+
+  const handleMoreFindInChat = () => {
+    closeMoreMenu();
+    chatMessagesAreaRef.current?.openConversationSearch?.();
+  };
+
+  const handleMoreExport = () => {
+    closeMoreMenu();
+    handleExportConversation();
+  };
+
+  const handleMoreFullWidth = () => {
+    closeMoreMenu();
+    handleFullWidthToggle();
   };
 
   if (isCollapsed) {
@@ -361,7 +456,7 @@ const ChatSidebar = () => {
               style={{
                 fontSize: '0.875rem',
                 fontWeight: 500,
-                maxWidth: isFullWidth ? 'calc(100vw - 200px)' : sidebarWidth - 120,
+                maxWidth: isFullWidth ? 'calc(100vw - 200px)' : sidebarWidth - 160,
                 border: '1px solid var(--mui-palette-divider)',
                 borderRadius: 4,
                 padding: '4px 6px',
@@ -375,7 +470,7 @@ const ChatSidebar = () => {
               sx={{ 
                 fontSize: '0.875rem',
                 fontWeight: 500,
-                maxWidth: isFullWidth ? 'calc(100vw - 200px)' : sidebarWidth - 120, // Leave space for buttons
+                maxWidth: isFullWidth ? 'calc(100vw - 200px)' : sidebarWidth - 160, // Leave space for buttons
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
                 whiteSpace: 'nowrap',
@@ -418,6 +513,17 @@ const ChatSidebar = () => {
               </IconButton>
             </Tooltip>
           )}
+          <Tooltip title="New chat">
+            <IconButton
+              onClick={handleNewChat}
+              size="small"
+              color="primary"
+              aria-label="New chat"
+              sx={{ width: 32, height: 32, mr: 0.75 }}
+            >
+              <Add fontSize="small" />
+            </IconButton>
+          </Tooltip>
           <Tooltip title="Chats">
             <IconButton 
               onClick={() => setHistoryWindowOpen(!historyWindowOpen)}
@@ -428,31 +534,46 @@ const ChatSidebar = () => {
               <History />
             </IconButton>
           </Tooltip>
-          
-          {currentConversationId && (
-            <Tooltip title="Export Conversation">
-              <IconButton 
-                onClick={handleExportConversation}
-                size="small"
-                color="default"
-                sx={{ width: 32, height: 32 }}
-              >
-                <FileDownload />
-              </IconButton>
-            </Tooltip>
-          )}
-          
-          <Tooltip title={isFullWidth ? "Exit Full Width" : "Full Width"}>
-            <IconButton 
-              onClick={handleFullWidthToggle}
+
+          <Tooltip title="More options">
+            <IconButton
               size="small"
-              color={isFullWidth ? 'primary' : 'default'}
+              onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
+              aria-label="More chat options"
+              aria-haspopup="true"
+              aria-expanded={Boolean(moreMenuAnchor)}
               sx={{ width: 32, height: 32 }}
             >
-              {isFullWidth ? <FullscreenExit /> : <Fullscreen />}
+              <MoreVert />
             </IconButton>
           </Tooltip>
-          
+          <Menu
+            anchorEl={moreMenuAnchor}
+            open={Boolean(moreMenuAnchor)}
+            onClose={closeMoreMenu}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+          >
+            <MenuItem onClick={handleMoreFindInChat} disabled={!currentConversationId} dense>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Search fontSize="small" />
+              </ListItemIcon>
+              <ListItemText>Find in chat</ListItemText>
+            </MenuItem>
+            <MenuItem onClick={handleMoreExport} disabled={!currentConversationId} dense>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <FileDownload fontSize="small" />
+              </ListItemIcon>
+              <ListItemText>Export conversation</ListItemText>
+            </MenuItem>
+            <MenuItem onClick={handleMoreFullWidth} dense>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                {isFullWidth ? <FullscreenExit fontSize="small" /> : <Fullscreen fontSize="small" />}
+              </ListItemIcon>
+              <ListItemText>{isFullWidth ? 'Exit full width' : 'Full width'}</ListItemText>
+            </MenuItem>
+          </Menu>
+
           <Tooltip title="Collapse Chat">
             <IconButton onClick={toggleSidebar} size="small" sx={{ width: 32, height: 32 }}>
               <ChevronRight />
@@ -461,14 +582,133 @@ const ChatSidebar = () => {
         </Box>
       </Box>
 
-      {/* Messages Area - darkMode prop ensures re-render when theme toggles (React.memo blocks context-only updates) */}
-      <Box sx={{ flexGrow: 1, overflow: 'hidden', backgroundColor: 'background.default' }}>
-        <ChatMessagesArea darkMode={darkMode} />
-      </Box>
-
-      {/* Input Area */}
-      <Box sx={{ borderTop: '1px solid', borderColor: 'divider' }}>
-        <ChatInputArea />
+      <Box
+        sx={{
+          flexGrow: 1,
+          display: 'flex',
+          flexDirection: 'row',
+          minHeight: 0,
+          overflow: 'hidden',
+        }}
+      >
+        {activeArtifact && artifactCollapsed && (
+          <Box
+            onClick={() => setArtifactCollapsed(false)}
+            sx={{
+              width: 40,
+              minWidth: 40,
+              flexShrink: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              py: 0.5,
+              gap: 0.5,
+              borderRight: 1,
+              borderColor: 'divider',
+              bgcolor: 'background.paper',
+              minHeight: 0,
+              cursor: 'pointer',
+            }}
+            aria-label="Expand artifact panel"
+          >
+            <Tooltip title="Expand panel">
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setArtifactCollapsed(false);
+                }}
+                aria-label="Expand artifact panel"
+              >
+                <ChevronRight fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Box sx={{ py: 0.5, flexShrink: 0 }}>{artifactTypeIcon(activeArtifact.artifact_type)}</Box>
+            <Box
+              sx={{
+                flex: 1,
+                minHeight: 0,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                overflow: 'hidden',
+                px: 0.25,
+              }}
+            >
+              <Typography
+                variant="caption"
+                sx={{
+                  writingMode: 'vertical-rl',
+                  textOrientation: 'mixed',
+                  maxHeight: 'min(240px, 40vh)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  fontWeight: 600,
+                  color: 'text.secondary',
+                }}
+                title={activeArtifact.title || 'Artifact'}
+              >
+                {activeArtifact.title || 'Artifact'}
+              </Typography>
+            </Box>
+            <Tooltip title="Close artifact">
+              <IconButton
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setActiveArtifact(null);
+                }}
+                aria-label="Close artifact"
+              >
+                <Close fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        )}
+        {activeArtifact && !artifactCollapsed && (
+          <Box
+            sx={{
+              width: artifactPanelWidth,
+              minWidth: 200,
+              maxWidth: '85%',
+              flexShrink: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              minHeight: 0,
+              position: 'relative',
+            }}
+          >
+            <ArtifactDrawerPanel
+              artifact={activeArtifact}
+              artifactHistory={artifactHistory}
+              onRevert={revertArtifact}
+              onClose={() => setActiveArtifact(null)}
+              onCollapse={() => setArtifactCollapsed(true)}
+              conversationId={currentConversationId || null}
+            />
+            <SplitResizeHandle
+              edge="trailing"
+              isResizing={isArtifactResizing}
+              onMouseDown={handleArtifactResizeStart}
+            />
+          </Box>
+        )}
+        <Box
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+          }}
+        >
+          <Box sx={{ flexGrow: 1, overflow: 'hidden', backgroundColor: 'background.default' }}>
+            <ChatMessagesArea ref={chatMessagesAreaRef} darkMode={darkMode} />
+          </Box>
+          <Box sx={{ borderTop: '1px solid', borderColor: 'divider' }}>
+            <ChatInputArea />
+          </Box>
+        </Box>
       </Box>
 
       {!isFullWidth && (

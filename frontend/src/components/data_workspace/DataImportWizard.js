@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -51,13 +51,14 @@ const SUPPORTED_FORMATS = [
 
 const SQL_TYPES = ['TEXT', 'INTEGER', 'REAL', 'BOOLEAN', 'TIMESTAMP'];
 
-const DataImportWizard = ({ 
-  open, 
-  onClose, 
+const DataImportWizard = ({
+  open,
+  onClose,
   databaseId,
   workspaceId: propWorkspaceId,
   existingTables = [],
-  onImportComplete 
+  onImportComplete,
+  container
 }) => {
   const [activeStep, setActiveStep] = useState(0);
   const [file, setFile] = useState(null);
@@ -82,6 +83,7 @@ const DataImportWizard = ({
   const [importError, setImportError] = useState(null);
   const [uploadedFilePath, setUploadedFilePath] = useState(null);
   const [workspaceId, setWorkspaceId] = useState(null);
+  const pollIntervalRef = useRef(null);
 
   const steps = ['Upload File', 'Preview & Map Fields', 'Import'];
 
@@ -181,26 +183,37 @@ const DataImportWizard = ({
         database_id: databaseId,
         table_name: tableName,
         file_path: uploadedFilePath,
-        field_mapping: fieldMapping
+        field_mapping: fieldMapping,
+        type_overrides: typeOverrides
       });
       
       setImportJobId(response.job_id);
       
       // Poll for import progress
-      const pollInterval = setInterval(async () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+      pollIntervalRef.current = setInterval(async () => {
         try {
           const status = await dataWorkspaceService.getImportStatus(response.job_id);
           setImportProgress(status.progress_percent);
           
           if (status.status === 'completed') {
-            clearInterval(pollInterval);
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
             setActiveStep(2);
             setTimeout(() => {
               if (onImportComplete) onImportComplete();
               handleClose();
             }, 2000);
           } else if (status.status === 'failed') {
-            clearInterval(pollInterval);
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
             setImportError(`Import failed: ${status.error_log}`);
             setImporting(false);
           }
@@ -216,7 +229,20 @@ const DataImportWizard = ({
     }
   };
 
+  useEffect(() => {
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, []);
+
   const handleClose = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+      pollIntervalRef.current = null;
+    }
     setActiveStep(0);
     setFile(null);
     setFileFormat('csv');
@@ -518,11 +544,12 @@ const DataImportWizard = ({
   );
 
   return (
-    <Dialog 
-      open={open} 
+    <Dialog
+      open={open}
       onClose={importing ? undefined : handleClose}
-      maxWidth="md" 
+      maxWidth="md"
       fullWidth
+      container={container}
     >
       <DialogTitle>
         Import Data

@@ -12,6 +12,63 @@ use tokio::io::AsyncWriteExt;
 pub struct ReadFileCapability;
 pub struct ListDirectoryCapability;
 pub struct WriteFileCapability;
+pub struct CreateDirectoryCapability;
+
+fn mkdir_policy_capability(config: &AppConfig) -> &'static str {
+    if config.capabilities.contains_key("create_directory") {
+        "create_directory"
+    } else {
+        "write_file"
+    }
+}
+
+async fn list_dir_recursive(
+    config: &AppConfig,
+    base_path: &std::path::Path,
+    rel_prefix: &str,
+    depth: u32,
+    max_depth: u32,
+    entries: &mut Vec<Value>,
+) -> Result<(), String> {
+    if depth > max_depth {
+        return Ok(());
+    }
+    let mut rd = fs::read_dir(base_path).await.map_err(|e| e.to_string())?;
+    while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_dir = meta.is_dir();
+        let size_bytes = if meta.is_file() { meta.len() as usize } else { 0 };
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs());
+
+        let full_name = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel_prefix, name)
+        };
+
+        entries.push(json!({
+            "name": full_name,
+            "is_dir": is_dir,
+            "size_bytes": size_bytes,
+            "modified": modified
+        }));
+
+        if is_dir && depth < max_depth {
+            let sub_path = entry.path();
+            let sub_path_str = sub_path.to_string_lossy();
+            if policy::validate_path(config, "list_directory", &sub_path_str).is_ok() {
+                list_dir_recursive(config, &sub_path, &full_name, depth + 1, max_depth, entries)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
 
 #[async_trait]
 impl Capability for ReadFileCapability {
@@ -75,54 +132,16 @@ impl Capability for ListDirectoryCapability {
             .and_then(|v| v.as_str())
             .ok_or("Missing 'path' argument")?;
         let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+        let max_depth = args
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(if recursive { 3 } else { 1 }) as u32;
 
         policy::validate_path(config, "list_directory", path)?;
 
         let mut entries = Vec::new();
-        let mut read_dir = fs::read_dir(path).await.map_err(|e| e.to_string())?;
-
-        while let Some(entry) = read_dir.next_entry().await.map_err(|e| e.to_string())? {
-            let meta = entry.metadata().await.map_err(|e| e.to_string())?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let is_dir = meta.is_dir();
-            let size_bytes = if meta.is_file() { meta.len() as usize } else { 0 };
-            let modified = meta
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-
-            entries.push(json!({
-                "name": name,
-                "is_dir": is_dir,
-                "size_bytes": size_bytes,
-                "modified": modified
-            }));
-
-            if recursive && is_dir {
-                let sub_path = entry.path();
-                let sub_path_str = sub_path.to_string_lossy();
-                if let Ok(()) = policy::validate_path(config, "list_directory", &sub_path_str) {
-                    if let Ok(mut sub) = fs::read_dir(&sub_path).await {
-                        while let Ok(Some(e)) = sub.next_entry().await {
-                            let m = e.metadata().await.ok();
-                            let n = e.file_name().to_string_lossy().into_owned();
-                            let is_d = m.as_ref().map(|x| x.is_dir()).unwrap_or(false);
-                            let sz = m.as_ref().filter(|_| !is_d).map(|x| x.len() as usize).unwrap_or(0);
-                            let mod_ = m.and_then(|x| x.modified().ok())
-                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                .map(|d| d.as_secs());
-                            entries.push(json!({
-                                "name": format!("{}/{}", name, n),
-                                "is_dir": is_d,
-                                "size_bytes": sz,
-                                "modified": mod_
-                            }));
-                        }
-                    }
-                }
-            }
-        }
+        let base = std::path::Path::new(path);
+        list_dir_recursive(config, base, "", 1, max_depth, &mut entries).await?;
 
         let result = json!({
             "entries": entries,
@@ -182,6 +201,39 @@ impl Capability for WriteFileCapability {
 
         Ok(CapabilityResult {
             formatted: format!("Wrote {} bytes to {}", bytes_written, path),
+            result,
+        })
+    }
+}
+
+#[async_trait]
+impl Capability for CreateDirectoryCapability {
+    fn name(&self) -> &str {
+        "create_directory"
+    }
+
+    fn description(&self) -> &str {
+        "Create a directory and parents (args: path). Uses create_directory or write_file policy."
+    }
+
+    async fn execute(&self, args: Value, config: &AppConfig) -> Result<CapabilityResult, String> {
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing 'path' argument")?;
+
+        let cap = mkdir_policy_capability(config);
+        policy::validate_path_for_write(config, cap, path)?;
+
+        fs::create_dir_all(path).await.map_err(|e| e.to_string())?;
+
+        let result = json!({
+            "success": true,
+            "path": path
+        });
+
+        Ok(CapabilityResult {
+            formatted: format!("Created directory {}", path),
             result,
         })
     }

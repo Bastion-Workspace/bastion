@@ -30,6 +30,7 @@ import apiService from '../services/apiService';
 
 const TTS_TYPES = [
   { id: 'elevenlabs', label: 'ElevenLabs' },
+  { id: 'hedra', label: 'Hedra' },
   { id: 'openai', label: 'OpenAI TTS' },
 ];
 const STT_TYPES = [
@@ -211,6 +212,13 @@ export default function UserVoiceProviders() {
     (adminProvLower === 'elevenlabs' ||
       (adminSelectedVoice?.provider || '').toLowerCase() === 'elevenlabs');
 
+  const adminUsesHedra =
+    useAdminTts &&
+    adminLocalChipId !== 'browser' &&
+    adminLocalChipId !== 'piper' &&
+    (adminProvLower === 'hedra' ||
+      (adminSelectedVoice?.provider || '').toLowerCase() === 'hedra');
+
   const byokSelectedTtsProvider = useMemo(
     () => ttsProviders.find((p) => String(p.id) === String(ttsProviderId)),
     [ttsProviders, ttsProviderId]
@@ -220,8 +228,23 @@ export default function UserVoiceProviders() {
     byokTtsEngine === 'cloud' &&
     (byokSelectedTtsProvider?.provider_type || '').toLowerCase() === 'elevenlabs';
 
+  const byokUsesHedra =
+    !useAdminTts &&
+    byokTtsEngine === 'cloud' &&
+    (byokSelectedTtsProvider?.provider_type || '').toLowerCase() === 'hedra';
+
   const userElevenlabsModelId = settingsData?.user_elevenlabs_tts_model_id ?? '';
   const userAdminElevenlabsModelId = settingsData?.user_admin_elevenlabs_tts_model_id ?? '';
+  const userHedraModelId = settingsData?.user_hedra_tts_model_id ?? '';
+  const userAdminHedraModelId = settingsData?.user_admin_hedra_tts_model_id ?? '';
+
+  const hedraModelsEnabled = adminUsesHedra || byokUsesHedra;
+  const { data: hedraModelsData, isLoading: hedraModelsLoading } = useQuery(
+    ['hedraTtsModels', hedraModelsEnabled, useAdminTts, ttsProviderId],
+    () => apiService.getUserHedraTtsModels(),
+    { enabled: hedraModelsEnabled, retry: false }
+  );
+  const hedraModels = hedraModelsData?.models || [];
 
   const handleAdd = () => {
     setAddError('');
@@ -381,6 +404,34 @@ export default function UserVoiceProviders() {
                         {ELEVENLABS_TTS_MODEL_OPTIONS.map((o) => (
                           <MenuItem key={o.value || 'default'} value={o.value}>
                             {o.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  )}
+                  {adminUsesHedra && (
+                    <FormControl fullWidth size="small" sx={{ mb: 2, mt: 1 }}>
+                      <InputLabel>Hedra TTS engine</InputLabel>
+                      <Select
+                        label="Hedra TTS engine"
+                        value={
+                          hedraModels.some((m) => m.id === userAdminHedraModelId)
+                            ? userAdminHedraModelId
+                            : ''
+                        }
+                        onChange={(e) =>
+                          setSettingsMutation.mutate({
+                            user_admin_hedra_tts_model_id: e.target.value,
+                          })
+                        }
+                        disabled={setSettingsMutation.isLoading || hedraModelsLoading}
+                      >
+                        <MenuItem value="">
+                          <em>Platform default</em>
+                        </MenuItem>
+                        {hedraModels.map((m) => (
+                          <MenuItem key={m.id} value={m.id}>
+                            {m.name || m.id}
                           </MenuItem>
                         ))}
                       </Select>
@@ -558,6 +609,35 @@ export default function UserVoiceProviders() {
                         {ELEVENLABS_TTS_MODEL_OPTIONS.map((o) => (
                           <MenuItem key={o.value || 'byok-default'} value={o.value}>
                             {o.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  )}
+
+                  {byokUsesHedra && Boolean(ttsProviderId) && (
+                    <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+                      <InputLabel>Hedra TTS engine</InputLabel>
+                      <Select
+                        label="Hedra TTS engine"
+                        value={
+                          hedraModels.some((m) => m.id === userHedraModelId)
+                            ? userHedraModelId
+                            : ''
+                        }
+                        onChange={(e) =>
+                          setSettingsMutation.mutate({
+                            user_hedra_tts_model_id: e.target.value,
+                          })
+                        }
+                        disabled={setSettingsMutation.isLoading || hedraModelsLoading}
+                      >
+                        <MenuItem value="">
+                          <em>Platform default</em>
+                        </MenuItem>
+                        {hedraModels.map((m) => (
+                          <MenuItem key={m.id} value={m.id}>
+                            {m.name || m.id}
                           </MenuItem>
                         ))}
                       </Select>

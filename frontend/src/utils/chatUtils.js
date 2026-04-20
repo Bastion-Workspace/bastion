@@ -263,17 +263,6 @@ export const copyAsPlainText = async (text) => {
 };
 
 /**
- * Copy with both markdown and plain text options
- */
-export const copyWithOptions = async (text, asPlainText = false) => {
-  if (asPlainText) {
-    return await copyAsPlainText(text);
-  } else {
-    return await copyToClipboard(text);
-  }
-};
-
-/**
  * Copy as rich text (HTML) for Word and other rich editors
  */
 export const copyAsRichText = async (text) => {

@@ -95,7 +95,11 @@ async def _extract_facts_from_episode_summary(user_id: str, summary: str) -> int
     if not existing_text.strip():
         existing_text = "(none)"
 
-    prompt = f"""From this past activity summary only, extract DURABLE USER FACTS that remain useful across unrelated future chats (preferences, identity, recurring workflows). Skip task-specific or one-off details.
+    prompt = f"""From this past activity summary only, extract DURABLE USER FACTS — things that define who the user IS or what they ALWAYS prefer across unrelated future chats (identity, lasting preferences, recurring tools/workflows).
+
+NEVER extract: debugging/troubleshooting details, one-off task steps, project progress, specific file/server/pod names, incident findings, or anything irrelevant to a completely different topic tomorrow.
+
+KEY DISCIPLINE: If an existing fact covers the same topic, use the SAME fact_key with a refined value rather than inventing a new key. Most summaries produce ZERO facts.
 
 EXISTING FACTS (do not duplicate):
 {existing_text}

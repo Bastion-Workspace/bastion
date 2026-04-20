@@ -3,7 +3,7 @@ Agent Line API - CRUD for autonomous agent lines and org chart.
 """
 
 import logging
-from typing import Any, Dict, List, Optional  # noqa: F401 List for thread response
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
 from services import agent_line_service
+from services.line_heartbeat_schedule import preview_occurrences, validate_heartbeat_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,10 @@ class LineCreate(BaseModel):
     status: str = Field(default="active", max_length=50)
     heartbeat_config: Optional[Dict[str, Any]] = None
     governance_policy: Optional[Dict[str, Any]] = None
+    governance_mode: Optional[str] = Field(
+        default=None,
+        description="hierarchical | committee | round_robin | consensus",
+    )
     reference_config: Optional[Dict[str, Any]] = None
     data_workspace_config: Optional[Dict[str, Any]] = None
 
@@ -35,9 +40,13 @@ class LineUpdate(BaseModel):
     status: Optional[str] = Field(None, max_length=50)
     heartbeat_config: Optional[Dict[str, Any]] = None
     governance_policy: Optional[Dict[str, Any]] = None
+    governance_mode: Optional[str] = Field(
+        default=None,
+        description="hierarchical | committee | round_robin | consensus",
+    )
     budget_config: Optional[Dict[str, Any]] = None
     handle: Optional[str] = Field(None, max_length=100)
-    team_tool_packs: Optional[List[Any]] = None  # [{"pack": "name", "mode": "read"|"full"}] or legacy ["name"]
+    team_tool_packs: Optional[List[Any]] = None  # DEPRECATED: migrate to team_skill_ids
     team_skill_ids: Optional[List[str]] = None
     reference_config: Optional[Dict[str, Any]] = None
     data_workspace_config: Optional[Dict[str, Any]] = None
@@ -55,6 +64,51 @@ class MemberUpdate(BaseModel):
     additional_tools: Optional[List[str]] = None
 
 
+class HeartbeatSchedulePreviewBody(BaseModel):
+    heartbeat_config: Dict[str, Any] = Field(..., description="Draft heartbeat_config for preview only")
+    count: int = Field(default=5, ge=1, le=24)
+
+
+class LineFromTemplateBody(BaseModel):
+    template_id: str = Field(..., min_length=1, max_length=120)
+    name: str = Field(..., min_length=1, max_length=255)
+    ceo_agent_profile_id: str = Field(..., min_length=1)
+    handle: Optional[str] = Field(None, max_length=100)
+    member_agent_profile_ids: Optional[List[str]] = None
+
+
+@router.get("/templates", response_model=List[Dict[str, str]])
+async def list_line_templates(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Built-in line templates (id, title, description) for Create from template."""
+    from services.agent_line_template_service import list_template_summaries
+
+    _ = current_user
+    return list_template_summaries()
+
+
+@router.post("/from-template", response_model=Dict[str, Any])
+async def create_line_from_template(
+    body: LineFromTemplateBody,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Create a line from a built-in template (goals, workspace seed, heartbeat defaults)."""
+    from services.agent_line_template_service import instantiate_line_from_template
+
+    try:
+        return await instantiate_line_from_template(
+            user_id=current_user.user_id,
+            template_id=body.template_id.strip(),
+            name=body.name.strip(),
+            ceo_agent_profile_id=body.ceo_agent_profile_id.strip(),
+            handle=(body.handle or "").strip() or None,
+            member_agent_profile_ids=body.member_agent_profile_ids,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("", response_model=List[Dict[str, Any]])
 async def list_lines(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
@@ -69,6 +123,10 @@ async def create_line(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
     """Create a new agent team."""
+    if body.heartbeat_config is not None:
+        errs = validate_heartbeat_schedule(body.heartbeat_config)
+        if errs:
+            raise HTTPException(status_code=400, detail="; ".join(errs))
     return await agent_line_service.create_line(
         user_id=current_user.user_id,
         name=body.name,
@@ -77,6 +135,7 @@ async def create_line(
         status=body.status,
         heartbeat_config=body.heartbeat_config,
         governance_policy=body.governance_policy,
+        governance_mode=body.governance_mode,
         reference_config=body.reference_config,
         data_workspace_config=body.data_workspace_config,
     )
@@ -102,6 +161,10 @@ async def update_line(
 ):
     """Update a team."""
     body = body or LineUpdate()
+    if body.heartbeat_config is not None:
+        errs = validate_heartbeat_schedule(body.heartbeat_config)
+        if errs:
+            raise HTTPException(status_code=400, detail="; ".join(errs))
     try:
         return await agent_line_service.update_line(
             line_id=line_id,
@@ -112,6 +175,7 @@ async def update_line(
             status=body.status,
             heartbeat_config=body.heartbeat_config,
             governance_policy=body.governance_policy,
+            governance_mode=body.governance_mode,
             budget_config=body.budget_config,
             handle=body.handle,
             team_tool_packs=body.team_tool_packs,
@@ -121,6 +185,22 @@ async def update_line(
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{line_id}/heartbeat-schedule-preview")
+async def heartbeat_schedule_preview(
+    line_id: str = Path(..., description="Line UUID"),
+    body: HeartbeatSchedulePreviewBody = ...,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Validate draft heartbeat schedule and return next N occurrence times (UTC ISO), without persisting."""
+    team = await agent_line_service.get_line(line_id, current_user.user_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Line not found")
+    errs, occ = preview_occurrences(body.heartbeat_config, count=body.count)
+    if errs:
+        return JSONResponse(content={"errors": errs, "next_occurrences": []})
+    return JSONResponse(content={"errors": [], "next_occurrences": occ})
 
 
 @router.get("/{line_id}/chat-context")
@@ -331,6 +411,41 @@ async def trigger_heartbeat(
         countdown=1,
     )
     return {"ok": True, "message": "Heartbeat enqueued"}
+
+
+@router.get("/{line_id}/brief-snapshots", response_model=List[Dict[str, Any]])
+async def list_brief_snapshots(
+    line_id: str = Path(..., description="Line UUID"),
+    limit: int = Query(30, ge=1, le=100),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List recent stored brief snapshots for diff/history (newest first)."""
+    team = await agent_line_service.get_line(line_id, current_user.user_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Line not found")
+    from services.agent_line_brief_snapshot_service import list_snapshots
+
+    return await list_snapshots(line_id, current_user.user_id, limit)
+
+
+@router.get("/{line_id}/brief-snapshots/{snapshot_id}", response_model=Dict[str, Any])
+async def get_brief_snapshot(
+    line_id: str = Path(..., description="Line UUID"),
+    snapshot_id: str = Path(..., description="Snapshot UUID"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Return full content for one brief snapshot."""
+    team = await agent_line_service.get_line(line_id, current_user.user_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Line not found")
+    from services.agent_line_brief_snapshot_service import get_snapshot_detail
+
+    row = await get_snapshot_detail(
+        line_id, current_user.user_id, snapshot_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return row
 
 
 @router.post("/{line_id}/invoke-agent", response_model=Dict[str, Any])

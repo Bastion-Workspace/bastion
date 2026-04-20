@@ -222,7 +222,7 @@ class WebSearchTool:
             domain = domain.split("?")[0]
             
             return domain
-        except:
+        except Exception:
             return "unknown"
     
     def get_tool_definition(self) -> Dict[str, Any]:

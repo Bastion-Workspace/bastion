@@ -89,9 +89,10 @@ const DocumentSearchOverlay = ({ open, onClose }) => {
     const tcm = window.tabbedContentManagerRef;
     if (!tcm?.openDocument) return;
     const doc = result.document || {};
-    const documentName = doc.title || doc.filename || result.document_id || 'Document';
+    const openId = result.open_document_id || result.document_id;
+    const documentName = doc.title || doc.filename || openId || 'Document';
     const scrollToHeading = extractHeadingFromContent(result.text || result.content);
-    tcm.openDocument(result.document_id, documentName, scrollToHeading ? { scrollToHeading } : {});
+    tcm.openDocument(openId, documentName, scrollToHeading ? { scrollToHeading } : {});
     onClose();
   };
 

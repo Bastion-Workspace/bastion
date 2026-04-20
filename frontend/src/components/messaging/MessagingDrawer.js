@@ -26,6 +26,7 @@ import {
   Fullscreen,
   FullscreenExit,
   ChatBubbleOutline,
+  Hub,
 } from '@mui/icons-material';
 import { useMessaging } from '../../contexts/MessagingContext';
 import PresenceIndicator from './PresenceIndicator';
@@ -186,6 +187,7 @@ const MessagingDrawer = () => {
               const displayName = room.display_name || room.room_name || 'Unnamed Room';
               const userStatus = otherUser ? getUserPresence(otherUser.user_id) : 'offline';
               const isTeamRoom = !!room.team_id;
+              const isFederated = room.room_type === 'federated';
               
               return (
                 <ListItemButton
@@ -219,6 +221,11 @@ const MessagingDrawer = () => {
                   <ListItemText
                     primary={
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        {isFederated && (
+                          <Tooltip title="Federated room">
+                            <Hub sx={{ fontSize: 18, color: 'text.secondary', flexShrink: 0 }} />
+                          </Tooltip>
+                        )}
                         <Typography variant="body1" noWrap sx={{ flex: 1 }}>
                           {displayName}
                         </Typography>

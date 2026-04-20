@@ -11,6 +11,13 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+GOVERNANCE_MODES = frozenset({"hierarchical", "committee", "round_robin", "consensus"})
+
+
+def normalize_governance_mode(mode: Optional[str]) -> str:
+    m = (mode or "hierarchical").strip().lower()
+    return m if m in GOVERNANCE_MODES else "hierarchical"
+
 
 def _ensure_json_obj(val: Any, fallback: Any = None) -> Any:
     if fallback is None:
@@ -62,6 +69,7 @@ def _row_to_line(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "status": row.get("status", "active"),
         "heartbeat_config": _ensure_json_obj(row.get("heartbeat_config"), {}),
         "governance_policy": _ensure_json_obj(row.get("governance_policy"), {}),
+        "governance_mode": normalize_governance_mode(row.get("governance_mode")),
         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
         "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
     }
@@ -205,6 +213,7 @@ async def create_line(
     status: str = "active",
     heartbeat_config: Optional[Dict[str, Any]] = None,
     governance_policy: Optional[Dict[str, Any]] = None,
+    governance_mode: Optional[str] = None,
     reference_config: Optional[Dict[str, Any]] = None,
     data_workspace_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -213,10 +222,11 @@ async def create_line(
 
     ref = normalize_reference_config(reference_config)
     dw = normalize_data_workspace_config(data_workspace_config)
+    gmode = normalize_governance_mode(governance_mode)
     await execute(
         """
-        INSERT INTO agent_lines (user_id, name, description, mission_statement, status, heartbeat_config, governance_policy, reference_config, data_workspace_config)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb)
+        INSERT INTO agent_lines (user_id, name, description, mission_statement, status, heartbeat_config, governance_policy, governance_mode, reference_config, data_workspace_config)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10::jsonb)
         """,
         user_id,
         name,
@@ -225,6 +235,7 @@ async def create_line(
         status,
         json.dumps(_ensure_json_obj(heartbeat_config)),
         json.dumps(_ensure_json_obj(governance_policy)),
+        gmode,
         json.dumps(ref),
         json.dumps(dw),
     )
@@ -233,7 +244,30 @@ async def create_line(
         user_id,
         name,
     )
-    return _row_to_line(row)
+    line_id = str(row["id"])
+    await refresh_line_next_beat_at(line_id)
+    row2 = await fetch_one("SELECT * FROM agent_lines WHERE id = $1 AND user_id = $2", line_id, user_id)
+    return _row_to_line(row2)
+
+
+async def refresh_line_next_beat_at(line_id: str) -> None:
+    """Set next_beat_at from heartbeat_config (UTC). Clears when heartbeat disabled or no periodic schedule."""
+    from services.database_manager.database_helpers import fetch_one, execute
+    from services.celery_tasks.team_heartbeat_utils import _heartbeat_enabled
+    from services.line_heartbeat_schedule import compute_next_beat_at
+
+    row = await fetch_one("SELECT id, heartbeat_config FROM agent_lines WHERE id = $1", line_id)
+    if not row:
+        return
+    cfg = _ensure_json_obj(row.get("heartbeat_config"), {})
+    next_at = None
+    if _heartbeat_enabled(cfg):
+        next_at = compute_next_beat_at(cfg)
+    await execute(
+        "UPDATE agent_lines SET next_beat_at = $1, updated_at = NOW() WHERE id = $2",
+        next_at,
+        line_id,
+    )
 
 
 async def update_line(
@@ -245,6 +279,7 @@ async def update_line(
     status: Optional[str] = None,
     heartbeat_config: Optional[Dict[str, Any]] = None,
     governance_policy: Optional[Dict[str, Any]] = None,
+    governance_mode: Optional[str] = None,
     budget_config: Optional[Dict[str, Any]] = None,
     handle: Optional[str] = None,
     team_tool_packs: Optional[List[Any]] = None,
@@ -261,10 +296,12 @@ async def update_line(
         raise ValueError("Team not found")
 
     forced_status: Optional[str] = None
+    heartbeat_config_merged: Optional[Dict[str, Any]] = None
     if heartbeat_config is not None:
         old_cfg = _ensure_json_obj(existing.get("heartbeat_config"), {})
         new_cfg = _ensure_json_obj(heartbeat_config, {})
-        if _heartbeat_enabled(old_cfg) and not _heartbeat_enabled(new_cfg):
+        heartbeat_config_merged = new_cfg
+        if _heartbeat_enabled(old_cfg) and not _heartbeat_enabled(heartbeat_config_merged):
             task_id = existing.get("active_celery_task_id")
             if task_id:
                 try:
@@ -276,7 +313,7 @@ async def update_line(
                     logger.warning("Failed to revoke Celery task %s: %s", task_id, e)
             await set_line_active_celery_task_id(line_id, None)
             forced_status = "paused"
-        elif not _heartbeat_enabled(old_cfg) and _heartbeat_enabled(new_cfg):
+        elif not _heartbeat_enabled(old_cfg) and _heartbeat_enabled(heartbeat_config_merged):
             forced_status = "active"
 
     updates = ["updated_at = NOW()"]
@@ -305,11 +342,15 @@ async def update_line(
         pos += 1
     if heartbeat_config is not None:
         updates.append(f"heartbeat_config = ${pos}::jsonb")
-        args.append(json.dumps(_ensure_json_obj(heartbeat_config)))
+        args.append(json.dumps(_ensure_json_obj(heartbeat_config_merged)))
         pos += 1
     if governance_policy is not None:
         updates.append(f"governance_policy = ${pos}::jsonb")
         args.append(json.dumps(_ensure_json_obj(governance_policy)))
+        pos += 1
+    if governance_mode is not None:
+        updates.append(f"governance_mode = ${pos}")
+        args.append(normalize_governance_mode(governance_mode))
         pos += 1
     if budget_config is not None:
         updates.append(f"budget_config = ${pos}::jsonb")
@@ -341,6 +382,8 @@ async def update_line(
         *args,
         user_id,
     )
+    if heartbeat_config is not None:
+        await refresh_line_next_beat_at(line_id)
     row = await fetch_one("SELECT * FROM agent_lines WHERE id = $1", line_id)
     return _row_to_line(row)
 
@@ -683,6 +726,135 @@ async def get_line_budget_summary(line_id: str, user_id: str) -> Dict[str, Any]:
     }
 
 
+async def get_line_dispatch_mode(line_id: str, user_id: str) -> str:
+    """Return normalized governance_mode for the line."""
+    team = await get_line(line_id, user_id)
+    if not team:
+        return "hierarchical"
+    return normalize_governance_mode(team.get("governance_mode"))
+
+
+async def advance_round_robin_leader(line_id: str, user_id: str) -> None:
+    """After a round-robin heartbeat cycle, advance current_leader_idx for the next run."""
+    team = await get_line(line_id, user_id)
+    if not team or normalize_governance_mode(team.get("governance_mode")) != "round_robin":
+        return
+    gov = _ensure_json_obj(team.get("governance_policy"), {})
+    order = gov.get("rotation_order") or []
+    if not isinstance(order, list) or len(order) == 0:
+        return
+    idx = int(gov.get("current_leader_idx") or 0)
+    gov["current_leader_idx"] = (idx + 1) % len(order)
+    await update_line(line_id, user_id, governance_policy=gov)
+
+
+async def get_heartbeat_agents(line_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Build a dispatch plan for team heartbeat / line chat primary agent.
+
+    Returns dict with: mode, user_id, line_id, leader_agent_profile_id, participants (profile ids),
+    workers_dispatched_after, governance_policy snapshot, and mode-specific fields.
+    """
+    team = await get_line(line_id, user_id)
+    if not team:
+        return None
+    uid = str(team["user_id"])
+    mode = normalize_governance_mode(team.get("governance_mode"))
+    members: List[Dict[str, Any]] = team.get("members") or []
+    profile_ids = [str(m["agent_profile_id"]) for m in members]
+    if not profile_ids:
+        return None
+    gov = _ensure_json_obj(team.get("governance_policy"), {})
+
+    base: Dict[str, Any] = {
+        "mode": mode,
+        "user_id": uid,
+        "line_id": line_id,
+        "workers_dispatched_after": True,
+        "members": members,
+        "governance_policy": gov,
+        "chair_agent_id": None,
+        "quorum_count": None,
+        "quorum_pct": 60,
+        "tiebreaker_agent_id": None,
+        "rotation_cycle_index": None,
+        "vote_timeout_seconds": 300,
+    }
+
+    if mode == "hierarchical":
+        ceo = next((m for m in members if not m.get("reports_to")), None)
+        if not ceo:
+            ceo = members[0]
+        base["leader_agent_profile_id"] = str(ceo["agent_profile_id"])
+        base["participants"] = [base["leader_agent_profile_id"]]
+        return base
+
+    if mode == "committee":
+        chair = str(gov.get("chair_agent_id") or "").strip()
+        if chair and chair not in profile_ids:
+            chair = ""
+        lead = chair if chair else profile_ids[0]
+        q_raw = gov.get("quorum_count")
+        try:
+            q_count = int(q_raw) if q_raw is not None else None
+        except (TypeError, ValueError):
+            q_count = None
+        base["leader_agent_profile_id"] = lead
+        base["participants"] = list(profile_ids)
+        base["chair_agent_id"] = chair if chair else None
+        base["quorum_count"] = q_count
+        return base
+
+    if mode == "round_robin":
+        mid_by_id = {str(m["id"]): m for m in members}
+        order = [str(x) for x in (gov.get("rotation_order") or [])]
+        valid_order = [x for x in order if x in mid_by_id]
+        if not valid_order:
+            valid_order = [str(m["id"]) for m in members]
+            gov = dict(gov)
+            gov["rotation_order"] = valid_order
+            gov["current_leader_idx"] = int(gov.get("current_leader_idx") or 0)
+            await update_line(line_id, user_id, governance_policy=gov)
+            team = await get_line(line_id, user_id) or team
+            members = team.get("members") or []
+            mid_by_id = {str(m["id"]): m for m in members}
+            gov = _ensure_json_obj(team.get("governance_policy"), {})
+            valid_order = [str(x) for x in (gov.get("rotation_order") or [])]
+        idx = int(gov.get("current_leader_idx") or 0) % len(valid_order)
+        mem = mid_by_id.get(valid_order[idx])
+        if not mem:
+            return None
+        base["leader_agent_profile_id"] = str(mem["agent_profile_id"])
+        base["participants"] = [str(mid_by_id[mid]["agent_profile_id"]) for mid in valid_order if mid in mid_by_id]
+        base["rotation_cycle_index"] = idx
+        return base
+
+    if mode == "consensus":
+        try:
+            qpct = int(gov.get("quorum_pct") or 60)
+        except (TypeError, ValueError):
+            qpct = 60
+        qpct = max(1, min(100, qpct))
+        tb = str(gov.get("tiebreaker_agent_id") or "").strip()
+        if tb and tb not in profile_ids:
+            tb = ""
+        lead = tb if tb else profile_ids[0]
+        base["leader_agent_profile_id"] = lead
+        base["participants"] = list(profile_ids)
+        base["quorum_pct"] = qpct
+        base["tiebreaker_agent_id"] = tb if tb else None
+        try:
+            base["vote_timeout_seconds"] = int(gov.get("vote_timeout_seconds") or 300)
+        except (TypeError, ValueError):
+            base["vote_timeout_seconds"] = 300
+        base["workers_dispatched_after"] = False
+        return base
+
+    base["leader_agent_profile_id"] = profile_ids[0]
+    base["participants"] = list(profile_ids)
+    return base
+
+
 async def get_ceo_membership_id(line_id: str) -> Optional[str]:
     """Return the membership id of the team's CEO (root of org chart). Used by heartbeat. One root only."""
     from services.database_manager.database_helpers import fetch_one
@@ -700,23 +872,16 @@ async def get_ceo_membership_id(line_id: str) -> Optional[str]:
 
 
 async def get_ceo_agent_for_heartbeat(line_id: str) -> Optional[Dict[str, Any]]:
-    """Return CEO agent_profile_id and team user_id for heartbeat invocation. None if no root member."""
+    """Return primary line leader agent_profile_id and user_id (governance-aware). None if no members."""
     from services.database_manager.database_helpers import fetch_one
 
-    row = await fetch_one(
-        """
-        SELECT m.agent_profile_id, t.user_id
-        FROM agent_line_memberships m
-        JOIN agent_lines t ON t.id = m.line_id
-        WHERE m.line_id = $1 AND m.reports_to IS NULL
-        ORDER BY m.joined_at ASC
-        LIMIT 1
-        """,
-        line_id,
-    )
+    row = await fetch_one("SELECT user_id FROM agent_lines WHERE id = $1", line_id)
     if not row:
         return None
-    return {"agent_profile_id": str(row["agent_profile_id"]), "user_id": row["user_id"]}
+    plan = await get_heartbeat_agents(line_id, str(row["user_id"]))
+    if not plan or not plan.get("leader_agent_profile_id"):
+        return None
+    return {"agent_profile_id": str(plan["leader_agent_profile_id"]), "user_id": row["user_id"]}
 
 
 async def get_worker_agents_with_pending_tasks(
@@ -765,6 +930,50 @@ async def get_worker_agents_with_pending_tasks(
         }
         for r in rows
     ]
+
+
+async def apply_autonomous_heartbeat_run_quota(line_id: str, user_id: str) -> None:
+    """After a successful scheduled heartbeat: increment autonomous_runs_completed; disable at max_autonomous_runs."""
+    from services.database_manager.database_helpers import fetch_one, execute
+    from services.celery_tasks.team_heartbeat_utils import _send_team_notification
+
+    row = await fetch_one(
+        "SELECT id, name, heartbeat_config FROM agent_lines WHERE id = $1 AND user_id = $2",
+        line_id,
+        user_id,
+    )
+    if not row:
+        return
+    cfg = _ensure_json_obj(row.get("heartbeat_config"), {})
+    raw_max = cfg.get("max_autonomous_runs")
+    if raw_max is None or raw_max == "":
+        return
+    try:
+        max_n = int(raw_max)
+    except (TypeError, ValueError):
+        return
+    if max_n <= 0:
+        return
+    try:
+        done = int(cfg.get("autonomous_runs_completed") or 0)
+    except (TypeError, ValueError):
+        done = 0
+    done += 1
+    cfg["autonomous_runs_completed"] = done
+    disabled = False
+    if done >= max_n:
+        cfg["enabled"] = False
+        disabled = True
+    await update_line(line_id, user_id, heartbeat_config=cfg)
+    if disabled:
+        await execute("UPDATE agent_lines SET next_beat_at = NULL WHERE id = $1", line_id)
+        await _send_team_notification(
+            user_id,
+            line_id,
+            row.get("name") or "Line",
+            "heartbeat_run_limit_reached",
+            message=f"Autonomous heartbeat stopped after {max_n} run(s). Re-enable or raise the limit in line settings.",
+        )
 
 
 async def update_line_beat_timestamps(

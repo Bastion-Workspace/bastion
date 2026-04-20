@@ -1,5 +1,5 @@
 """
-WebDAV Module - Roosevelt's Mobile OrgMode Sync Engine
+WebDAV module for org-mode mobile sync
 
 Provides WebDAV server functionality for syncing OrgMode files with mobile apps
 like Orgzly (Android) and beorg (iOS).

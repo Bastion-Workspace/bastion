@@ -36,15 +36,14 @@ class FolderService:
         """Initialize the folder service"""
         await self.document_repository.initialize()
         
-        # Ensure base directory structure exists
-        self.global_base.mkdir(parents=True, exist_ok=True)
-        self.users_base.mkdir(parents=True, exist_ok=True)
-        self.teams_base.mkdir(parents=True, exist_ok=True)
-        
+        # User library files are stored on document-service; backend often has no
+        # writeable upload tree. get_document_file_path defaults to resolve-only
+        # (ensure_directory=False); pass ensure_directory=True only before local writes.
+
         logger.info(f"✅ Folder Service initialized")
-        logger.info(f"📂 Global files: {self.global_base}")
-        logger.info(f"📂 User files: {self.users_base}")
-        logger.info(f"📂 Team files: {self.teams_base}")
+        logger.debug(f"📂 Global files: {self.global_base}")
+        logger.debug(f"📂 User files: {self.users_base}")
+        logger.debug(f"📂 Team files: {self.teams_base}")
     
     def get_user_base_path(self, user_id: str, username: str = None) -> Path:
         """Get the base path for a user's documents"""
@@ -178,16 +177,29 @@ class FolderService:
             # Only log if directory doesn't exist (to reduce noise)
             if not folder_path.exists():
                 folder_path.mkdir(parents=True, exist_ok=True)
-                logger.info(f"📁 Created physical directory: {folder_path}")
+                logger.debug(f"📁 Created physical directory: {folder_path}")
             # Directory already exists - no need to log
             return True
         except Exception as e:
             logger.error(f"❌ Failed to create physical directory {folder_path}: {e}")
             return False
     
-    async def get_document_file_path(self, filename: str, folder_id: str = None, user_id: str = None, collection_type: str = "user", team_id: str = None) -> Path:
+    async def get_document_file_path(
+        self,
+        filename: str,
+        folder_id: str = None,
+        user_id: str = None,
+        collection_type: str = "user",
+        team_id: str = None,
+        *,
+        ensure_directory: bool = False,
+    ) -> Path:
         """
         Get the physical file path for a document based on folder structure.
+
+        On the API gateway, default ensure_directory=False avoids mkdir under
+        UPLOAD_DIR when content is served from document-service. Use
+        ensure_directory=True only when this process will write bytes to the path.
         
         Args:
             filename: Name of the file
@@ -195,7 +207,8 @@ class FolderService:
             user_id: User ID for user-specific files
             collection_type: 'user', 'global', or 'team'
             team_id: Team ID for team-specific files
-            
+            ensure_directory: If True, mkdir parent dirs before returning the path.
+        
         Returns:
             Path object for where the file should be stored
         """
@@ -204,21 +217,22 @@ class FolderService:
             if folder_id:
                 folder_path = await self.get_folder_physical_path(folder_id)
                 if folder_path:
-                    # Ensure directory exists
-                    await self._create_physical_directory(folder_path)
+                    if ensure_directory:
+                        await self._create_physical_directory(folder_path)
                     return folder_path / filename
             
             # No folder_id - place at base level
             if team_id:
                 base_path = self.get_team_base_path(team_id)
-                await self._create_physical_directory(base_path)
+                if ensure_directory:
+                    await self._create_physical_directory(base_path)
             elif collection_type == "global":
                 base_path = self.global_base
             else:
                 username = await self._get_username(user_id) if user_id else "unknown"
                 base_path = self.get_user_base_path(user_id, username)
-                # Ensure user base directory exists
-                await self._create_physical_directory(base_path)
+                if ensure_directory:
+                    await self._create_physical_directory(base_path)
             
             return base_path / filename
             
@@ -231,7 +245,7 @@ class FolderService:
         """
         Create a new folder or return existing one if already present.
         
-        **ROOSEVELT'S UPSERT CAVALRY!** 🏇
+        
         Now uses database-level UPSERT to handle race conditions properly!
         
         Security Rules:
@@ -240,7 +254,7 @@ class FolderService:
         - Regular Users: Cannot create global folders
         """
         try:
-            logger.info(f"🔍 Creating folder: name='{name}', parent_folder_id='{parent_folder_id}', user_id='{user_id}', collection_type='{collection_type}'")
+            logger.debug(f"🔍 Creating folder: name='{name}', parent_folder_id='{parent_folder_id}', user_id='{user_id}', collection_type='{collection_type}'")
             
             # Security validation
             if collection_type == "team":
@@ -293,9 +307,9 @@ class FolderService:
                 "admin_user_id": admin_user_id  # Pass creator's user_id for RLS context
             }
             
-            logger.info(f"📁 Attempting to create or get folder: {name}")
+            logger.debug(f"📁 Attempting to create or get folder: {name}")
             
-            # **BULLY!** Use new UPSERT method - handles race conditions at DB level!
+            # UPSERT handles race conditions at the database level
             result_folder_data = await self.document_repository.create_or_get_folder(folder_data)
             
             if not result_folder_data:
@@ -305,9 +319,9 @@ class FolderService:
             # Check if we got back a different folder_id (means folder already existed)
             actual_folder_id = result_folder_data['folder_id']
             if actual_folder_id != folder_id:
-                logger.info(f"📁 Folder already existed: {name} → {actual_folder_id}")
+                logger.debug(f"📁 Folder already existed: {name} → {actual_folder_id}")
             else:
-                logger.info(f"✅ Folder created successfully: {name} → {actual_folder_id}")
+                logger.debug(f"✅ Folder created successfully: {name} → {actual_folder_id}")
             
             # Create physical directory on filesystem
             # Pass admin_user_id for team folders so RLS can check team membership
@@ -390,7 +404,7 @@ class FolderService:
         """
         Update folder metadata (category, tags, inherit_tags)
         
-        **ROOSEVELT FOLDER TAGGING PHASE 1**: Store metadata for automatic inheritance on upload!
+        Store folder metadata for inheritance on upload
         """
         try:
             return await self.document_repository.update_folder_metadata(folder_id, category, tags, inherit_tags)
@@ -402,7 +416,7 @@ class FolderService:
         """
         Get folder metadata for tag inheritance
         
-        **ROOSEVELT FOLDER INHERITANCE**: Get tags to apply to uploaded documents!
+        Resolve tags to apply to uploaded documents from folder metadata
         """
         try:
             return await self.document_repository.get_folder_metadata(folder_id)
@@ -418,7 +432,7 @@ class FolderService:
         Inherits collection_type and team_id from parent folder.
         """
         try:
-            logger.info(f"📁 Getting or creating subfolder '{folder_name}' under parent {parent_folder_id}")
+            logger.debug(f"📁 Getting or creating subfolder '{folder_name}' under parent {parent_folder_id}")
             
             # Get parent folder to inherit collection_type and team_id
             # For team folders, use admin_user_id (creator) for RLS context, otherwise use user_id
@@ -436,11 +450,11 @@ class FolderService:
                 # Convert team_id to string if needed
                 team_id = str(parent_team_id) if parent_team_id else None
                 
-                logger.info(f"📁 Inheriting from parent: collection_type={collection_type}, team_id={team_id}")
+                logger.debug(f"📁 Inheriting from parent: collection_type={collection_type}, team_id={team_id}")
             else:
                 team_id = None
             
-            # **BULLY!** No need to check first - create_folder uses UPSERT!
+            # create_folder uses UPSERT; no separate existence check
             return await self.create_folder(
                 name=folder_name,
                 parent_folder_id=parent_folder_id,
@@ -462,9 +476,9 @@ class FolderService:
         **SIMPLIFIED**: Just calls create_folder - UPSERT handles race conditions!
         """
         try:
-            logger.info(f"📁 Getting or creating root folder '{folder_name}'")
+            logger.debug(f"📁 Getting or creating root folder '{folder_name}'")
             
-            # **BULLY!** No need to check first - create_folder uses UPSERT!
+            # create_folder uses UPSERT; no separate existence check
             return await self.create_folder(
                 name=folder_name,
                 parent_folder_id=None,  # Root folder has no parent
@@ -499,13 +513,13 @@ class FolderService:
         """Get the complete folder tree for a user - always fresh from database.
         When shallow=True, only virtual roots keep their direct children; those children get children=[] for lazy loading."""
         try:
-            logger.info(f"📁 Building fresh folder tree for user_id: {user_id}, collection_type: {collection_type}")
+            logger.debug(f"📁 Building fresh folder tree for user_id: {user_id}, collection_type: {collection_type}")
             
             # Database is the source of truth - no caching needed
             
             # Get user folders
             user_folders_data = await self.document_repository.get_folders_by_user(user_id, "user")
-            logger.info(f"📁 Found {len(user_folders_data)} user folders for user {user_id}")
+            logger.debug(f"📁 Found {len(user_folders_data)} user folders for user {user_id}")
             for folder in user_folders_data:
                 logger.debug(f"📁 User folder: {folder.get('name')} (ID: {folder.get('folder_id')}, parent: {folder.get('parent_folder_id')})")
             
@@ -528,7 +542,7 @@ class FolderService:
                     team_ids = [team['team_id'] for team in user_teams]
                     if team_ids:
                         team_folders_data = await self.document_repository.get_folders_by_teams(team_ids, user_id=user_id)
-                        logger.info(f"📁 Found {len(team_folders_data)} team folders for user {user_id}")
+                        logger.debug(f"📁 Found {len(team_folders_data)} team folders for user {user_id}")
                 except Exception as e:
                     logger.warning(f"Failed to get team folders for user {user_id}: {e}")
             
@@ -572,16 +586,16 @@ class FolderService:
             
             # Create "My Documents" root node with virtual sources for all users
             user_root_folders = [f for f in root_folders if f.collection_type == "user"]
-            logger.info(f"🔍 Found {len(user_root_folders)} user root folders for user {user_id}")
+            logger.debug(f"🔍 Found {len(user_root_folders)} user root folders for user {user_id}")
             for folder in user_root_folders:
-                logger.info(f"🔍 User root folder: {folder.name} (ID: {folder.folder_id})")
+                logger.debug(f"🔍 User root folder: {folder.name} (ID: {folder.folder_id})")
             
             # Create virtual sources based on collection type (only when user has configured feeds)
             virtual_sources = []
             if collection_type == "user" and user_id:
                 user_rss_n = await self._count_user_rss_feeds(user_id)
                 if user_rss_n > 0:
-                    virtual_sources = [
+                    virtual_sources.append(
                         DocumentFolder(
                             folder_id="rss_feeds_virtual",
                             name="RSS Feeds",
@@ -595,7 +609,7 @@ class FolderService:
                             children=[],
                             is_virtual_source=True,
                         )
-                    ]
+                    )
             
             # Combine user folders with virtual sources
             all_my_documents_children = user_root_folders + virtual_sources
@@ -613,13 +627,13 @@ class FolderService:
                 children=all_my_documents_children
             )
             virtual_roots.append(my_documents_root)
-            logger.info(f"✅ Created My Documents virtual root with {len(all_my_documents_children)} children (including virtual sources)")
+            logger.debug(f"✅ Created My Documents virtual root with {len(all_my_documents_children)} children (including virtual sources)")
             
             # Create "Global Documents" root node with virtual sources (for all users - read-only access)
             global_root_folders = [f for f in root_folders if f.collection_type == "global"]
-            logger.info(f"🔍 Found {len(global_root_folders)} global root folders")
+            logger.debug(f"🔍 Found {len(global_root_folders)} global root folders")
             
-            logger.info(f"🔍 User {user_id} admin status: {is_admin}")
+            logger.debug(f"🔍 User {user_id} admin status: {is_admin}")
             
             # Always create Global Documents root for all users (read-only access)
             # Only admins get virtual sources like RSS Feeds for global collection
@@ -659,15 +673,15 @@ class FolderService:
                 children=all_global_children
             )
             virtual_roots.append(global_documents_root)
-            logger.info(f"✅ Created Global Documents virtual root with {len(all_global_children)} children (read-only access for all users)")
+            logger.debug(f"✅ Created Global Documents virtual root with {len(all_global_children)} children (read-only access for all users)")
             
             # Add team folders as virtual roots
             team_root_folders = [f for f in root_folders if f.collection_type == "team"]
-            logger.info(f"🔍 Found {len(team_root_folders)} team root folders for user {user_id}")
+            logger.debug(f"🔍 Found {len(team_root_folders)} team root folders for user {user_id}")
             
             for team_folder in team_root_folders:
                 virtual_roots.append(team_folder)
-                logger.info(f"✅ Added team folder: {team_folder.name} (ID: {team_folder.folder_id})")
+                logger.debug(f"✅ Added team folder: {team_folder.name} (ID: {team_folder.folder_id})")
             
             # If no virtual roots were created, return the original root folders
             if not virtual_roots:
@@ -699,7 +713,7 @@ class FolderService:
             
             if folder_id in ["rss_feeds_virtual", "global_rss_feeds_virtual"]:
                 return await self._get_virtual_rss_folder_contents(folder_id, user_id)
-            
+
             if folder_id in ["my_documents_root", "global_documents_root"]:
                 return await self._get_virtual_root_contents(folder_id, user_id, limit=limit, offset=offset)
             
@@ -783,7 +797,7 @@ class FolderService:
     ) -> Optional[FolderContentsResponse]:
         """Get contents for virtual root folders (My Documents, Global Documents). Documents are paginated."""
         try:
-            logger.info(f"📁 Getting virtual root contents for {folder_id} (user: {user_id}, limit: {limit}, offset: {offset})")
+            logger.debug(f"📁 Getting virtual root contents for {folder_id} (user: {user_id}, limit: {limit}, offset: {offset})")
             
             if folder_id == "my_documents_root":
                 collection_type = "user"
@@ -810,13 +824,13 @@ class FolderService:
             documents, total_documents = await self.document_repository.get_root_documents_by_collection(
                 collection_type, query_user_id, limit=limit, offset=offset
             )
-            logger.info(f"📄 Found {len(documents)} root-level {collection_type} documents (total: {total_documents})")
+            logger.debug(f"📄 Found {len(documents)} root-level {collection_type} documents (total: {total_documents})")
             
             folder_query_user_id = None if collection_type == "global" else user_id
             folders_data = await self.document_repository.get_folders_by_user(folder_query_user_id, collection_type)
             root_folders_data = [f for f in folders_data if f.get('parent_folder_id') is None]
             subfolders = [DocumentFolder(**folder_data) for folder_data in root_folders_data]
-            logger.info(f"📁 Found {len(subfolders)} root-level folders")
+            logger.debug(f"📁 Found {len(subfolders)} root-level folders")
             
             result = FolderContentsResponse(
                 folder=virtual_folder,
@@ -826,7 +840,7 @@ class FolderService:
                 total_subfolders=len(subfolders)
             )
             
-            logger.info(f"✅ Virtual root contents for {folder_id}: {len(documents)} docs (total {total_documents}), {len(subfolders)} folders")
+            logger.debug(f"✅ Virtual root contents for {folder_id}: {len(documents)} docs (total {total_documents}), {len(subfolders)} folders")
             return result
             
         except Exception as e:
@@ -838,7 +852,7 @@ class FolderService:
     async def _get_virtual_rss_folder_contents(self, folder_id: str, user_id: str = None) -> Optional[FolderContentsResponse]:
         """Get contents for virtual RSS feed folders"""
         try:
-            logger.info(f"📁 Getting virtual RSS folder contents for {folder_id} (user: {user_id})")
+            logger.debug(f"📁 Getting virtual RSS folder contents for {folder_id} (user: {user_id})")
             
             # Create virtual folder object
             folder_name = "RSS Feeds"
@@ -869,13 +883,12 @@ class FolderService:
                 total_subfolders=0
             )
             
-            logger.info(f"✅ Virtual RSS folder contents for {folder_id}: 0 docs, 0 subfolders")
+            logger.debug(f"✅ Virtual RSS folder contents for {folder_id}: 0 docs, 0 subfolders")
             return result
             
         except Exception as e:
             logger.error(f"❌ Failed to get virtual RSS folder contents: {e}")
             return None
-
 
     async def update_folder(self, folder_id: str, update_data: FolderUpdateRequest, user_id: str = None, current_user_role: str = "user") -> Optional[DocumentFolder]:
         """Update folder information with proper access control"""
@@ -918,7 +931,7 @@ class FolderService:
                         try:
                             # Rename the physical directory
                             old_physical_path.rename(new_physical_path)
-                            logger.info(f"✅ Renamed physical directory: {old_physical_path} -> {new_physical_path}")
+                            logger.debug(f"✅ Renamed physical directory: {old_physical_path} -> {new_physical_path}")
                         except Exception as rename_error:
                             logger.error(f"❌ Failed to rename physical directory: {rename_error}")
                             # Rollback database change with proper RLS context
@@ -960,7 +973,7 @@ class FolderService:
                             # Move the physical directory
                             import shutil
                             shutil.move(str(old_physical_path), str(new_physical_path))
-                            logger.info(f"✅ Moved physical directory: {old_physical_path} -> {new_physical_path}")
+                            logger.debug(f"✅ Moved physical directory: {old_physical_path} -> {new_physical_path}")
                         except Exception as move_error:
                             logger.error(f"❌ Failed to move physical directory: {move_error}")
                             # Rollback database change with proper RLS context
@@ -991,7 +1004,7 @@ class FolderService:
                     except Exception as ws_error:
                         logger.warning(f"⚠️ Failed to send WebSocket notification: {ws_error}")
                 
-                logger.info(f"📁 Folder updated: {folder_id}")
+                logger.debug(f"📁 Folder updated: {folder_id}")
                 return updated_folder
             
             return folder
@@ -1005,32 +1018,32 @@ class FolderService:
     async def exempt_folder_from_vectorization(self, folder_id: str, user_id: str = None) -> bool:
         """Exempt folder and all descendants from vectorization, delete existing vectors/entities"""
         try:
-            logger.info(f"🚫 Exempting folder {folder_id} and all descendants from vectorization")
+            logger.debug(f"🚫 Exempting folder {folder_id} and all descendants from vectorization")
             
             # Mark folder as exempt (TRUE)
-            logger.info(f"🔍 DEBUG: Updating folder {folder_id} exemption status to True")
+            logger.debug(f"🔍 DEBUG: Updating folder {folder_id} exemption status to True")
             success = await self.document_repository.update_folder_exemption_status(folder_id, True)
             if not success:
                 logger.error(f"Failed to update exemption status for folder {folder_id}")
                 return False
-            logger.info(f"✅ DEBUG: Folder {folder_id} exemption status updated successfully")
+            logger.debug(f"✅ DEBUG: Folder {folder_id} exemption status updated successfully")
             
-            logger.info(f"🔍 DEBUG: About to call get_folder_descendants for folder {folder_id} with user_id {user_id}")
+            logger.debug(f"🔍 DEBUG: About to call get_folder_descendants for folder {folder_id} with user_id {user_id}")
 
             # Get all descendant folders and documents (with RLS context)
             descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id, user_id)
 
-            logger.info(f"🔍 DEBUG: get_folder_descendants returned {len(descendant_folder_ids)} folders and {len(descendant_document_ids)} documents")
+            logger.debug(f"🔍 DEBUG: get_folder_descendants returned {len(descendant_folder_ids)} folders and {len(descendant_document_ids)} documents")
 
             # Also get documents directly in this folder (not just descendants). No limit so we get all for exemption.
             direct_documents, _ = await self.document_repository.get_documents_by_folder(folder_id, user_id)
             direct_document_ids = [doc.document_id for doc in direct_documents]
 
-            logger.info(f"🔍 DEBUG: get_documents_by_folder returned {len(direct_documents)} documents: {[doc.document_id for doc in direct_documents]}")
+            logger.debug(f"🔍 DEBUG: get_documents_by_folder returned {len(direct_documents)} documents: {[doc.document_id for doc in direct_documents]}")
             
             # Combine direct and descendant documents, removing duplicates
             all_document_ids = list(set(direct_document_ids + descendant_document_ids))
-            logger.info(f"🔍 Found {len(direct_document_ids)} direct documents and {len(descendant_document_ids)} descendant documents in folder {folder_id} (total: {len(all_document_ids)} unique documents)")
+            logger.debug(f"🔍 Found {len(direct_document_ids)} direct documents and {len(descendant_document_ids)} descendant documents in folder {folder_id} (total: {len(all_document_ids)} unique documents)")
             
             if len(all_document_ids) == 0:
                 logger.warning(f"⚠️ No documents found to exempt in folder {folder_id} - this might be an RLS issue")
@@ -1038,7 +1051,7 @@ class FolderService:
             # Force all descendant folders to exempt (TRUE) to ensure hierarchy aligns with parent
             for desc_folder_id in descendant_folder_ids:
                 await self.document_repository.update_folder_exemption_status(desc_folder_id, True)
-                logger.info(f"🚫 Set descendant folder {desc_folder_id} to exempt (TRUE)")
+                logger.debug(f"🚫 Set descendant folder {desc_folder_id} to exempt (TRUE)")
             
             # Force all documents (direct and descendant) to exempt (TRUE) so no existing override prevents shutdown
             for doc_id in all_document_ids:
@@ -1046,7 +1059,7 @@ class FolderService:
                 doc_info = await self.document_repository.get_by_id(doc_id)
                 doc_user_id = doc_info.user_id if doc_info else user_id
                 await self.document_repository.update_document_exemption_status(doc_id, True, doc_user_id)
-                logger.info(f"🚫 Set document {doc_id} to exempt (TRUE)")
+                logger.debug(f"🚫 Set document {doc_id} to exempt (TRUE)")
             
             # Get document service for vector/KG deletion
             from services.service_container import get_service_container
@@ -1060,7 +1073,7 @@ class FolderService:
                     # Get document info for user_id
                     doc_info = await self.document_repository.get_by_id(doc_id)
                     doc_user_id = doc_info.user_id if doc_info else user_id
-                    logger.info(f"🔍 DEBUG: Document {doc_id} - doc_info exists: {doc_info is not None}, doc_user_id: {doc_user_id}, user_id: {user_id}")
+                    logger.debug(f"🔍 DEBUG: Document {doc_id} - doc_info exists: {doc_info is not None}, doc_user_id: {doc_user_id}, user_id: {user_id}")
                     
                     # Delete vectors
                     await document_service.embedding_manager.delete_document_chunks(doc_id, doc_user_id)
@@ -1091,7 +1104,7 @@ class FolderService:
     async def remove_folder_exemption(self, folder_id: str, user_id: str = None) -> bool:
         """Remove exemption from folder (set to inherit from parent), re-process all documents"""
         try:
-            logger.info(f"✅ Removing exemption for folder {folder_id} - setting to inherit from parent")
+            logger.debug(f"✅ Removing exemption for folder {folder_id} - setting to inherit from parent")
             
             # Set folder to inherit (NULL)
             success = await self.document_repository.update_folder_exemption_status(folder_id, None)
@@ -1140,7 +1153,7 @@ class FolderService:
         This allows a subfolder to opt out of parent exemption.
         """
         try:
-            logger.info(f"✅ Setting folder {folder_id} to explicitly NOT exempt (override parent)")
+            logger.debug(f"✅ Setting folder {folder_id} to explicitly NOT exempt (override parent)")
             
             # Mark folder as not exempt (FALSE - explicit override)
             success = await self.document_repository.update_folder_exemption_status(folder_id, False)
@@ -1184,7 +1197,14 @@ class FolderService:
             return False
     
     async def delete_folder(self, folder_id: str, user_id: str = None, recursive: bool = False, current_user_role: str = "user") -> bool:
-        """Delete a folder with proper access control"""
+        """Delete a folder with proper access control.
+
+        Note: In Docker Compose the backend container does not mount the document library
+        volume; HTTP folder deletion is handled by ``folder_api`` via document-service
+        gRPC. This method remains for in-process callers (e.g. default-folder migrations).
+        It removes the ``document_folders`` row and attempts ``rmtree`` on the backend
+        path only when that path exists locally.
+        """
         try:
             # Check if folder exists and user has access
             folder = await self.get_folder(folder_id, user_id, current_user_role)
@@ -1195,7 +1215,7 @@ class FolderService:
             if folder.collection_type == "team" and folder.parent_folder_id is None:
                 raise ValueError("Cannot delete team root folder. Delete the team instead to remove the folder.")
             
-            # **BULLY!** Get physical folder path BEFORE database deletion
+            # Resolve physical folder path before database deletion
             # (Once folder is deleted from DB, we can't look up its path anymore!)
             query_user_id = user_id
             query_user_role = current_user_role
@@ -1205,7 +1225,7 @@ class FolderService:
                 query_user_role = "admin"
             
             folder_path = await self.get_folder_physical_path(folder_id, user_id=query_user_id, user_role=query_user_role)
-            logger.info(f"📂 Physical path for folder {folder_id}: {folder_path}")
+            logger.debug(f"📂 Physical path for folder {folder_id}: {folder_path}")
             
             # **CRITICAL FIX:** Try to delete the folder from database to verify permissions
             # This prevents physical deletion when RLS would block database deletion
@@ -1219,14 +1239,14 @@ class FolderService:
                 logger.error(f"❌ Permission denied: Cannot delete folder {folder_id} (RLS policy blocked)")
                 raise PermissionError(f"Permission denied: You do not have permission to delete this folder")
             
-            logger.info(f"🗑️ Folder deleted from database: {folder_id}")
+            logger.debug(f"🗑️ Folder deleted from database: {folder_id}")
             
-            # **BULLY!** Delete physical directory from filesystem
+            # Remove physical directory from filesystem
             if folder_path and folder_path.exists():
                 try:
                     import shutil
                     shutil.rmtree(folder_path)
-                    logger.info(f"🗑️ Deleted physical directory: {folder_path}")
+                    logger.debug(f"🗑️ Deleted physical directory: {folder_path}")
                 except Exception as e:
                     logger.error(f"❌ Failed to delete physical directory {folder_path}: {e}")
                     # Don't fail the operation if directory delete fails - database is source of truth
@@ -1256,7 +1276,7 @@ class FolderService:
         - Subfolder: Archive
         """
         try:
-            logger.info(f"📁 Creating essential Org folders for user {user_id}")
+            logger.debug(f"📁 Creating essential Org folders for user {user_id}")
             # Create root 'Org' folder for the user
             org_folder = await self.create_folder(
                 name="Org",
@@ -1308,7 +1328,7 @@ class FolderService:
                         folders_to_remove.append(folder)
                 
                 if folders_to_remove:
-                    logger.info(f"📁 Cleaning up old RSS/Web Sources database folders for user {user_id}")
+                    logger.debug(f"📁 Cleaning up old RSS/Web Sources database folders for user {user_id}")
                     for folder in folders_to_remove:
                         await self.delete_folder(folder['folder_id'], user_id, recursive=True)
                 
@@ -1319,12 +1339,12 @@ class FolderService:
                 has_notes_folder = any(folder.get('name') == 'Notes' for folder in existing_folders)
                 
                 if has_old_structure or has_notes_folder:
-                    logger.info(f"📁 Detected old user folder structure for {user_id}, cleaning up...")
+                    logger.debug(f"📁 Detected old user folder structure for {user_id}, cleaning up...")
                     # Delete all existing user folders to recreate with new structure
                     for folder in existing_folders:
                         await self.delete_folder(folder['folder_id'], user_id, recursive=True)
                     # Create new structure
-                    logger.info(f"📁 Creating new essential folders for user {user_id}")
+                    logger.debug(f"📁 Creating new essential folders for user {user_id}")
                     return await self.create_default_folders(user_id)
                 else:
                     logger.debug(f"📁 User {user_id} already has {len(existing_folders)} folders")
@@ -1353,7 +1373,7 @@ class FolderService:
                         folders_to_remove.append(folder)
                 
                 if folders_to_remove:
-                    logger.info("📁 Cleaning up old RSS/Web Sources global database folders")
+                    logger.debug("📁 Cleaning up old RSS/Web Sources global database folders")
                     for folder in folders_to_remove:
                         await self.delete_folder(folder['folder_id'], None, recursive=True)
                 
@@ -1364,12 +1384,12 @@ class FolderService:
                 has_notes_folder = any(folder.get('name') == 'Notes' for folder in existing_global_folders)
                 
                 if has_old_structure or has_notes_folder:
-                    logger.info("📁 Detected old global folder structure, cleaning up...")
+                    logger.debug("📁 Detected old global folder structure, cleaning up...")
                     # Delete all existing global folders to recreate with new structure
                     for folder in existing_global_folders:
                         await self.delete_folder(folder['folder_id'], None, recursive=True)
                     # Create new structure
-                    logger.info("📁 Creating new global essential folder structure")
+                    logger.debug("📁 Creating new global essential folder structure")
                     return await self.create_global_folder_structure()
                 else:
                     logger.debug(f"📁 Global folder structure already exists: {len(existing_global_folders)} folders")
@@ -1483,7 +1503,7 @@ class FolderService:
             # Update document folder
             success = await self.document_repository.update_document_folder(document_id, folder_id)
             if success:
-                logger.info(f"🤖 Automated process '{automated_process}' assigned document {document_id} to essential folder: {folder.name}")
+                logger.debug(f"🤖 Automated process '{automated_process}' assigned document {document_id} to essential folder: {folder.name}")
                 return True
             else:
                 logger.error(f"❌ Failed to assign document {document_id} to essential folder {folder.name}")
@@ -1518,7 +1538,7 @@ class FolderService:
     async def create_or_get_folder(self, folder_name: str, parent_folder_id: str = None, user_id: str = None, collection_type: str = "user", current_user_role: str = "user", admin_user_id: str = None) -> str:
         """Create a folder or get existing folder ID"""
         try:
-            logger.info(f"📁 Creating or getting folder: '{folder_name}' (parent: {parent_folder_id}, user: {user_id}, collection: {collection_type})")
+            logger.debug(f"📁 Creating or getting folder: '{folder_name}' (parent: {parent_folder_id}, user: {user_id}, collection: {collection_type})")
             
             if parent_folder_id:
                 # Create or get subfolder
@@ -1527,7 +1547,7 @@ class FolderService:
                 # Create or get root folder
                 folder = await self.get_or_create_root_folder(folder_name, user_id, collection_type, current_user_role, admin_user_id)
             
-            logger.info(f"✅ Folder '{folder_name}' ready: {folder.folder_id}")
+            logger.debug(f"✅ Folder '{folder_name}' ready: {folder.folder_id}")
             return folder.folder_id
             
         except Exception as e:

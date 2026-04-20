@@ -15,6 +15,11 @@ from protos import vector_service_pb2, vector_service_pb2_grpc
 
 logger = logging.getLogger(__name__)
 
+
+class VectorUnavailableError(RuntimeError):
+    """Raised when embedding RPC cannot run because the vector service is not connected."""
+
+
 class VectorServiceClient:
     """Client for interacting with the Vector Service via gRPC"""
     
@@ -30,63 +35,114 @@ class VectorServiceClient:
         self.channel: Optional[grpc.aio.Channel] = None
         self.stub: Optional[vector_service_pb2_grpc.VectorServiceStub] = None
         self._initialized = False
-        
+        self._embedding_disabled_logged = False
+
         # Semaphore to limit concurrent delete operations (prevent overwhelming vector service)
         self._delete_semaphore = asyncio.Semaphore(5)  # Max 5 concurrent deletions
-    
+
+    def _embedding_enabled(self) -> bool:
+        return bool(getattr(self.settings, "VECTOR_EMBEDDING_ENABLED", True))
+
+    def is_ready(self) -> bool:
+        return bool(
+            self._embedding_enabled() and self._initialized and self.stub is not None
+        )
+
+    async def _reset_connection(self) -> None:
+        if self.channel:
+            try:
+                await self.channel.close()
+            except Exception:
+                pass
+        self.channel = None
+        self.stub = None
+        self._initialized = False
+
+    async def try_reconnect(self) -> bool:
+        """Drop the channel and reconnect if not healthy. Returns True if ready after attempt."""
+        if not self._embedding_enabled():
+            return False
+        if self.is_ready():
+            return True
+        await self._reset_connection()
+        await self.initialize(required=False)
+        return self.is_ready()
+
     async def initialize(self, required: bool = False):
         """Initialize the gRPC channel and stub
-        
+
         Args:
             required: If True, raise exception on failure. If False, log warning and continue.
         """
+        if not self._embedding_enabled():
+            if required:
+                raise RuntimeError(
+                    "Vector embedding is disabled (VECTOR_EMBEDDING_ENABLED=false) but a required "
+                    "connection was requested"
+                )
+            if not self._embedding_disabled_logged:
+                logger.info(
+                    "Vector gRPC client disabled by configuration (VECTOR_EMBEDDING_ENABLED=false)"
+                )
+                self._embedding_disabled_logged = True
+            await self._reset_connection()
+            return
+
         if self._initialized:
             return
-        
+
+        await self._reset_connection()
+
         try:
-            logger.debug(f"Connecting to Vector Service at {self.service_url}")
-            
-            # Create insecure channel with increased message size limits and better concurrency handling
-            # Default is 4MB, increase to 100MB for large batch embedding responses
-            # Keepalive at 5 min to avoid GOAWAY "too_many_pings" (ENHANCE_YOUR_CALM) from server/proxy
+            logger.debug("Connecting to Vector Service at %s", self.service_url)
+
             options = [
-                ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
-                ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
-                ('grpc.keepalive_time_ms', 300000),  # Send keepalive ping every 5 min
-                ('grpc.keepalive_timeout_ms', 20000),  # Wait 20s for keepalive response
-                ('grpc.keepalive_permit_without_calls', 1),  # Allow keepalive pings when no calls
-                ('grpc.http2.max_pings_without_data', 0),  # No limit on pings without data
-                ('grpc.http2.min_time_between_pings_ms', 60000),  # Min 60s between pings
-                ('grpc.http2.min_ping_interval_without_data_ms', 300000),  # Min 5 min between pings without data
+                ("grpc.max_send_message_length", 100 * 1024 * 1024),
+                ("grpc.max_receive_message_length", 100 * 1024 * 1024),
+                ("grpc.keepalive_time_ms", 300000),
+                ("grpc.keepalive_timeout_ms", 20000),
+                ("grpc.keepalive_permit_without_calls", 1),
+                ("grpc.http2.max_pings_without_data", 0),
+                ("grpc.http2.min_time_between_pings_ms", 60000),
+                ("grpc.http2.min_ping_interval_without_data_ms", 300000),
             ]
             self.channel = grpc.aio.insecure_channel(self.service_url, options=options)
             self.stub = vector_service_pb2_grpc.VectorServiceStub(self.channel)
-            
-            # Test connection
+
             health_request = vector_service_pb2.HealthCheckRequest()
             response = await self.stub.HealthCheck(health_request, timeout=5.0)
-            
+
             if response.status == "healthy":
-                logger.info(f"✅ Connected to Vector Service v{response.service_version}")
-                logger.info(f"   OpenAI Available: {response.openai_available}")
+                logger.info(
+                    "Connected to Vector Service v%s (openai_available=%s)",
+                    response.service_version,
+                    response.openai_available,
+                )
                 self._initialized = True
             else:
-                logger.warning(f"⚠️ Vector Service health check returned: {response.status}")
-                
+                msg = f"Vector Service health check returned: {response.status}"
+                logger.warning(msg)
+                await self._reset_connection()
+                if required:
+                    raise RuntimeError(msg)
+
         except Exception as e:
-            logger.error(f"❌ Failed to connect to Vector Service: {e}")
+            logger.error("Failed to connect to Vector Service: %s", e)
+            await self._reset_connection()
             if required:
                 raise
-            else:
-                logger.warning("⚠️ Vector Service unavailable - backend will start without embedding support")
-                logger.warning("⚠️ Embeddings will be retried when needed")
-    
+            logger.warning(
+                "Vector Service unavailable; embedding calls will fail until reconnect succeeds"
+            )
+
     async def close(self):
         """Close the gRPC channel"""
         if self.channel:
             await self.channel.close()
-            self._initialized = False
-            logger.info("Vector Service client closed")
+        self.channel = None
+        self.stub = None
+        self._initialized = False
+        logger.info("Vector Service client closed")
     
     async def generate_embedding(
         self, 
@@ -103,14 +159,14 @@ class VectorServiceClient:
         Returns:
             List of floats representing the embedding vector
         """
-        if not self._initialized:
-            logger.info("Vector Service not initialized, attempting to connect...")
-            try:
-                await self.initialize(required=True)
-            except Exception as e:
-                logger.error(f"❌ Cannot generate embedding: Vector Service unavailable: {e}")
-                raise RuntimeError("Vector Service is not available") from e
-        
+        if not self.is_ready():
+            await self.initialize(required=False)
+        if not self.is_ready():
+            req = getattr(get_settings(), "VECTOR_EMBEDDING_REQUIRED", False)
+            if req:
+                raise RuntimeError("Vector Service is not available")
+            raise VectorUnavailableError("Vector Service is not available")
+
         try:
             request = vector_service_pb2.EmbeddingRequest(
                 text=text,
@@ -146,14 +202,14 @@ class VectorServiceClient:
         Returns:
             List of embedding vectors
         """
-        if not self._initialized:
-            logger.info("Vector Service not initialized, attempting to connect...")
-            try:
-                await self.initialize(required=True)
-            except Exception as e:
-                logger.error(f"❌ Cannot generate embeddings: Vector Service unavailable: {e}")
-                raise RuntimeError("Vector Service is not available") from e
-        
+        if not self.is_ready():
+            await self.initialize(required=False)
+        if not self.is_ready():
+            req = getattr(get_settings(), "VECTOR_EMBEDDING_REQUIRED", False)
+            if req:
+                raise RuntimeError("Vector Service is not available")
+            raise VectorUnavailableError("Vector Service is not available")
+
         try:
             request = vector_service_pb2.BatchEmbeddingRequest(
                 texts=texts,
@@ -188,15 +244,17 @@ class VectorServiceClient:
         Returns:
             Dictionary with success status and entries cleared
         """
-        if not self._initialized:
-            await self.initialize()
-        
+        if not self.is_ready():
+            await self.initialize(required=False)
+        if not self.is_ready():
+            return {"success": False, "entries_cleared": 0, "error": "vector service unavailable"}
+
         try:
             request = vector_service_pb2.ClearCacheRequest(
                 clear_all=clear_all,
                 content_hash=content_hash or ""
             )
-            
+
             response = await self.stub.ClearEmbeddingCache(request, timeout=10.0)
             return {
                 "success": response.success,
@@ -300,13 +358,22 @@ class VectorServiceClient:
                     else:
                         payload_map[key] = str(value)
                 
-                vector_points.append(
-                    vector_service_pb2.VectorPoint(
-                        id=str(point.get("id", "")),
-                        vector=point.get("vector", []),
-                        payload=payload_map
-                    )
+                vp = vector_service_pb2.VectorPoint(
+                    id=str(point.get("id", "")),
+                    vector=point.get("vector", []),
+                    payload=payload_map,
                 )
+
+                sparse = point.get("sparse_vector")
+                if sparse and sparse.get("indices"):
+                    vp.sparse_vector.CopyFrom(
+                        vector_service_pb2.SparseVector(
+                            indices=sparse["indices"],
+                            values=sparse["values"],
+                        )
+                    )
+
+                vector_points.append(vp)
             
             request = vector_service_pb2.UpsertVectorsRequest(
                 collection_name=collection_name,
@@ -342,7 +409,9 @@ class VectorServiceClient:
         query_vector: List[float],
         limit: int = 50,
         score_threshold: float = 0.7,
-        filters: List[Dict[str, str]] = None
+        filters: List[Dict[str, str]] = None,
+        sparse_query_vector: Optional[Dict[str, Any]] = None,
+        fusion_mode: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Search vectors via Vector Service
@@ -353,6 +422,8 @@ class VectorServiceClient:
             limit: Maximum results
             score_threshold: Minimum similarity score
             filters: List of filter dicts with 'field', 'value', 'operator' keys
+            sparse_query_vector: Optional BM25 sparse vector {"indices": [...], "values": [...]}
+            fusion_mode: "rrf" to enable Reciprocal Rank Fusion with sparse+dense
             
         Returns:
             List of search result dicts with 'id', 'score', 'payload'
@@ -381,8 +452,18 @@ class VectorServiceClient:
                 query_vector=query_vector,
                 limit=limit,
                 score_threshold=score_threshold,
-                filters=vector_filters
+                filters=vector_filters,
             )
+
+            if sparse_query_vector and sparse_query_vector.get("indices"):
+                request.sparse_query_vector.CopyFrom(
+                    vector_service_pb2.SparseVector(
+                        indices=sparse_query_vector["indices"],
+                        values=sparse_query_vector["values"],
+                    )
+                )
+            if fusion_mode:
+                request.fusion_mode = fusion_mode
             
             response = await self.stub.SearchVectors(request, timeout=30.0)
             
@@ -417,6 +498,116 @@ class VectorServiceClient:
         except Exception as e:
             logger.error(f"Unexpected error in search_vectors: {e}")
             return []
+
+    async def scroll_points(
+        self,
+        collection_name: str,
+        filters: Optional[List[Dict[str, Any]]] = None,
+        limit: int = 256,
+        offset: Optional[str] = None,
+        with_vectors: bool = False,
+    ) -> Dict[str, Any]:
+        """Paginated scroll with payload (metadata-only by default)."""
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            import json
+
+            vector_filters = []
+            if filters:
+                for f in filters:
+                    vf = vector_service_pb2.VectorFilter(
+                        field=f.get("field", ""),
+                        value=f.get("value", ""),
+                        operator=f.get("operator", "equals"),
+                    )
+                    if f.get("values") is not None:
+                        vf.values.extend(f.get("values"))
+                    vector_filters.append(vf)
+
+            request = vector_service_pb2.ScrollPointsRequest(
+                collection_name=collection_name,
+                limit=limit,
+                with_vectors=with_vectors,
+                filters=vector_filters,
+            )
+            if offset:
+                request.offset = offset
+
+            response = await self.stub.ScrollPoints(request, timeout=300.0)
+            points_out = []
+            for sp in response.points:
+                payload = {}
+                for key, value in sp.payload.items():
+                    try:
+                        parsed = json.loads(value)
+                        payload[key] = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        payload[key] = value
+                points_out.append({"id": sp.id, "payload": payload})
+
+            return {
+                "success": response.success,
+                "points": points_out,
+                "next_offset": response.next_offset or "",
+                "error": response.error if response.HasField("error") else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("ScrollPoints failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "points": [],
+                "next_offset": "",
+                "error": str(e),
+            }
+        except Exception as e:
+            logger.error("Unexpected error in scroll_points: %s", e)
+            return {
+                "success": False,
+                "points": [],
+                "next_offset": "",
+                "error": str(e),
+            }
+
+    async def count_vectors(
+        self,
+        collection_name: str,
+        filters: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Qdrant count with optional filter."""
+        if not self._initialized:
+            await self.initialize()
+
+        try:
+            vector_filters = []
+            if filters:
+                for f in filters:
+                    vf = vector_service_pb2.VectorFilter(
+                        field=f.get("field", ""),
+                        value=f.get("value", ""),
+                        operator=f.get("operator", "equals"),
+                    )
+                    if f.get("values") is not None:
+                        vf.values.extend(f.get("values"))
+                    vector_filters.append(vf)
+
+            request = vector_service_pb2.CountVectorsRequest(
+                collection_name=collection_name,
+                filters=vector_filters,
+            )
+            response = await self.stub.CountVectors(request, timeout=120.0)
+            return {
+                "success": response.success,
+                "count": int(response.count),
+                "error": response.error if response.HasField("error") else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("CountVectors failed: %s - %s", e.code(), e.details())
+            return {"success": False, "count": 0, "error": str(e)}
+        except Exception as e:
+            logger.error("Unexpected error in count_vectors: %s", e)
+            return {"success": False, "count": 0, "error": str(e)}
     
     async def delete_vectors(
         self,
@@ -574,7 +765,8 @@ class VectorServiceClient:
         self,
         collection_name: str,
         vector_size: int,
-        distance: str = "COSINE"
+        distance: str = "COSINE",
+        enable_sparse: bool = False,
     ) -> Dict[str, Any]:
         """
         Create collection via Vector Service
@@ -583,6 +775,7 @@ class VectorServiceClient:
             collection_name: Name of collection
             vector_size: Vector dimensions
             distance: Distance metric ("COSINE", "EUCLIDEAN", "DOT")
+            enable_sparse: If True, create with named dense + sparse vectors for hybrid search
             
         Returns:
             Dict with success, error
@@ -594,7 +787,8 @@ class VectorServiceClient:
             request = vector_service_pb2.CreateCollectionRequest(
                 collection_name=collection_name,
                 vector_size=vector_size,
-                distance=distance
+                distance=distance,
+                enable_sparse=enable_sparse,
             )
             
             response = await self.stub.CreateCollection(request, timeout=60.0)
@@ -687,7 +881,8 @@ class VectorServiceClient:
                     "vector_size": col_info.vector_size,
                     "distance": col_info.distance,
                     "points_count": col_info.points_count,
-                    "status": col_info.status
+                    "status": col_info.status,
+                    "schema_type": getattr(col_info, "schema_type", "") or "",
                 })
             
             return {
@@ -750,7 +945,8 @@ class VectorServiceClient:
                     "vector_size": col_info.vector_size,
                     "distance": col_info.distance,
                     "points_count": col_info.points_count,
-                    "status": col_info.status
+                    "status": col_info.status,
+                    "schema_type": getattr(col_info, "schema_type", "") or "",
                 },
                 "error": None
             }

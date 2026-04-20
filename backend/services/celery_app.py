@@ -1,12 +1,19 @@
 """
 Celery Application Configuration
-Background task processing for the "Big Stick" Orchestrator
+Background task processing for the orchestrator
 """
 
 import os
 import logging
 from celery import Celery
-from celery.signals import worker_ready, worker_shutdown, worker_process_init
+
+from config import settings
+from celery.signals import (
+    after_setup_logger,
+    worker_ready,
+    worker_shutdown,
+    worker_process_init,
+)
 from kombu import Queue
 
 logger = logging.getLogger(__name__)
@@ -29,6 +36,7 @@ celery_app = Celery(
         "services.celery_tasks.document_tasks",
         "services.celery_tasks.connection_health_tasks",
         "services.celery_tasks.team_heartbeat_tasks",
+        "services.celery_tasks.chat_directive_task",
         "services.celery_tasks.browser_session_health_tasks",
         "services.celery_tasks.proposal_cleanup_tasks",
         "services.celery_tasks.scraper_tasks",
@@ -36,9 +44,13 @@ celery_app = Celery(
         "services.celery_tasks.fact_extraction_task",
         "services.celery_tasks.episode_tasks",
         "services.celery_tasks.session_analysis_task",
+        "services.celery_tasks.fact_theme_tasks",
         "services.celery_tasks.document_version_tasks",
         "services.celery_tasks.model_health_tasks",
         "services.celery_tasks.audio_export_tasks",
+        "services.celery_tasks.federation_tasks",
+        "services.celery_tasks.skill_metrics_tasks",
+        "services.celery_tasks.skill_promotion_tasks",
     ]
 )
 
@@ -57,6 +69,7 @@ celery_app.conf.update(
         "services.celery_tasks.scheduled_agent_tasks.*": {"queue": "agents"},
         "services.celery_tasks.rss_tasks.*": {"queue": "rss"},
         "services.celery_tasks.scraper_tasks.*": {"queue": "scrapers"},
+        "services.celery_tasks.document_tasks.bulk_reindex_batch": {"queue": "reindex"},
     },
     
     # Queue configuration
@@ -69,6 +82,7 @@ celery_app.conf.update(
         Queue("coding", routing_key="coding"),
         Queue("rss", routing_key="rss"),
         Queue("scrapers", routing_key="scrapers"),
+        Queue("reindex", routing_key="reindex"),
     ),
     
     # Worker settings
@@ -120,11 +134,6 @@ celery_app.conf.update(
             'task': 'services.celery_tasks.rss_tasks.scheduled_rss_full_content_backfill_task',
             'schedule': 21600.0,  # 6 hours
         },
-        # Purge old synthesized news articles daily
-        'purge-old-news-articles': {
-            'task': 'services.celery_tasks.rss_tasks.purge_old_news_task',
-            'schedule': 86400.0,  # 24 hours in seconds
-        },
         # Clean up old chat attachments - run daily
         'cleanup-old-chat-attachments': {
             'task': 'services.celery_tasks.chat_attachment_tasks.cleanup_old_chat_attachments_task',
@@ -164,6 +173,17 @@ celery_app.conf.update(
             'task': 'services.celery_tasks.connection_health_tasks.sync_oauth_connections',
             'schedule': 1800.0,
         },
+        # Federation: background pull of remote outboxes + local outbox prune
+        'federation-outbox-sync': {
+            'task': 'services.celery_tasks.federation_tasks.federation_sync_outbox_beat',
+            'schedule': float(getattr(settings, "FEDERATION_POLL_INTERVAL_SECONDS", 5) or 5),
+        },
+        'federation-presence-sync': {
+            'task': 'services.celery_tasks.federation_tasks.federation_presence_sync_beat',
+            'schedule': float(
+                getattr(settings, "FEDERATION_PRESENCE_SYNC_INTERVAL_SECONDS", 30) or 30
+            ),
+        },
         # Expired document edit proposals: cleanup hourly
         'cleanup-expired-proposals': {
             'task': 'services.celery_tasks.proposal_cleanup_tasks.cleanup_expired_proposals',
@@ -173,6 +193,11 @@ celery_app.conf.update(
         'purge-expired-facts': {
             'task': 'services.celery_tasks.fact_tasks.purge_expired_facts_task',
             'schedule': 3600.0,
+        },
+        # User facts: cluster embeddings into themes (every 6 hours)
+        'cluster-user-fact-themes': {
+            'task': 'services.celery_tasks.fact_theme_tasks.cluster_user_fact_themes_task',
+            'schedule': 21600.0,
         },
         # Episodic memory: mark episodes older than 48h as aged (every 6 hours)
         'mark-aged-episodes': {
@@ -204,10 +229,69 @@ celery_app.conf.update(
             'task': 'services.celery_tasks.model_health_tasks.check_admin_llm_catalog_health_task',
             'schedule': 21600.0,
         },
+        # Skill metrics: refresh materialized view and prune old events (daily)
+        'refresh-skill-usage-stats': {
+            'task': 'services.celery_tasks.skill_metrics_tasks.refresh_skill_usage_stats',
+            'schedule': 86400.0,
+        },
+        # Skill promotion/demotion recommendations (weekly)
+        'generate-skill-promotion-recommendations': {
+            'task': 'services.celery_tasks.skill_promotion_tasks.generate_skill_promotion_recommendations',
+            'schedule': 604800.0,
+        },
     },
     # Beat scheduler settings
     beat_max_loop_interval=300,  # Check for new tasks every 5 minutes
 )
+
+
+class _CeleryBeatAndTaskChatterToDebugFilter(logging.Filter):
+    """Demote noisy periodic Celery INFO lines to DEBUG (visible when log level is DEBUG)."""
+
+    _LOGGER_NAMES = frozenset(
+        {"celery.beat", "celery.worker.strategy", "celery.app.trace"}
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.INFO or record.name not in self._LOGGER_NAMES:
+            return True
+        try:
+            msg = record.getMessage()
+        except (ValueError, TypeError):
+            return True
+        if "Scheduler: Sending due task" in msg:
+            pass
+        elif msg.startswith("Task ") and "] received" in msg:
+            pass
+        elif msg.startswith("Task ") and " succeeded in " in msg:
+            pass
+        else:
+            return True
+        record.levelno = logging.DEBUG
+        record.levelname = logging.getLevelName(logging.DEBUG)
+        return True
+
+
+def _install_celery_chatter_demote_filters() -> None:
+    filt = _CeleryBeatAndTaskChatterToDebugFilter()
+    for name in _CeleryBeatAndTaskChatterToDebugFilter._LOGGER_NAMES:
+        lg = logging.getLogger(name)
+        if not any(type(f) is _CeleryBeatAndTaskChatterToDebugFilter for f in lg.filters):
+            lg.addFilter(filt)
+
+
+@after_setup_logger.connect(weak=False)
+def _after_setup_logger_demote_celery_chatter(
+    sender=None, logger=None, **kwargs
+) -> None:
+    if logger is None or logger.name not in _CeleryBeatAndTaskChatterToDebugFilter._LOGGER_NAMES:
+        return
+    if any(type(f) is _CeleryBeatAndTaskChatterToDebugFilter for f in logger.filters):
+        return
+    logger.addFilter(_CeleryBeatAndTaskChatterToDebugFilter())
+
+
+_install_celery_chatter_demote_filters()
 
 # Worker lifecycle events
 @worker_ready.connect

@@ -440,7 +440,7 @@ class MCPServer:
     
     def _create_system_message(self, tools_description: str) -> str:
         """Create system message for LLM with tool instructions"""
-        from services.prompt_service import prompt_service, AgentMode, UserPromptSettings
+        from services.prompt_service import prompt_service, AgentMode
         
         # Use centralized prompt service
         assembled_prompt = prompt_service.assemble_prompt(
@@ -450,57 +450,13 @@ class MCPServer:
         )
         
         return assembled_prompt.content
-        
-        # Legacy fallback (can be removed after testing)
-        base_prompt = f"""You are Alex, an intelligent knowledge base assistant with access to tools.
-
-AVAILABLE TOOLS:
-{tools_description}
-
-INSTRUCTIONS:
-1. Analyze the user's query carefully
-2. Decide which tools to use to gather information
-3. Use tools by responding in this exact format:
-   TOOL_CALL: {{"tool_name": "search_documents", "tool_input": {{"query": "search text", "limit": 100}}}}
-   # For comprehensive coverage, use higher limits up to 300:
-   TOOL_CALL: {{"tool_name": "search_documents", "tool_input": {{"query": "search text", "limit": 200}}}}
-   # For metadata searches, ALWAYS include search_type:
-   TOOL_CALL: {{"tool_name": "search_by_metadata", "tool_input": {{"search_type": "by_author", "author": "author name", "limit": 50}}}}
-4. After receiving tool results, you can either:
-   - Make another tool call if you need more information
-   - Provide a final comprehensive answer to the user
-
-IMPORTANT:
-- Always use the exact TOOL_CALL format shown above
-- Be strategic about which tools to use and in what order
-- Provide thorough, well-sourced answers using the gathered information
-- If search results are insufficient, try different queries or use other tools"""
-        
-        # Use user's timezone for date/time context
-        from utils.system_prompt_utils import create_system_prompt_with_context_for_user
-        
-        # Get user_id from chat_service if available
-        user_id = None
-        if self.chat_service and hasattr(self.chat_service, 'current_user_id'):
-            user_id = self.chat_service.current_user_id
-        
-        return await create_system_prompt_with_context_for_user(base_prompt, user_id=user_id)
     
     async def _get_llm_response(self, conversation_log: List[Dict[str, str]]) -> str:
-        """Get response from LLM (placeholder - will integrate with actual LLM)"""
-        # TODO: Integrate with actual LLM service (OpenRouter, etc.)
-        # For now, return a mock response to test the structure
-        
-        # This is a placeholder - in real implementation, this would:
-        # 1. Send conversation_log to LLM
-        # 2. Get response back
-        # 3. Return the response text
-        
-        logger.warning("🚧 Using mock LLM response - integrate with real LLM service")
-        
-        # Mock response that would search for documents
-        last_user_message = conversation_log[-1]["content"]
-        return f'TOOL_CALL: {{"tool_name": "search_documents", "tool_input": {{"query": "{last_user_message}", "limit": 10}}}}'
+        """Reserved for wiring document MCP to the production LLM stack (orchestrator / OpenRouter)."""
+        raise NotImplementedError(
+            "Document MCP iterative LLM loop is not connected to an LLM provider. "
+            "Use Bastion chat/orchestrator APIs for tool-using agents."
+        )
     
     def _extract_tool_call(self, llm_response: str) -> Optional[Dict[str, Any]]:
         """Extract tool call from LLM response"""

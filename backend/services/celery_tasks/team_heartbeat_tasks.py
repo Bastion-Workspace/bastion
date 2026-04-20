@@ -6,6 +6,7 @@ execute_team_heartbeat: Loads CEO agent, builds team context summary, invokes CE
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -33,6 +34,20 @@ logger = logging.getLogger(__name__)
 def _line_is_active(team: Optional[Dict[str, Any]]) -> bool:
     """Background autonomous work (heartbeat, worker dispatches) only runs when status is active."""
     return bool(team) and str(team.get("status") or "").lower() == "active"
+
+
+def _parse_line_heartbeat_config(team: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not team:
+        return {}
+    raw = team.get("heartbeat_config")
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return {}
 
 
 @celery_app.task(name="services.celery_tasks.team_heartbeat_tasks.check_team_heartbeats")
@@ -91,6 +106,7 @@ def execute_team_heartbeat(
     from services.celery_tasks.agent_tasks import _call_grpc_orchestrator_custom_agent
 
     team = None
+    hb_cfg: Dict[str, Any] = {}
     try:
         team = run_async(agent_line_service.get_line(line_id, user_id))
         if not team:
@@ -116,6 +132,8 @@ def execute_team_heartbeat(
             logger.info("Team %s scheduled heartbeat skipped: autonomous disabled", line_id)
             return {"success": False, "error": "Autonomous heartbeat disabled"}
 
+        hb_cfg = _parse_line_heartbeat_config(team) or {}
+
         task_id = self.request.id
         run_async(agent_line_service.set_line_active_celery_task_id(line_id, task_id))
 
@@ -135,66 +153,81 @@ def execute_team_heartbeat(
         except Exception as ws_err:
             logger.debug("Send execution_status running failed: %s", ws_err)
 
-        ceo = run_async(agent_line_service.get_ceo_agent_for_heartbeat(line_id))
-        if not ceo:
-            logger.warning("Team %s has no CEO (root member) for heartbeat", line_id)
+        plan = run_async(agent_line_service.get_heartbeat_agents(line_id, user_id))
+        if not plan or not plan.get("leader_agent_profile_id"):
+            logger.warning("Team %s has no heartbeat leader / empty line", line_id)
             run_async(agent_line_service.set_line_active_celery_task_id(line_id, None))
-            return {"success": False, "error": "No CEO agent (no root in org chart)"}
+            return {"success": False, "error": "No leader agent (empty line or invalid governance plan)"}
 
-        context_text = run_async(_build_heartbeat_context(line_id, user_id, ceo.get("agent_profile_id")))
-        query = (
-            "Team heartbeat. You are the CEO (root).\n\n"
-            "CRITICAL — DELEGATION (do not do workers' work yourself):\n"
-            "- The ONLY way to assign work so a worker agent actually runs is to call create_task_for_agent. "
-            "Writing to the workspace or sending a message documents the assignment but does NOT create a task or trigger the worker. "
-            "If create_task_for_agent returns an error or success=false, the assignment is NOT complete—fix and retry.\n"
-            "- When you have workers (reports), delegate: use create_task_for_agent to assign work (worker is dispatched on the next cycle), "
-            "or send_to_agent(..., wait_for_response=True) to get immediate output. If you never call create_task_for_agent or send_to_agent, the worker never runs.\n"
-            "- create_task_for_agent: Creates a task; the assigned agent is invoked automatically. Use for async work. Required for any deliverable you want a report to produce.\n"
-            "- send_to_agent(..., wait_for_response=True): Runs the worker now and returns their response. Use when you need output this cycle.\n\n"
-            "CRITICAL — GOAL PROGRESS (keep system state accurate):\n"
-            "- When work advances or is completed, you MUST call report_goal_progress with the goal_id and new progress_pct (0–100). "
-            "Otherwise the briefing will keep showing 0% and you will repeat the same directives. "
-            "When a goal is fully done, call report_goal_progress with progress_pct=100 and then update the goal status to completed if supported.\n\n"
-            f"{TEAM_TOOL_IDS_RULE}\n\n"
-            "YOUR JOB THIS CYCLE: Review goals and pending tasks. Delegate execution to workers (create_task_for_agent or send_to_agent). "
-            "Call report_goal_progress when work advances. Post a brief status to the timeline.\n\n"
-            f"{context_text}"
-        )
+        from services.celery_tasks import heartbeat_strategies
 
-        result = run_async(
-            _call_grpc_orchestrator_custom_agent(
-                agent_profile_id=ceo["agent_profile_id"],
-                query=query,
-                user_id=user_id,
-                conversation_id="",
-                trigger_input=context_text,
-                extra_context={
-                    "trigger_type": "team_heartbeat",
-                    "line_id": line_id,
-                    "agent_profile_id": ceo["agent_profile_id"],
-                },
+        mode = plan.get("mode") or "hierarchical"
+        if mode == "hierarchical":
+            hb_result = run_async(
+                heartbeat_strategies.hierarchical_heartbeat_core(
+                    line_id, user_id, plan["leader_agent_profile_id"], from_manual_trigger, hb_cfg
+                )
             )
-        )
+        elif mode == "round_robin":
+            hb_result = run_async(
+                heartbeat_strategies.round_robin_heartbeat_core(
+                    line_id,
+                    user_id,
+                    plan["leader_agent_profile_id"],
+                    int(plan.get("rotation_cycle_index") or 0),
+                    from_manual_trigger,
+                    hb_cfg,
+                )
+            )
+        elif mode == "committee":
+            hb_result = run_async(
+                heartbeat_strategies.committee_heartbeat_core(line_id, user_id, plan, from_manual_trigger, hb_cfg)
+            )
+        elif mode == "consensus":
+            hb_result = run_async(
+                heartbeat_strategies.consensus_heartbeat_core(line_id, user_id, plan, from_manual_trigger, hb_cfg)
+            )
+        else:
+            hb_result = run_async(
+                heartbeat_strategies.hierarchical_heartbeat_core(
+                    line_id, user_id, plan["leader_agent_profile_id"], from_manual_trigger, hb_cfg
+                )
+            )
+
+        leader_id = hb_result.get("leader_agent_profile_id")
+        success = bool(hb_result.get("success"))
+        context_text = hb_result.get("context_text") or ""
+        full_response = (hb_result.get("display_response") or "").strip() or context_text
+        result = {
+            "success": success,
+            "error": hb_result.get("error"),
+            "response": full_response,
+            "message": full_response,
+        }
+        ceo = {"agent_profile_id": leader_id}
 
         now = datetime.now(timezone.utc)
         next_at = _compute_next_beat_at((team or {}).get("heartbeat_config"))
         run_async(agent_line_service.update_line_beat_timestamps(line_id, last_beat_at=now, next_beat_at=next_at))
 
-        dispatch_team_workers.apply_async(
-            kwargs={
-                "line_id": line_id,
-                "user_id": user_id,
-                "from_manual_trigger": from_manual_trigger,
-            },
-            countdown=15,
-        )
+        if plan.get("workers_dispatched_after", True):
+            dispatch_team_workers.apply_async(
+                kwargs={
+                    "line_id": line_id,
+                    "user_id": user_id,
+                    "from_manual_trigger": from_manual_trigger,
+                },
+                countdown=15,
+            )
+
+        if success and mode == "round_robin":
+            run_async(agent_line_service.advance_round_robin_leader(line_id, user_id))
 
         if result.get("success") and ceo.get("agent_profile_id"):
-            full_response = (result.get("response") or result.get("message") or context_text or "").strip()
             summary_for_memory = full_response[:1500] if len(full_response) > 1500 else full_response
             try:
                 from services.database_manager.database_helpers import execute
+                from utils.grpc_rls import grpc_user_rls as _hb_mem_rls
                 run_async(execute(
                     """
                     INSERT INTO agent_memory (agent_profile_id, user_id, memory_key, memory_value, memory_type)
@@ -205,21 +238,55 @@ def execute_team_heartbeat(
                     ceo["agent_profile_id"],
                     user_id,
                     __import__("json").dumps({"summary": summary_for_memory, "at": now.isoformat()}),
+                    rls_context=_hb_mem_rls(user_id),
                 ))
             except Exception as mem_err:
                 logger.debug("Store last_heartbeat_summary failed: %s", mem_err)
             try:
                 from services import agent_message_service
+                meta = {"source": "heartbeat", "governance_mode": mode, "heartbeat_delivery": "v1"}
                 run_async(agent_message_service.create_message(
                     line_id=line_id,
                     from_agent_id=ceo["agent_profile_id"],
                     to_agent_id=None,
                     message_type="report",
                     content=full_response,
-                    metadata={"source": "heartbeat"},
+                    metadata=meta,
+                    user_id=user_id,
                 ))
             except Exception as msg_err:
                 logger.debug("Post heartbeat to timeline failed: %s", msg_err)
+
+        if result.get("success"):
+            try:
+                from services.agent_line_brief_snapshot_service import record_heartbeat_brief_snapshot
+
+                run_async(record_heartbeat_brief_snapshot(line_id, user_id, full_response, hb_cfg))
+            except Exception as snap_e:
+                logger.warning("record_heartbeat_brief_snapshot failed: %s", snap_e)
+            try:
+                from services.agent_line_delivery_hooks import apply_post_heartbeat_delivery
+
+                run_async(
+                    apply_post_heartbeat_delivery(
+                        line_id,
+                        user_id,
+                        team.get("name", "Team"),
+                        hb_cfg,
+                        full_response,
+                        ceo.get("agent_profile_id") if ceo else None,
+                        True,
+                        None,
+                    )
+                )
+            except Exception as del_e:
+                logger.warning("apply_post_heartbeat_delivery failed: %s", del_e)
+
+        if result.get("success") and not from_manual_trigger:
+            try:
+                run_async(agent_line_service.apply_autonomous_heartbeat_run_quota(line_id, user_id))
+            except Exception as quota_err:
+                logger.warning("apply_autonomous_heartbeat_run_quota failed: %s", quota_err)
 
         try:
             run_async(_send_team_execution_status(line_id, "idle", ceo.get("agent_profile_id")))
@@ -238,27 +305,35 @@ def execute_team_heartbeat(
             logger.debug("Send execution_status idle failed: %s", ws_err)
 
         if not result.get("success"):
-            run_async(_send_team_notification(
-                user_id,
-                line_id,
-                team.get("name", "Team"),
-                "heartbeat_failed",
-                message="Team heartbeat run failed.",
-                error_details=result.get("error"),
-            ))
+            delivery = hb_cfg.get("delivery") if isinstance(hb_cfg.get("delivery"), dict) else {}
+            if delivery.get("notify_on_failure", True):
+                run_async(
+                    _send_team_notification(
+                        user_id,
+                        line_id,
+                        team.get("name", "Team"),
+                        "heartbeat_failed",
+                        message="Team heartbeat run failed.",
+                        error_details=result.get("error"),
+                    )
+                )
 
         return {"success": result.get("success", False), "error": result.get("error")}
     except Exception as e:
         logger.exception("execute_team_heartbeat failed: %s", e)
         if line_id and user_id:
-            run_async(_send_team_notification(
-                user_id,
-                line_id,
-                (team.get("name", "Team") if isinstance(team, dict) else "Team"),
-                "heartbeat_failed",
-                message="Team heartbeat crashed.",
-                error_details=str(e),
-            ))
+            crash_delivery = hb_cfg.get("delivery") if isinstance(hb_cfg.get("delivery"), dict) else {}
+            if crash_delivery.get("notify_on_failure", True):
+                run_async(
+                    _send_team_notification(
+                        user_id,
+                        line_id,
+                        (team.get("name", "Team") if isinstance(team, dict) else "Team"),
+                        "heartbeat_failed",
+                        message="Team heartbeat crashed.",
+                        error_details=str(e),
+                    )
+                )
         return {"success": False, "error": str(e)}
     finally:
         try:

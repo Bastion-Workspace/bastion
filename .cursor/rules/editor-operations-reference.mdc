@@ -4,7 +4,7 @@
 
 This guide documents all available editor operations for agents that edit documents (fiction, outlines, characters, rules, etc.). All editor-type agents MUST use these operations correctly.
 
-**Location**: `llm-orchestrator/orchestrator/utils/editor_operation_resolver.py`  
+**Location**: `backend/utils/editor_operations_resolver.py`  
 **Models**: `llm-orchestrator/orchestrator/models/editor_models.py`
 
 ## Available Operation Types
@@ -247,7 +247,7 @@ All operations support these optional anchor fields for precise positioning:
 
 ## Operation Resolution Process
 
-The resolver (`resolve_editor_operation`) uses progressive search strategies:
+The resolver (`resolve_operation` / `resolve_operations`) uses progressive search strategies:
 
 1. **Selection-based** (highest priority): If user has text selected, use selection bounds
 2. **Exact `original_text` matching**: Find exact text in document
@@ -386,7 +386,7 @@ The resolver (`resolve_editor_operation`) uses progressive search strategies:
 
 All agents that use editor operations MUST:
 
-1. **Use the centralized resolver**: `resolve_editor_operation()` from `orchestrator.utils.editor_operation_resolver`
+1. **Use the centralized resolver**: `resolve_operation()` from `backend.utils.editor_operations_resolver`
 2. **Protect frontmatter**: Pass `frontmatter_end` to resolver (or let it auto-detect)
 3. **Validate operations**: Use Pydantic models from `orchestrator.models.editor_models`
 4. **Handle resolution failures**: Check confidence scores and handle failures gracefully
@@ -394,20 +394,19 @@ All agents that use editor operations MUST:
 ### Example Integration
 
 ```python
-from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
+from backend.utils.editor_operations_resolver import resolve_operation
 from orchestrator.utils.frontmatter_utils import frontmatter_end_index
 
-# In your agent's operation resolution node:
+# In your agent's operation resolution node (orchestrator) / equivalent in backend:
 fm_end_idx = frontmatter_end_index(text)
 selection = {"start": selection_start, "end": selection_end} if selection_start >= 0 else None
 
 for op in operations:
-    resolved_start, resolved_end, resolved_text, confidence = resolve_editor_operation(
-        content=text,
-        op_dict=op,
+    resolved_start, resolved_end, resolved_text, confidence = resolve_operation(
+        full_text=text,
+        op=op,
         selection=selection,
         frontmatter_end=fm_end_idx,
-        cursor_offset=cursor_pos
     )
     
     # Validate resolution
@@ -456,7 +455,7 @@ When implementing editor operations in a new agent:
 
 - **JSON Schema Patterns**: `.cursor/rules/editor-agent-json-schema-pattern.mdc`
 - **Models**: `llm-orchestrator/orchestrator/models/editor_models.py`
-- **Resolver**: `llm-orchestrator/orchestrator/utils/editor_operation_resolver.py`
+- **Resolver**: `backend/utils/editor_operations_resolver.py`
 - **Frontmatter Utils**: `llm-orchestrator/orchestrator/utils/frontmatter_utils.py`
 
 ---

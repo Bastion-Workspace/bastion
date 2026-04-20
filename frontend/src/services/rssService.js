@@ -218,12 +218,21 @@ class RSSService {
     }
 
     // RSS Article Management
-    async getFeedArticles(feedId, limit = 100) {
+    /**
+     * @param {string} feedId
+     * @param {number} [limit]
+     * @param {{ readFilter?: 'all'|'unread'|'read' }} [options]
+     */
+    async getFeedArticles(feedId, limit = 100, options = {}) {
         try {
             this.loading = true;
             this.error = null;
 
             const q = new URLSearchParams({ limit: String(limit) });
+            const rf = options.readFilter;
+            if (rf && rf !== 'all') {
+                q.set('read_filter', rf);
+            }
             const response = await apiService.get(
                 `${this.baseUrl}/feeds/${encodeURIComponent(feedId)}/articles?${q.toString()}`
             );

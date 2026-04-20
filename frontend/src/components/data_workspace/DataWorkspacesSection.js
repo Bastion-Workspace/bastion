@@ -142,22 +142,45 @@ const DataWorkspacesSection = ({ onWorkspaceClick }) => {
       <Box>
         {/* Header */}
         <Box sx={{ px: 2, pb: 0.5 }}>
-        <Box 
-          sx={{ 
-            display: 'flex', 
-            alignItems: 'center', 
-            mb: 1, 
-            cursor: 'pointer',
-            '&:hover': { backgroundColor: 'action.hover' },
-            borderRadius: 1,
-            p: 0.5
+        <Box
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            mb: 1,
+            gap: 0.5,
           }}
-          onClick={() => setExpanded(!expanded)}
         >
-          {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
-          <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: '0.75rem', textTransform: 'uppercase', ml: 0.5 }}>
-            💾 Data Workspaces
-          </Typography>
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              flex: 1,
+              minWidth: 0,
+              cursor: 'pointer',
+              '&:hover': { backgroundColor: 'action.hover' },
+              borderRadius: 1,
+              p: 0.5,
+            }}
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+            <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: '0.75rem', textTransform: 'uppercase', ml: 0.5 }}>
+              Data Workspaces
+            </Typography>
+          </Box>
+          <Tooltip title="Create workspace">
+            <IconButton
+              size="small"
+              aria-label="Create workspace"
+              onClick={(e) => {
+                e.stopPropagation();
+                setCreateDialogOpen(true);
+              }}
+            >
+              <AddIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
         </Box>
         
         {/* Filter Tabs */}

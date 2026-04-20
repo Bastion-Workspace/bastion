@@ -6,14 +6,16 @@ Pydantic models for request/response validation
 from datetime import datetime, date
 from enum import Enum
 from typing import List, Optional, Dict, Any, ForwardRef
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ProcessingStatus(str, Enum):
-    """Document processing status"""
+    """Document processing status (aligns with document_metadata.processing_status)."""
+    PENDING = "pending"  # DB default; queued / not yet processed
     UPLOADING = "uploading"
     PROCESSING = "processing"
     EMBEDDING = "embedding"
+    RETRY_SCHEDULED = "retry_scheduled"
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -31,6 +33,7 @@ class DocumentType(str, Enum):
     EML = "eml"
     ZIP = "zip"
     SRT = "srt"
+    VTT = "vtt"
     ORG = "org"
     MP4 = "mp4"
     MKV = "mkv"
@@ -38,6 +41,7 @@ class DocumentType(str, Enum):
     MOV = "mov"
     WEBM = "webm"
     IMAGE = "image"  # For JPG, PNG, GIF, etc. - stored but not vectorized
+    IMAGE_SIDECAR = "image_sidecar"  # *.metadata.json searchable text; not shown in UI listings
     MP3 = "mp3"
     AAC = "aac"
     WAV = "wav"
@@ -82,7 +86,10 @@ class URLImportRequest(BaseModel):
 
 class ImportImageRequest(BaseModel):
     """Request to import a generated image into the document library"""
-    image_url: str = Field(..., description="URL path to the image (e.g., /static/images/filename.png)")
+    image_url: str = Field(
+        ...,
+        description="URL path to the image (e.g., /api/web-sources/images/filename.png or legacy /static/images/...)",
+    )
     filename: Optional[str] = Field(None, description="Optional filename for the imported image")
     folder_id: Optional[str] = Field(None, description="Target folder ID for the imported image")
 
@@ -241,6 +248,7 @@ class DocumentInfo(BaseModel):
     collection_type: str = Field(default="user", description="Collection type: 'user' or 'global'")
     exempt_from_vectorization: Optional[bool] = Field(default=None, description="Three-state exemption: TRUE=exempt, FALSE=not exempt (override), NULL=inherit from folder")
     has_pending_proposals: bool = Field(default=False, description="Whether document has pending edit proposals")
+    is_encrypted: bool = Field(default=False, description="When true, file on disk is ciphertext; unlock session required for content APIs")
 
 
 class DocumentFolder(BaseModel):
@@ -304,6 +312,48 @@ class FolderContentsResponse(BaseModel):
     subfolders: List[DocumentFolder] = Field(..., description="Subfolders")
     total_documents: int = Field(..., description="Total documents in folder")
     total_subfolders: int = Field(..., description="Total subfolders")
+
+
+class FolderContentsBatchRequest(BaseModel):
+    """Batch load folder contents (same limit/offset applied to each folder)."""
+    folder_ids: List[str] = Field(..., max_length=100, description="Folder IDs to load")
+    limit: int = Field(default=250, ge=1, le=500, description="Max documents per folder")
+    offset: int = Field(default=0, ge=0, description="Document pagination offset per folder")
+    max_concurrent: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=32,
+        description="Optional cap on parallel loads inside document-service",
+    )
+
+    @field_validator("folder_ids", mode="before")
+    @classmethod
+    def normalize_folder_ids(cls, v: Any) -> List[str]:
+        if not isinstance(v, list):
+            return v
+        out: List[str] = []
+        seen: set[str] = set()
+        for x in v:
+            if not isinstance(x, str):
+                continue
+            s = x.strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+        return out
+
+    @model_validator(mode="after")
+    def require_folder_ids(self) -> "FolderContentsBatchRequest":
+        if not self.folder_ids:
+            raise ValueError("folder_ids must contain at least one valid folder ID")
+        return self
+
+
+class FolderContentsBatchResponse(BaseModel):
+    """Per-folder contents and per-id errors from batch load."""
+    contents: Dict[str, FolderContentsResponse] = Field(default_factory=dict)
+    errors: Dict[str, str] = Field(default_factory=dict)
 
 class DocumentUploadResponse(BaseModel):
     """Response for document upload"""
@@ -730,6 +780,9 @@ class UserUpdateRequest(BaseModel):
     avatar_url: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
+    federation_discoverable: Optional[bool] = None
+    federation_share_read_receipts: Optional[bool] = None
+    federation_share_presence: Optional[bool] = None
 
 class PasswordChangeRequest(BaseModel):
     current_password: str
@@ -745,6 +798,9 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
     last_login: Optional[datetime] = None
+    federation_discoverable: Optional[bool] = None
+    federation_share_read_receipts: Optional[bool] = None
+    federation_share_presence: Optional[bool] = None
 
 class UsersListResponse(BaseModel):
     users: List[UserResponse]
@@ -757,6 +813,9 @@ class AuthenticatedUserResponse(BaseModel):
     display_name: Optional[str] = None
     role: str
     preferences: Dict[str, Any] = Field(default_factory=dict)
+    federation_discoverable: Optional[bool] = None
+    federation_share_read_receipts: Optional[bool] = None
+    federation_share_presence: Optional[bool] = None
 
 
 # === EXPORT MODELS ===

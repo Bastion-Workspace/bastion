@@ -4,7 +4,7 @@ Agent Line Analytics API - health, analytics, and approvals endpoints.
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List
+from typing import Annotated, Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 
@@ -14,7 +14,28 @@ from services.database_manager.database_helpers import fetch_all
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/lines", tags=["Agent Lines - Analytics"])
+
+def _line_analytics_rls(user_id: str) -> Dict[str, str]:
+    return {"user_id": user_id, "user_role": "user"}
+
+
+async def _line_analytics_request_rls(
+    current_user: Annotated[AuthenticatedUserResponse, Depends(get_current_user)],
+):
+    from services.database_manager.database_helpers import http_request_rls_context
+
+    token = http_request_rls_context.set(_line_analytics_rls(current_user.user_id))
+    try:
+        yield
+    finally:
+        http_request_rls_context.reset(token)
+
+
+router = APIRouter(
+    prefix="/lines",
+    tags=["Agent Lines - Analytics"],
+    dependencies=[Depends(_line_analytics_request_rls)],
+)
 
 
 @router.get("/{line_id}/agent-health", response_model=List[Dict[str, Any]])
@@ -34,6 +55,7 @@ async def get_line_agent_health(
     if not member_ids:
         return []
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    _rls = _line_analytics_rls(current_user.user_id)
 
     rows = await fetch_all(
         """
@@ -55,6 +77,7 @@ async def get_line_agent_health(
         member_ids,
         current_user.user_id,
         cutoff,
+        rls_context=_rls,
     )
     stats_by_agent = {str(r["agent_profile_id"]): r for r in rows}
 
@@ -94,28 +117,34 @@ async def get_line_analytics(
     if not team:
         raise HTTPException(status_code=404, detail="Line not found")
     start_date = datetime.now(timezone.utc) - timedelta(days=days)
+    _rls = _line_analytics_rls(current_user.user_id)
 
     task_throughput_rows = await fetch_all(
         """
-        SELECT (d.d::date)::text AS date,
+        SELECT dr.day::text AS date,
                COALESCE(c.cnt, 0)::int AS created,
                COALESCE(done.cnt, 0)::int AS completed
-        FROM generate_series($1::timestamp, CURRENT_DATE::timestamp, '1 day'::interval) d(d)
+        FROM generate_series(
+            ($1::timestamptz AT TIME ZONE 'UTC')::date,
+            (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date,
+            '1 day'::interval
+        ) AS dr(day)
         LEFT JOIN (
             SELECT created_at::date AS date, COUNT(*)::int AS cnt
             FROM agent_tasks WHERE line_id = $2 AND created_at >= $3::timestamptz
             GROUP BY created_at::date
-        ) c ON c.date = (d.d)::date
+        ) c ON c.date = dr.day
         LEFT JOIN (
             SELECT updated_at::date AS date, COUNT(*)::int AS cnt
             FROM agent_tasks WHERE line_id = $2 AND status = 'done' AND updated_at >= $3::timestamptz
             GROUP BY updated_at::date
-        ) done ON done.date = (d.d)::date
-        ORDER BY d.d
+        ) done ON done.date = dr.day
+        ORDER BY dr.day
         """,
         start_date,
         line_id,
         start_date,
+        rls_context=_rls,
     )
     task_throughput = [
         {"date": r["date"], "created": r["created"], "completed": r["completed"]}
@@ -135,6 +164,7 @@ async def get_line_analytics(
         line_id,
         current_user.user_id,
         start_date,
+        rls_context=_rls,
     )
     cost_over_time = [{"date": r["date"], "cost_usd": round(float(r["cost_usd"] or 0), 4)} for r in cost_rows]
 
@@ -146,6 +176,7 @@ async def get_line_analytics(
         ORDER BY priority DESC NULLS LAST, created_at DESC
         """,
         line_id,
+        rls_context=_rls,
     )
     goal_progress = [
         {
@@ -178,6 +209,7 @@ async def get_line_analytics(
             member_ids,
             current_user.user_id,
             start_date,
+            rls_context=_rls,
         )
         activity_by_agent = {str(r["agent_profile_id"]): r for r in activity_rows}
         for m in members:
@@ -204,6 +236,7 @@ async def get_line_analytics(
         """,
         line_id,
         start_date,
+        rls_context=_rls,
     )
     message_volume = [{"date": r["date"], "count": r["count"]} for r in msg_rows]
 
@@ -225,6 +258,7 @@ async def get_line_approvals(
     team = await agent_line_service.get_line(line_id, current_user.user_id)
     if not team:
         raise HTTPException(status_code=404, detail="Line not found")
+    _rls = _line_analytics_rls(current_user.user_id)
     rows = await fetch_all(
         """
         SELECT a.id, a.agent_profile_id, a.step_name, a.prompt, a.preview_data, a.governance_type, a.status, a.created_at,
@@ -237,6 +271,7 @@ async def get_line_approvals(
         """,
         current_user.user_id,
         line_id,
+        rls_context=_rls,
     )
     return [
         {

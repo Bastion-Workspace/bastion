@@ -83,12 +83,28 @@ class ConnectionsServiceClient:
                 self.stub = None
             return await coro()
 
+    @staticmethod
+    def _m365_service_allowed(
+        conn: Optional[Dict[str, Any]], m365_service: Optional[str]
+    ) -> bool:
+        if not m365_service:
+            return True
+        if not conn:
+            return False
+        if (conn.get("provider") or "").lower() != "microsoft":
+            return True
+        enabled = external_connections_service.get_enabled_services_from_metadata(
+            conn.get("provider_metadata")
+        )
+        return m365_service in enabled
+
     async def _ensure_token(
         self,
         connection_id: Optional[int],
         user_id: str,
         provider: str = "microsoft",
         rls_context: Optional[Dict[str, str]] = None,
+        m365_service: Optional[str] = None,
     ) -> tuple[Optional[str], Optional[int], str]:
         """Resolve connection_id or user's first email connection; return (access_token, connection_id, provider)."""
         if connection_id:
@@ -100,6 +116,8 @@ class ConnectionsServiceClient:
             token = await external_connections_service.get_valid_access_token(
                 connection_id, rls_context=rls_context
             )
+            if token and not self._m365_service_allowed(conn, m365_service):
+                return None, connection_id, conn.get("provider", provider)
             return token, connection_id, conn.get("provider", provider)
         connections = await external_connections_service.get_user_connections(
             user_id,
@@ -115,6 +133,8 @@ class ConnectionsServiceClient:
         token = await external_connections_service.get_valid_access_token(
             cid, rls_context=rls_context
         )
+        if token and not self._m365_service_allowed(conn, m365_service):
+            return None, cid, conn.get("provider", provider)
         return token, cid, conn.get("provider", provider)
 
     async def get_emails(
@@ -129,10 +149,18 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="email",
         )
         if not token:
-            return {"messages": [], "total_count": 0, "error": "No valid connection or token"}
+            return {
+                "messages": [],
+                "total_count": 0,
+                "error": "No valid connection, token, or email service not enabled for this account",
+            }
 
         async def _do():
             await self.initialize()
@@ -178,9 +206,11 @@ class ConnectionsServiceClient:
         connection_id: Optional[int] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
-            return {"message": None, "error": "No valid connection or token"}
+            return {"message": None, "error": "No valid connection or token or email service disabled"}
 
         async def _do():
             await self.initialize()
@@ -223,7 +253,9 @@ class ConnectionsServiceClient:
         end_date: Optional[str] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"messages": [], "error": "No valid connection or token"}
 
@@ -270,7 +302,9 @@ class ConnectionsServiceClient:
         body_is_html: bool = False,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"success": False, "error": "No valid connection or token"}
 
@@ -305,7 +339,9 @@ class ConnectionsServiceClient:
         body_is_html: bool = False,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"success": False, "message_id": "", "error": "No valid connection or token"}
 
@@ -339,7 +375,9 @@ class ConnectionsServiceClient:
         body_is_html: bool = False,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"success": False, "error": "No valid connection or token"}
 
@@ -369,7 +407,9 @@ class ConnectionsServiceClient:
         connection_id: Optional[int] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"messages": [], "error": "No valid connection or token"}
 
@@ -409,7 +449,9 @@ class ConnectionsServiceClient:
         connection_id: Optional[int] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"success": False, "error": "No valid connection or token"}
 
@@ -440,7 +482,9 @@ class ConnectionsServiceClient:
         connection_id: Optional[int] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"success": False, "error": "No valid connection or token"}
 
@@ -466,7 +510,9 @@ class ConnectionsServiceClient:
         connection_id: Optional[int] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"folders": [], "error": "No valid connection or token"}
 
@@ -498,7 +544,9 @@ class ConnectionsServiceClient:
         connection_id: Optional[int] = None,
         provider: str = "microsoft",
     ) -> Dict[str, Any]:
-        token, _, prov = await self._ensure_token(connection_id, user_id, provider)
+        token, _, prov = await self._ensure_token(
+            connection_id, user_id, provider, m365_service="email"
+        )
         if not token:
             return {"total_count": 0, "unread_count": 0, "error": "No valid connection or token"}
 
@@ -526,10 +574,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="calendar",
         )
         if not token:
-            return {"calendars": [], "error": "No valid connection or token"}
+            return {"calendars": [], "error": "No valid connection or token or calendar service disabled"}
 
         async def _do():
             await self.initialize()
@@ -567,10 +619,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="calendar",
         )
         if not token:
-            return {"events": [], "total_count": 0, "error": "No valid connection or token"}
+            return {"events": [], "total_count": 0, "error": "No valid connection or token or calendar service disabled"}
 
         async def _do():
             await self.initialize()
@@ -622,10 +678,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="calendar",
         )
         if not token:
-            return {"event": None, "error": "No valid connection or token"}
+            return {"event": None, "error": "No valid connection or token or calendar service disabled"}
 
         async def _do():
             await self.initialize()
@@ -681,10 +741,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="calendar",
         )
         if not token:
-            return {"success": False, "event_id": "", "error": "No valid connection or token"}
+            return {"success": False, "event_id": "", "error": "No valid connection or token or calendar service disabled"}
 
         async def _do():
             await self.initialize()
@@ -727,10 +791,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="calendar",
         )
         if not token:
-            return {"success": False, "error": "No valid connection or token"}
+            return {"success": False, "error": "No valid connection or token or calendar service disabled"}
 
         async def _do():
             await self.initialize()
@@ -771,10 +839,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="calendar",
         )
         if not token:
-            return {"success": False, "error": "No valid connection or token"}
+            return {"success": False, "error": "No valid connection or token or calendar service disabled"}
 
         async def _do():
             await self.initialize()
@@ -801,10 +873,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="contacts",
         )
         if not token:
-            return {"contacts": [], "total_count": 0, "error": "No valid connection or token"}
+            return {"contacts": [], "total_count": 0, "error": "No valid connection or token or contacts service disabled"}
 
         async def _do():
             await self.initialize()
@@ -849,10 +925,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="contacts",
         )
         if not token:
-            return {"contact": None, "error": "No valid connection or token"}
+            return {"contact": None, "error": "No valid connection or token or contacts service disabled"}
 
         async def _do():
             await self.initialize()
@@ -904,10 +984,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="contacts",
         )
         if not token:
-            return {"success": False, "contact_id": "", "error": "No valid connection or token"}
+            return {"success": False, "contact_id": "", "error": "No valid connection or token or contacts service disabled"}
 
         async def _do():
             await self.initialize()
@@ -960,10 +1044,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="contacts",
         )
         if not token:
-            return {"success": False, "error": "No valid connection or token"}
+            return {"success": False, "error": "No valid connection or token or contacts service disabled"}
 
         async def _do():
             await self.initialize()
@@ -1013,10 +1101,14 @@ class ConnectionsServiceClient:
         rls_context: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         token, _, prov = await self._ensure_token(
-            connection_id, user_id, provider, rls_context=rls_context
+            connection_id,
+            user_id,
+            provider,
+            rls_context=rls_context,
+            m365_service="contacts",
         )
         if not token:
-            return {"success": False, "error": "No valid connection or token"}
+            return {"success": False, "error": "No valid connection or token or contacts service disabled"}
 
         async def _do():
             await self.initialize()

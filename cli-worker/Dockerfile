@@ -1,6 +1,26 @@
+# Stage 1: gRPC codegen only (grpcio-tools stays out of the runtime image)
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+COPY cli-worker/requirements-build.txt .
+RUN pip install --no-cache-dir -r requirements-build.txt
+
+COPY protos /app/protos
+
+RUN python -m grpc_tools.protoc \
+    -I/app \
+    --python_out=/app \
+    --grpc_python_out=/app \
+    --pyi_out=/app \
+    /app/protos/cli_service.proto
+
+# Stage 2: runtime — CLI tools + Python deps + generated protos
 FROM python:3.11-slim
 
-# Install CLI tools and runtime deps
+ARG BASTION_RUNTIME_UID=10001
+ARG BASTION_RUNTIME_GID=10001
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ghostscript \
@@ -23,30 +43,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Python deps only (no backend)
 COPY cli-worker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Proto and cli-worker code only
-COPY protos /app/protos
+COPY --from=builder /app/protos /app/protos
+
 COPY cli-worker /app/cli_worker
 
-# Generate gRPC code from cli_service.proto
-RUN python -m grpc_tools.protoc \
-    -I/app \
-    --python_out=/app \
-    --grpc_python_out=/app \
-    --pyi_out=/app \
-    /app/protos/cli_service.proto
-
-# Unprivileged user
-RUN useradd --create-home --shell /bin/bash cliworker \
-    && mkdir -p /scratch /tmp/cli-worker \
-    && chown -R cliworker:cliworker /app /scratch /tmp/cli-worker
+RUN groupadd --gid "${BASTION_RUNTIME_GID}" appgroup && \
+    useradd --uid "${BASTION_RUNTIME_UID}" --gid appgroup --create-home --shell /bin/bash cliworker && \
+    mkdir -p /scratch /tmp/cli-worker && \
+    chown -R cliworker:appgroup /app /scratch /tmp/cli-worker
 USER cliworker
 
-# Generated _pb2 modules are written under the proto path (e.g. /app/protos/)
-# so Python must have /app/protos on the path to find cli_service_pb2
 ENV PYTHONPATH=/app:/app/protos
 ENV CLI_SCRATCH_DIR=/scratch
 

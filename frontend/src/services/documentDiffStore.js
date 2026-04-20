@@ -55,7 +55,11 @@ class DocumentDiffStore {
     const existing = this.diffs[documentId];
     const existingOps = existing?.operations || [];
     const filtered = existingOps.filter(op => op.messageId !== proposalId);
-    const tagged = (Array.isArray(operations) ? operations : []).map(op => ({ ...op, messageId: proposalId }));
+    const tagged = (Array.isArray(operations) ? operations : []).map((op, idx) => ({
+      ...op,
+      messageId: proposalId,
+      operationId: op.operationId || op.id || `${proposalId}-${idx}-${op.start}-${op.end}`
+    }));
     const merged = [...filtered, ...tagged];
     if (import.meta.env.DEV) {
       for (let i = 0; i < merged.length; i++) {
@@ -164,9 +168,19 @@ class DocumentDiffStore {
 
     const initialLength = docDiffs.operations.length;
     docDiffs.operations = docDiffs.operations.filter(op => {
-      const opId = op.operationId || op.id || op.start + '-' + op.end;
-      const matches = opId === operationId || String(opId) === String(operationId);
-      return !matches;
+      const opId = op.operationId || op.id || `${op.start}-${op.end}`;
+      if (opId === operationId || String(opId) === String(operationId)) return false;
+
+      // Backward compat: legacy ops without operationId/id may have been shown with a
+      // synthetic plugin id: messageId-idx-start-end. Match prefix + range suffix.
+      if (!op.operationId && !op.id && op.messageId != null) {
+        const prefix = String(op.messageId) + '-';
+        const suffix = '-' + op.start + '-' + op.end;
+        if (String(operationId).startsWith(prefix) && String(operationId).endsWith(suffix)) {
+          return false;
+        }
+      }
+      return true;
     });
 
     if (docDiffs.operations.length !== initialLength) {
@@ -239,7 +253,9 @@ class DocumentDiffStore {
     try {
       const stored = localStorage.getItem(this.storageKey);
       if (stored) {
-        this.diffs = JSON.parse(stored);
+        const parsed = JSON.parse(stored);
+        const originalKeyCount = Object.keys(parsed).length;
+        this.diffs = parsed;
         // Clean up old diffs (older than 24 hours)
         const now = Date.now();
         const maxAge = 24 * 60 * 60 * 1000; // 24 hours
@@ -250,8 +266,25 @@ class DocumentDiffStore {
             delete this.diffs[docId];
           }
         });
-        
-        if (Object.keys(this.diffs).length !== Object.keys(JSON.parse(stored)).length) {
+
+        let migrated = false;
+        Object.values(this.diffs).forEach(diff => {
+          if (diff?.operations && Array.isArray(diff.operations)) {
+            const indexByMessage = {};
+            diff.operations.forEach(op => {
+              if (!op.operationId && !op.id) {
+                const mid = op.messageId || 'op';
+                const idx = indexByMessage[mid] ?? 0;
+                indexByMessage[mid] = idx + 1;
+                op.operationId = `${mid}-${idx}-${op.start}-${op.end}`;
+                migrated = true;
+              }
+            });
+          }
+        });
+
+        const needsSave = Object.keys(this.diffs).length !== originalKeyCount || migrated;
+        if (needsSave) {
           this.saveToStorage();
         }
       }

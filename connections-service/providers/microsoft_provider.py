@@ -10,6 +10,8 @@ import httpx
 
 from config.settings import settings
 from providers.base_provider import BaseProvider
+from providers.microsoft_provider_devops import MicrosoftDevOpsMixin
+from providers.microsoft_provider_m365 import MicrosoftGraphM365Mixin
 
 logger = logging.getLogger(__name__)
 
@@ -142,8 +144,8 @@ def _contact_to_dict(c: Dict[str, Any], folder_id: str = "") -> Dict[str, Any]:
     }
 
 
-class MicrosoftGraphProvider(BaseProvider):
-    """Microsoft Graph API implementation for email."""
+class MicrosoftGraphProvider(MicrosoftDevOpsMixin, MicrosoftGraphM365Mixin, BaseProvider):
+    """Microsoft Graph API implementation for email, calendar, contacts, and M365 workloads."""
 
     @property
     def name(self) -> str:

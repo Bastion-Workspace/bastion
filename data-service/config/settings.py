@@ -23,6 +23,7 @@ class Settings:
     # Import Settings
     MAX_IMPORT_FILE_SIZE: int = int(os.getenv("MAX_IMPORT_FILE_SIZE", "524288000"))  # 500MB
     IMPORT_BATCH_SIZE: int = int(os.getenv("IMPORT_BATCH_SIZE", "1000"))
+    DATA_IMPORT_DIR: str = os.getenv("DATA_IMPORT_DIR", "/app/data_imports")
     
     # Query Settings
     MAX_QUERY_RESULTS: int = int(os.getenv("MAX_QUERY_RESULTS", "10000"))

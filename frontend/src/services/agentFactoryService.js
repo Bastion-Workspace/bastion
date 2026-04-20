@@ -8,8 +8,6 @@ class AgentFactoryService extends ApiServiceBase {
     profileId
       ? this.get(`${AGENT_FACTORY_PREFIX}/actions?profile_id=${encodeURIComponent(profileId)}`)
       : this.get(`${AGENT_FACTORY_PREFIX}/actions`);
-  getToolPacks = () => this.get(`${AGENT_FACTORY_PREFIX}/tool-packs`);
-
   listProfiles = () => this.get(`${AGENT_FACTORY_PREFIX}/profiles`);
   fetchAgentHandles = () => this.get(`${AGENT_FACTORY_PREFIX}/handles`);
   createProfile = (body) => this.post(`${AGENT_FACTORY_PREFIX}/profiles`, body);
@@ -89,18 +87,6 @@ class AgentFactoryService extends ApiServiceBase {
     this.delete(`${AGENT_FACTORY_PREFIX}/profiles/${profileId}/data-sources/${sourceId}`);
   executeConnector = (body) => this.post(`${AGENT_FACTORY_PREFIX}/execute-connector`, body);
 
-  /** @deprecated Prefer playbook step external tool packs; kept for migration and legacy UIs. */
-  listServiceBindings = (profileId) =>
-    this.get(`${AGENT_FACTORY_PREFIX}/profiles/${profileId}/service-bindings`);
-  /** @deprecated Prefer playbook step external tool packs. */
-  createServiceBinding = (profileId, body) =>
-    this.post(`${AGENT_FACTORY_PREFIX}/profiles/${profileId}/service-bindings`, body);
-  /** @deprecated Prefer playbook step external tool packs. */
-  deleteServiceBinding = (profileId, bindingId) =>
-    this.delete(`${AGENT_FACTORY_PREFIX}/profiles/${profileId}/service-bindings/${bindingId}`);
-  getAvailableEmailConnections = () =>
-    this.get(`${AGENT_FACTORY_PREFIX}/available-email-connections`);
-
   listMcpServers = () => this.get('/api/mcp-servers');
   createMcpServer = (body) => this.post('/api/mcp-servers', body);
   updateMcpServer = (serverId, body) => this.put(`/api/mcp-servers/${serverId}`, body);
@@ -136,6 +122,19 @@ class AgentFactoryService extends ApiServiceBase {
   listSkillVersions = (skillId) => this.get(`${AGENT_FACTORY_PREFIX}/skills/${skillId}/versions`);
   revertSkill = (skillId, versionId) =>
     this.post(`${AGENT_FACTORY_PREFIX}/skills/${skillId}/revert/${versionId}`);
+  getSkillMetrics = (skillId) => this.get(`${AGENT_FACTORY_PREFIX}/skills/${skillId}/metrics`);
+  getSkillsMetricsSummary = (limit = 20) => this.get(`${AGENT_FACTORY_PREFIX}/skills/metrics/summary?limit=${limit}`);
+  getSkillCandidate = (skillId) => this.get(`${AGENT_FACTORY_PREFIX}/skills/${skillId}/candidate`);
+  promoteCandidate = (candidateId) => this.post(`${AGENT_FACTORY_PREFIX}/skills/${candidateId}/promote`);
+  rejectCandidate = (candidateId) => this.post(`${AGENT_FACTORY_PREFIX}/skills/${candidateId}/reject`);
+  setCandidateWeight = (candidateId, weight) =>
+    this.patch(`${AGENT_FACTORY_PREFIX}/skills/${candidateId}/candidate-weight`, { weight });
+  getSkillRecommendations = (status = 'pending', limit = 50) =>
+    this.get(`${AGENT_FACTORY_PREFIX}/skills/recommendations?status=${status}&limit=${limit}`);
+  applyRecommendation = (recId) =>
+    this.post(`${AGENT_FACTORY_PREFIX}/skills/recommendations/${recId}/apply`);
+  dismissRecommendation = (recId) =>
+    this.post(`${AGENT_FACTORY_PREFIX}/skills/recommendations/${recId}/dismiss`);
 
   listSidebarCategories = (section = null) => {
     const url = section
@@ -152,9 +151,17 @@ class AgentFactoryService extends ApiServiceBase {
 
   // Agent Lines (autonomous line container and org chart)
   listLines = () => this.get(`${AGENT_FACTORY_PREFIX}/lines`);
+  listLineTemplates = () => this.get(`${AGENT_FACTORY_PREFIX}/lines/templates`);
+  createLineFromTemplate = (body) => this.post(`${AGENT_FACTORY_PREFIX}/lines/from-template`, body);
   createLine = (body) => this.post(`${AGENT_FACTORY_PREFIX}/lines`, body);
   getLine = (lineId) => this.get(`${AGENT_FACTORY_PREFIX}/lines/${lineId}`);
+  getLineBriefSnapshots = (lineId, limit = 30) =>
+    this.get(`${AGENT_FACTORY_PREFIX}/lines/${lineId}/brief-snapshots?limit=${limit}`);
+  getLineBriefSnapshotDetail = (lineId, snapshotId) =>
+    this.get(`${AGENT_FACTORY_PREFIX}/lines/${lineId}/brief-snapshots/${snapshotId}`);
   updateLine = (lineId, body) => this.put(`${AGENT_FACTORY_PREFIX}/lines/${lineId}`, body);
+  previewHeartbeatSchedule = (lineId, body) =>
+    this.post(`${AGENT_FACTORY_PREFIX}/lines/${lineId}/heartbeat-schedule-preview`, body);
   deleteLine = (lineId) => this.delete(`${AGENT_FACTORY_PREFIX}/lines/${lineId}`);
   addLineMember = (lineId, body) => this.post(`${AGENT_FACTORY_PREFIX}/lines/${lineId}/members`, body);
   updateLineMember = (lineId, membershipId, body) =>
@@ -243,6 +250,24 @@ class AgentFactoryService extends ApiServiceBase {
   browserAuthStartSession = (body) => this.post(`${BROWSER_AUTH_PREFIX}/start-session`, body);
   browserAuthCloseSession = (sessionId) =>
     this.post(`${BROWSER_AUTH_PREFIX}/${encodeURIComponent(sessionId)}/close`);
+
+  // Artifact sharing
+  shareArtifact = (body) => this.post(`${AGENT_FACTORY_PREFIX}/shares`, body);
+  revokeShare = (shareId) => this.delete(`${AGENT_FACTORY_PREFIX}/shares/${shareId}`);
+  listMyShares = () => this.get(`${AGENT_FACTORY_PREFIX}/shares/mine`);
+  listSharedWithMe = () => this.get(`${AGENT_FACTORY_PREFIX}/shares/with-me`);
+  listArtifactShares = (artifactType, artifactId) =>
+    this.get(`${AGENT_FACTORY_PREFIX}/shares/artifact/${artifactType}/${artifactId}`);
+  copySharedToMine = (shareId) => this.post(`${AGENT_FACTORY_PREFIX}/shares/${shareId}/copy-to-mine`);
 }
 
-export default new AgentFactoryService();
+const agentFactoryService = new AgentFactoryService();
+
+/** Chat @mention / invoke_agent autocomplete (`GET .../handles`). Invalidate after profile or line create/update/delete. */
+export const AGENT_HANDLES_QUERY_KEY = ['agentHandles'];
+
+export function invalidateAgentHandlesQuery(queryClient) {
+  return queryClient.invalidateQueries({ queryKey: AGENT_HANDLES_QUERY_KEY });
+}
+
+export default agentFactoryService;

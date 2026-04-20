@@ -1,5 +1,5 @@
 """
-Entertainment Knowledge Graph Extractor - Roosevelt's "Entertainment Intelligence" Service
+Entertainment-scoped knowledge graph extraction
 Domain-specific entity and relationship extraction for movies and TV shows
 """
 
@@ -15,7 +15,7 @@ class EntertainmentKGExtractor:
     """
     Extract entertainment-specific entities and relationships from documents
     
-    **BULLY!** Domain-scoped extraction for movies and TV shows!
+    Extract structured entities for movies and TV from text.
     """
     
     def __init__(self):
@@ -73,7 +73,7 @@ class EntertainmentKGExtractor:
         """
         Determine if we should extract entertainment entities from this document
         
-        **ROOSEVELT'S TAG SCOPING**: Only extract from entertainment-tagged documents!
+        Limit extraction to entertainment-tagged documents
         """
         # Check category
         if doc_info.category and doc_info.category.value == "entertainment":

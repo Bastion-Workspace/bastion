@@ -8,13 +8,11 @@ service VectorService {
   rpc GenerateEmbedding(EmbeddingRequest) returns (EmbeddingResponse);
   rpc GenerateBatchEmbeddings(BatchEmbeddingRequest) returns (BatchEmbeddingResponse);
   
-  // Tool Vector Operations (Roosevelt's Knowledge Hub Expansion!)
-  rpc UpsertTools(UpsertToolsRequest) returns (UpsertToolsResponse);
-  rpc SearchTools(SearchToolsRequest) returns (SearchToolsResponse);
-  
   // Generic Vector Operations (Unified Qdrant Access)
   rpc UpsertVectors(UpsertVectorsRequest) returns (UpsertVectorsResponse);
   rpc SearchVectors(SearchVectorsRequest) returns (SearchVectorsResponse);
+  rpc ScrollPoints(ScrollPointsRequest) returns (ScrollPointsResponse);
+  rpc CountVectors(CountVectorsRequest) returns (CountVectorsResponse);
   rpc DeleteVectors(DeleteVectorsRequest) returns (DeleteVectorsResponse);
   rpc UpdateVectorMetadata(UpdateVectorMetadataRequest) returns (UpdateVectorMetadataResponse);
   
@@ -30,46 +28,6 @@ service VectorService {
   
   // Health Check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
-}
-
-// ============================================================================
-// Tool Vector Operations Messages
-// ============================================================================
-
-message ToolDefinition {
-  string name = 1;
-  string description = 2;
-  string pack = 3;
-  repeated string keywords = 4;
-}
-
-message UpsertToolsRequest {
-  repeated ToolDefinition tools = 1;
-}
-
-message UpsertToolsResponse {
-  bool success = 1;
-  int32 count = 2;
-  string error = 3;
-}
-
-message SearchToolsRequest {
-  string query = 1;
-  int32 limit = 2;
-  float min_score = 3;
-  string pack_filter = 4;
-}
-
-message ToolMatch {
-  string name = 1;
-  string description = 2;
-  string pack = 3;
-  float score = 4;
-}
-
-message SearchToolsResponse {
-  repeated ToolMatch matches = 1;
-  string error = 2;
 }
 
 // ============================================================================
@@ -151,10 +109,16 @@ message HealthCheckResponse {
 // Generic Vector Operations Messages
 // ============================================================================
 
+message SparseVector {
+  repeated uint32 indices = 1;
+  repeated float values = 2;
+}
+
 message VectorPoint {
   string id = 1;  // Point ID (UUID or hash)
   repeated float vector = 2;
   map<string, string> payload = 3;  // String-encoded metadata (JSON for complex types)
+  optional SparseVector sparse_vector = 4;
 }
 
 message UpsertVectorsRequest {
@@ -181,6 +145,8 @@ message SearchVectorsRequest {
   int32 limit = 3;
   float score_threshold = 4;
   repeated VectorFilter filters = 5;
+  optional SparseVector sparse_query_vector = 6;
+  string fusion_mode = 7;  // "rrf" for hybrid RRF; empty for dense-only
 }
 
 message VectorSearchResult {
@@ -192,6 +158,37 @@ message VectorSearchResult {
 message SearchVectorsResponse {
   bool success = 1;
   repeated VectorSearchResult results = 2;
+  optional string error = 3;
+}
+
+message ScrollPointsRequest {
+  string collection_name = 1;
+  repeated VectorFilter filters = 2;
+  int32 limit = 3;           // page size (default 256 server-side)
+  string offset = 4;       // opaque continuation from prior ScrollPointsResponse.next_offset
+  bool with_vectors = 5;   // default false: payload-only for audits
+}
+
+message ScrolledPoint {
+  string id = 1;
+  map<string, string> payload = 2;
+}
+
+message ScrollPointsResponse {
+  bool success = 1;
+  repeated ScrolledPoint points = 2;
+  string next_offset = 3;  // empty when no more pages
+  optional string error = 4;
+}
+
+message CountVectorsRequest {
+  string collection_name = 1;
+  repeated VectorFilter filters = 2;
+}
+
+message CountVectorsResponse {
+  bool success = 1;
+  int64 count = 2;
   optional string error = 3;
 }
 
@@ -222,6 +219,7 @@ message CreateCollectionRequest {
   string collection_name = 1;
   int32 vector_size = 2;
   string distance = 3;  // "COSINE", "EUCLIDEAN", "DOT"
+  bool enable_sparse = 4;  // Named dense + sparse vectors for hybrid search
 }
 
 message CreateCollectionResponse {
@@ -246,6 +244,8 @@ message CollectionInfo {
   string distance = 3;
   int64 points_count = 4;
   string status = 5;
+  // unnamed | named_dense | named_hybrid (Qdrant vector schema)
+  string schema_type = 6;
 }
 
 message ListCollectionsResponse {

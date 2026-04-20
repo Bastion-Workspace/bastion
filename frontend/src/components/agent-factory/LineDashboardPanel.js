@@ -33,7 +33,7 @@ import {
   AccordionDetails,
   IconButton,
 } from '@mui/material';
-import { Timeline, Assignment, Flag, Settings, PlayArrow, Person, CheckCircle, Cancel, Stop, BarChart, Forum, PlayCircleFilled, ExpandMore, Refresh } from '@mui/icons-material';
+import { PlayArrow, Person, CheckCircle, Cancel, Stop, Forum, PlayCircleFilled, ExpandMore, Refresh } from '@mui/icons-material';
 import { useQuery, useQueryClient } from 'react-query';
 import { useNotifications } from '../../contexts/NotificationContext';
 import { useTeamExecution } from '../../contexts/TeamExecutionContext';
@@ -43,12 +43,7 @@ import GoalTreeView from './GoalTreeView';
 import TaskBoard from './TaskBoard';
 import TimelineMessage from './TimelineMessage';
 
-export default function LineDashboardPanel({
-  lineId,
-  onSelectTab,
-  onOpenSettings,
-  onOpenGoalsDrawer,
-}) {
+export default function LineDashboardPanel({ lineId, onGoToTab }) {
   const queryClient = useQueryClient();
   const { notifications } = useNotifications();
   const { teamStatusMap, setTeamExecutionStatus } = useTeamExecution();
@@ -91,6 +86,7 @@ export default function LineDashboardPanel({
           queryClient.invalidateQueries(['agentFactoryTeamTimelineRecent', lineId]);
           queryClient.invalidateQueries(['agentFactoryTeamTimeline', lineId]);
           queryClient.invalidateQueries(['agentFactoryTeamTasks', lineId]);
+          queryClient.invalidateQueries(['agentFactoryLineBriefSnapshots', lineId]);
         }
         if (data.type === 'task_updated') {
           queryClient.invalidateQueries(['agentFactoryTeamTasks', lineId]);
@@ -104,6 +100,9 @@ export default function LineDashboardPanel({
             agent_id: data.agent_id ?? null,
             timestamp: data.timestamp || new Date().toISOString(),
           });
+          if (data.status === 'idle') {
+            queryClient.invalidateQueries(['agentFactoryLineBriefSnapshots', lineId]);
+          }
         }
       } catch (_) {}
     };
@@ -166,6 +165,42 @@ export default function LineDashboardPanel({
     () => apiService.agentFactory.getLineWorkspace(lineId),
     { enabled: !!lineId, refetchInterval: 30000 }
   );
+
+  const { data: briefSnapshots = [], refetch: refetchBriefSnapshots } = useQuery(
+    ['agentFactoryLineBriefSnapshots', lineId],
+    () => apiService.agentFactory.getLineBriefSnapshots(lineId, 30),
+    { enabled: !!lineId }
+  );
+
+  const [snapshotDialogOpen, setSnapshotDialogOpen] = useState(false);
+  const [snapshotDialogLoading, setSnapshotDialogLoading] = useState(false);
+  const [snapshotDialogTitle, setSnapshotDialogTitle] = useState('');
+  const [snapshotDialogBody, setSnapshotDialogBody] = useState('');
+
+  const governanceMode = team?.governance_mode || 'hierarchical';
+  const governancePolicy = team?.governance_policy || {};
+  const orgLayoutMode = ['committee', 'round_robin', 'consensus'].includes(governanceMode)
+    ? 'circle'
+    : 'tree';
+  const orgHighlightIds = React.useMemo(() => {
+    const ids = [];
+    if (governanceMode === 'committee' && governancePolicy.chair_agent_id) {
+      ids.push(String(governancePolicy.chair_agent_id));
+    }
+    if (
+      governanceMode === 'round_robin'
+      && Array.isArray(governancePolicy.rotation_order)
+      && governancePolicy.rotation_order.length
+      && team?.members?.length
+    ) {
+      const idx = Number(governancePolicy.current_leader_idx) || 0;
+      const mid = governancePolicy.rotation_order[idx % governancePolicy.rotation_order.length];
+      const mem = team.members.find((m) => String(m.id) === String(mid));
+      if (mem?.agent_profile_id) ids.push(String(mem.agent_profile_id));
+    }
+    return ids;
+  }, [governanceMode, governancePolicy, team]);
+
   const workspaceEntries = workspaceData?.entries ?? [];
   const [workspaceEntryValues, setWorkspaceEntryValues] = useState({});
   const workspaceEntryRequestedRef = useRef(new Set());
@@ -188,14 +223,14 @@ export default function LineDashboardPanel({
     [lineId]
   );
 
-  const teamEventSubtypes = ['heartbeat_failed', 'team_budget_exceeded', 'team_emergency_stop', 'team_escalations', 'team_budget_warning'];
+  const teamEventSubtypes = ['heartbeat_failed', 'heartbeat_completed', 'team_budget_exceeded', 'team_emergency_stop', 'team_escalations', 'team_budget_warning'];
   React.useEffect(() => {
     const latest = notifications[0];
     if (!latest || !lineId || !teamEventSubtypes.includes(latest.subtype)) return;
     if (latest.team_id !== lineId) return;
     if (teamNotificationShownRef.current.has(latest.id)) return;
     teamNotificationShownRef.current.add(latest.id);
-    const message = latest.message || latest.error_details || latest.subtype?.replace(/_/g, ' ') || 'Team event';
+    const message = latest.message || latest.error_details || latest.subtype?.replace(/_/g, ' ') || 'Line event';
     const severity = latest.subtype === 'heartbeat_failed' || latest.subtype === 'team_budget_exceeded' ? 'error' : 'warning';
     setSnackbar({ open: true, message, severity });
   }, [notifications, lineId]);
@@ -239,7 +274,7 @@ export default function LineDashboardPanel({
   if (!team) {
     return (
       <Box sx={{ p: 2 }}>
-        <Typography color="text.secondary">Team not found.</Typography>
+        <Typography color="text.secondary">Line not found.</Typography>
       </Box>
     );
   }
@@ -291,9 +326,9 @@ export default function LineDashboardPanel({
     setResumeLoading(true);
     apiService.agentFactory.updateLine(lineId, { status: 'active' }).then(() => {
       queryClient.invalidateQueries(['agentFactoryTeam', lineId]);
-      setSnackbar({ open: true, message: 'Team resumed', severity: 'success' });
+      setSnackbar({ open: true, message: 'Line resumed', severity: 'success' });
     }).catch((e) => {
-      setSnackbar({ open: true, message: e?.message || 'Failed to resume team', severity: 'error' });
+      setSnackbar({ open: true, message: e?.message || 'Failed to resume line', severity: 'error' });
     }).finally(() => setResumeLoading(false));
   };
 
@@ -358,21 +393,6 @@ export default function LineDashboardPanel({
           return <Chip size="small" label={label} color={chipColor} variant="outlined" sx={{ fontWeight: 500 }} />;
         })()}
         <Box sx={{ flex: 1 }} />
-        <Button size="small" startIcon={<Timeline />} onClick={() => onSelectTab?.(1)}>
-          Timeline
-        </Button>
-        <Button size="small" startIcon={<Assignment />} onClick={() => onSelectTab?.(2)}>
-          Tasks
-        </Button>
-        <Button size="small" startIcon={<Flag />} onClick={() => onOpenGoalsDrawer?.()}>
-          Goals
-        </Button>
-        <Button size="small" startIcon={<Settings />} onClick={() => onOpenSettings?.()}>
-          Settings
-        </Button>
-        <Button size="small" startIcon={<BarChart />} onClick={() => onSelectTab?.(3)}>
-          Analytics
-        </Button>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
           {executionStatus?.status === 'running' && (
             <Box
@@ -433,14 +453,14 @@ export default function LineDashboardPanel({
             onClick={handleResumeTeam}
             disabled={resumeLoading}
           >
-            {resumeLoading ? 'Resuming…' : 'Resume team'}
+            {resumeLoading ? 'Resuming…' : 'Resume line'}
           </Button>
         )}
       </Box>
 
       {team.status === 'paused' && (
-        <Alert severity="warning" sx={{ mx: 2, mb: 1 }} action={<Button color="inherit" size="small" startIcon={<PlayCircleFilled />} onClick={handleResumeTeam} disabled={resumeLoading}>{resumeLoading ? 'Resuming…' : 'Resume team'}</Button>}>
-          This line is paused: no autonomous heartbeats, worker dispatches, or background message replies. Use Invoke agent for manual runs. Resume to turn scheduling back on or run heartbeats.
+        <Alert severity="warning" sx={{ mx: 2, mb: 1 }}>
+          This line is paused: no autonomous heartbeats, worker dispatches, or background message replies. Use Invoke agent for manual runs. Use Resume line above to turn scheduling back on or run heartbeats.
         </Alert>
       )}
       </Box>
@@ -624,11 +644,16 @@ export default function LineDashboardPanel({
       >
         <Card variant="outlined" sx={{ gridColumn: { xs: '1', md: '1 / -1' } }}>
           <CardContent>
-            <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
-              Org chart
-            </Typography>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1, mb: 1 }}>
+              <Typography variant="subtitle2" color="text.secondary">
+                Org chart
+              </Typography>
+              <Chip size="small" label={`Governance: ${governanceMode}`} variant="outlined" />
+            </Box>
             <OrgChartView
               orgChart={orgChart ?? []}
+              layoutMode={orgLayoutMode}
+              highlightAgentProfileIds={orgHighlightIds}
               activeAgentProfileId={
                 executionStatus?.status === 'running' && executionStatus?.agent_id
                   ? executionStatus.agent_id
@@ -705,7 +730,7 @@ export default function LineDashboardPanel({
               <Typography variant="subtitle2" color="text.secondary">
                 Goals (summary)
               </Typography>
-              <Link component="button" variant="body2" onClick={() => onOpenGoalsDrawer?.()}>
+              <Link component="button" variant="body2" onClick={() => onGoToTab?.('goals')}>
                 View all
               </Link>
             </Box>
@@ -720,7 +745,7 @@ export default function LineDashboardPanel({
             <Typography variant="subtitle2" color="text.secondary">
               Tasks
             </Typography>
-            <Link component="button" variant="body2" onClick={() => onSelectTab?.(2)}>
+            <Link component="button" variant="body2" onClick={() => onGoToTab?.('tasks')}>
               View board
             </Link>
           </Box>
@@ -743,7 +768,7 @@ export default function LineDashboardPanel({
             <Typography variant="caption" color="text.secondary">
               One line per task; columns scroll after three rows. Hover a task for full details.
             </Typography>
-            <Link component="button" variant="body2" onClick={() => onSelectTab?.(2)} sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
+            <Link component="button" variant="body2" onClick={() => onGoToTab?.('tasks')} sx={{ fontWeight: 600, whiteSpace: 'nowrap' }}>
               Open full task board
             </Link>
           </Box>
@@ -756,7 +781,7 @@ export default function LineDashboardPanel({
             <Typography variant="subtitle2" color="text.secondary">
               Recent timeline
             </Typography>
-            <Link component="button" variant="body2" onClick={() => onSelectTab?.(1)}>
+            <Link component="button" variant="body2" onClick={() => onGoToTab?.('timeline')}>
               View all
             </Link>
           </Box>
@@ -768,6 +793,85 @@ export default function LineDashboardPanel({
           ))}
         </CardContent>
       </Card>
+
+      <Card variant="outlined" sx={{ mt: 2 }}>
+        <CardContent>
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+            <Typography variant="subtitle2" color="text.secondary">
+              Brief history (snapshots)
+            </Typography>
+            <IconButton size="small" onClick={() => refetchBriefSnapshots()} aria-label="Refresh brief snapshots">
+              <Refresh fontSize="small" />
+            </IconButton>
+          </Box>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+            Stored after each successful heartbeat for diff context on the next run. Newest first.
+          </Typography>
+          {briefSnapshots.length === 0 && (
+            <Typography variant="body2" color="text.secondary">No snapshots yet.</Typography>
+          )}
+          {briefSnapshots.map((row) => (
+            <Box
+              key={row.id}
+              sx={{
+                py: 0.75,
+                borderBottom: 1,
+                borderColor: 'divider',
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'flex-start',
+                gap: 1,
+              }}
+            >
+              <Box sx={{ minWidth: 0 }}>
+                <Typography variant="caption" color="text.secondary" display="block">
+                  {row.created_at ? new Date(row.created_at).toLocaleString() : '—'} · {row.source || 'heartbeat'}
+                </Typography>
+                <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  {row.preview || ''}
+                </Typography>
+              </Box>
+              <Button
+                size="small"
+                variant="text"
+                onClick={() => {
+                  setSnapshotDialogOpen(true);
+                  setSnapshotDialogTitle(row.created_at ? new Date(row.created_at).toLocaleString() : 'Snapshot');
+                  setSnapshotDialogLoading(true);
+                  setSnapshotDialogBody('');
+                  apiService.agentFactory
+                    .getLineBriefSnapshotDetail(lineId, row.id)
+                    .then((res) => {
+                      setSnapshotDialogBody(res?.content || '');
+                    })
+                    .catch(() => {
+                      setSnapshotDialogBody('Failed to load snapshot.');
+                    })
+                    .finally(() => setSnapshotDialogLoading(false));
+                }}
+              >
+                Open
+              </Button>
+            </Box>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Dialog open={snapshotDialogOpen} onClose={() => setSnapshotDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>{snapshotDialogTitle}</DialogTitle>
+        <DialogContent dividers>
+          {snapshotDialogLoading ? (
+            <CircularProgress size={28} />
+          ) : (
+            <Typography component="pre" variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', m: 0 }}>
+              {snapshotDialogBody}
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSnapshotDialogOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
 
       <Card variant="outlined" sx={{ mt: 2 }}>
         <CardContent>

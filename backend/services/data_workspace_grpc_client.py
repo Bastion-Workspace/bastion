@@ -282,7 +282,8 @@ class DataWorkspaceGRPCClient:
         table_name: str,
         file_path: str,
         user_id: str,
-        field_mapping: Optional[Dict[str, str]] = None
+        field_mapping: Optional[Dict[str, str]] = None,
+        type_overrides: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Execute import job"""
         try:
@@ -292,7 +293,8 @@ class DataWorkspaceGRPCClient:
                 table_name=table_name,
                 file_path=file_path,
                 user_id=user_id,
-                field_mapping_json=json.dumps(field_mapping) if field_mapping else ""
+                field_mapping_json=json.dumps(field_mapping) if field_mapping else "",
+                type_overrides_json=json.dumps(type_overrides) if type_overrides else "",
             )
             
             response = await self.stub.ExecuteImport(request)
@@ -589,6 +591,41 @@ class DataWorkspaceGRPCClient:
             
         except grpc.RpcError as e:
             logger.error(f"gRPC error updating cell: {e}")
+            raise
+
+    async def resolve_workspace_link(
+        self,
+        user_id: str,
+        ref_payload: Any,
+    ) -> Dict[str, Any]:
+        try:
+            ref_json = (
+                ref_payload
+                if isinstance(ref_payload, str)
+                else json.dumps(ref_payload)
+            )
+            request = data_service_pb2.ResolveWorkspaceLinkRequest(
+                user_id=user_id,
+                ref_json=ref_json or "{}",
+            )
+            response = await self.stub.ResolveWorkspaceLink(request)
+            preview = {}
+            if response.preview_json:
+                try:
+                    preview = json.loads(response.preview_json)
+                except (json.JSONDecodeError, TypeError):
+                    preview = {}
+            return {
+                "success": response.success,
+                "error": response.error or "",
+                "label": response.label or "",
+                "preview": preview,
+                "row_found": response.row_found,
+                "table_id": response.table_id or "",
+                "row_id": response.row_id or "",
+            }
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error resolving workspace link: {e}")
             raise
     
     async def delete_table_row(self, table_id: str, row_id: str) -> bool:

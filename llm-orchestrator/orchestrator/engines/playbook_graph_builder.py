@@ -8,28 +8,301 @@ Output is handled via tool steps (e.g. send_channel_message, save_to_document).
 """
 
 import asyncio
+import json
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
+from langchain_core.messages import HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
+from config.settings import settings
+from orchestrator.engines.playbook_limits import MAX_BEST_OF_N_SAMPLES, MAX_PARALLEL_SUBSTEPS
 from orchestrator.engines.pipeline_executor import (
     execute_step,
     _execute_llm_step,
     _execute_llm_agent_step,
     _execute_deep_agent_step,
     _evaluate_condition,
+    _get_llm_for_pipeline,
     _resolve_inputs,
 )
+from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
 
 logger = logging.getLogger(__name__)
 
 # Normalize step type: playbook definitions may use "type" or "step_type"
 def _step_type(step: Dict[str, Any]) -> str:
     return (step.get("step_type") or step.get("type") or "tool") or "tool"
+
+
+_ITEM_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _resolve_dot_path(root: Any, path: str) -> Any:
+    """Walk dict keys by dot-separated path (e.g. plan.items). Returns None if missing."""
+    if not path or not str(path).strip():
+        return None
+    cur: Any = root
+    for part in str(path).strip().split("."):
+        if not part:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(part)
+        else:
+            return None
+    return cur
+
+
+def _effective_samples(step: Dict[str, Any]) -> int:
+    raw = step.get("samples", 1)
+    try:
+        n = int(raw) if raw is not None else 1
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(MAX_BEST_OF_N_SAMPLES, n))
+
+
+def _state_for_fan_item(state: "PlaybookGraphState", item: Any, item_var: str) -> "PlaybookGraphState":
+    ps = {**(state.get("playbook_state") or {}), item_var: item}
+    inputs = {**(state.get("inputs") or {}), item_var: item}
+    return {**state, "playbook_state": ps, "inputs": inputs}
+
+
+def _compose_fan_out_merged_value(results: List[Dict[str, Any]], merge: str) -> Dict[str, Any]:
+    merge_l = (merge or "list").strip().lower()
+    count = len(results)
+    if merge_l == "concat":
+        parts: List[str] = []
+        for i, r in enumerate(results):
+            if isinstance(r, dict):
+                parts.append(f"## Item {i + 1}\n\n" + (r.get("formatted") or ""))
+            else:
+                parts.append(f"## Item {i + 1}\n\n{str(r)}")
+        formatted = "\n\n".join(parts) if parts else ""
+        return {"items": results, "formatted": formatted, "_fan_out": True, "_fan_out_count": count}
+    formatted = "\n\n---\n\n".join(
+        (r.get("formatted") if isinstance(r, dict) else str(r)) or "" for r in results
+    )
+    return {"items": results, "formatted": formatted, "_fan_out": True, "_fan_out_count": count}
+
+
+def _last_evaluate_score_from_phase_trace(phase_trace: Any) -> Optional[float]:
+    if not isinstance(phase_trace, list):
+        return None
+    last: Optional[float] = None
+    for entry in phase_trace:
+        if isinstance(entry, dict) and entry.get("type") == "evaluate" and "score" in entry:
+            try:
+                last = float(entry["score"])
+            except (TypeError, ValueError):
+                continue
+    return last
+
+
+def _pick_best_index_by_highest_score(results: List[Dict[str, Any]]) -> Optional[int]:
+    scores: List[Optional[float]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            scores.append(None)
+        else:
+            scores.append(_last_evaluate_score_from_phase_trace(r.get("phase_trace")))
+    if all(s is None for s in scores):
+        return None
+    best_i = 0
+    best_s = float("-inf")
+    for i, s in enumerate(scores):
+        if s is None:
+            continue
+        if s > best_s:
+            best_s = s
+            best_i = i
+    return best_i
+
+
+async def _llm_judge_pick_best_index(
+    results: List[Dict[str, Any]],
+    step: Dict[str, Any],
+    state: "PlaybookGraphState",
+    criteria: str,
+) -> int:
+    """0-based index into results; defaults to 0."""
+    if not results:
+        return 0
+    llm = _get_llm_for_pipeline({**(state.get("metadata") or {}), "pipeline_llm_temperature": 0.2})
+    if not llm:
+        return 0
+    chunks: List[str] = []
+    for i, r in enumerate(results):
+        if isinstance(r, dict):
+            body = (r.get("formatted") or r.get("raw") or "")[:8000]
+        else:
+            body = str(r)[:8000]
+        chunks.append(f"### Candidate {i}\n{body}")
+    crit = (criteria or "").strip() or "Select the highest quality, most complete response."
+    hi = max(0, len(results) - 1)
+    prompt = (
+        f"You are judging which of {len(results)} model outputs best meets the criteria.\n\n"
+        f"Criteria:\n{crit}\n\n"
+        + "\n\n".join(chunks)
+        + f'\n\nRespond with a single JSON object only: {{"best_index": <integer 0..{hi}>}}.\n'
+    )
+    try:
+        resp = await invoke_with_optional_timeout(
+            llm.ainvoke([HumanMessage(content=prompt)]),
+            settings.PIPELINE_LLM_INVOKE_TIMEOUT_SEC,
+        )
+        content = (getattr(resp, "content", None) or "").strip()
+        raw = content
+        if "```json" in raw:
+            start = raw.find("```json") + 7
+            end = raw.find("```", start)
+            raw = raw[start:end].strip() if end != -1 else raw
+        elif "```" in raw:
+            start = raw.find("```") + 3
+            end = raw.find("```", start)
+            raw = raw[start:end].strip() if end != -1 else raw
+        parsed = json.loads(raw)
+        idx = int(parsed.get("best_index", 0))
+        return max(0, min(len(results) - 1, idx))
+    except Exception as e:
+        logger.warning("Best-of-N LLM judge failed: %s", e)
+        return 0
+
+
+async def _select_best_of_n_result(
+    results: List[Dict[str, Any]],
+    step: Dict[str, Any],
+    state: "PlaybookGraphState",
+    *,
+    is_deep_agent: bool,
+) -> Dict[str, Any]:
+    if not results:
+        return {"_error": "no_samples", "formatted": "No best-of-N results."}
+    strategy = (step.get("selection_strategy") or "llm_judge").strip().lower()
+    n = len(results)
+    chosen = 0
+    if strategy == "highest_score" and is_deep_agent:
+        hi = _pick_best_index_by_highest_score(results)
+        if hi is not None:
+            chosen = hi
+        else:
+            chosen = await _llm_judge_pick_best_index(
+                results, step, state, str(step.get("selection_criteria") or "")
+            )
+    else:
+        chosen = await _llm_judge_pick_best_index(
+            results, step, state, str(step.get("selection_criteria") or "")
+        )
+    out = dict(results[chosen])
+    out["_best_of_n"] = {
+        "samples": n,
+        "chosen_index": chosen,
+        "strategy": strategy,
+    }
+    return out
+
+
+async def _gather_llm_agent_samples(
+    state: "PlaybookGraphState",
+    step: Dict[str, Any],
+    n: int,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Run n llm_agent executions; return (results, pending_auth if any sample needs interaction)."""
+    meta_base = dict(state.get("metadata") or {})
+
+    async def _one_sample() -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        st = {**state, "metadata": {**meta_base, "pipeline_llm_temperature": 0.65}}
+        ps = st.get("playbook_state") or {}
+        res = await _execute_llm_agent_step(
+            step,
+            ps,
+            st.get("inputs") or {},
+            user_id=st.get("user_id", "system"),
+            metadata=st.get("metadata"),
+        )
+        if isinstance(res, dict) and res.get("_interaction_required"):
+            interaction_data = res.get("interaction_data") or {}
+            pending_auth = {
+                "step_name": step.get("name") or step.get("output_key") or "llm_agent",
+                "interaction_type": res.get("interaction_type", "browser_login"),
+                "interaction_data": interaction_data,
+                "session_id": res.get("session_id"),
+                "site_domain": res.get("site_domain"),
+                "screenshot": interaction_data.get("screenshot"),
+                "login_url": interaction_data.get("login_url"),
+                "prompt": res.get("formatted", "Authentication required."),
+            }
+            return res, pending_auth
+        return res, None
+
+    if n <= 1:
+        ps = state.get("playbook_state") or {}
+        meta = dict(meta_base)
+        meta.pop("pipeline_llm_temperature", None)
+        res = await _execute_llm_agent_step(
+            step,
+            ps,
+            state.get("inputs") or {},
+            user_id=state.get("user_id", "system"),
+            metadata=meta,
+        )
+        if isinstance(res, dict) and res.get("_interaction_required"):
+            interaction_data = res.get("interaction_data") or {}
+            pending_auth = {
+                "step_name": step.get("name") or step.get("output_key") or "llm_agent",
+                "interaction_type": res.get("interaction_type", "browser_login"),
+                "interaction_data": interaction_data,
+                "session_id": res.get("session_id"),
+                "site_domain": res.get("site_domain"),
+                "screenshot": interaction_data.get("screenshot"),
+                "login_url": interaction_data.get("login_url"),
+                "prompt": res.get("formatted", "Authentication required."),
+            }
+            return [res], pending_auth
+        return [res], None
+
+    pairs = await asyncio.gather(*[_one_sample() for _ in range(n)])
+    for res, pend in pairs:
+        if pend is not None:
+            return [res], pend
+    return [p[0] for p in pairs], None
+
+
+async def _gather_deep_agent_samples(
+    state: "PlaybookGraphState",
+    step: Dict[str, Any],
+    n: int,
+) -> List[Dict[str, Any]]:
+    meta_base = dict(state.get("metadata") or {})
+
+    async def _one_sample() -> Dict[str, Any]:
+        st = {**state, "metadata": {**meta_base, "pipeline_llm_temperature": 0.65}}
+        ps = st.get("playbook_state") or {}
+        return await _execute_deep_agent_step(
+            step,
+            ps,
+            st.get("inputs") or {},
+            user_id=st.get("user_id", "system"),
+            metadata=st.get("metadata"),
+        )
+
+    if n <= 1:
+        meta = dict(meta_base)
+        meta.pop("pipeline_llm_temperature", None)
+        ps = state.get("playbook_state") or {}
+        return [
+            await _execute_deep_agent_step(
+                step,
+                ps,
+                state.get("inputs") or {},
+                user_id=state.get("user_id", "system"),
+                metadata=meta,
+            )
+        ]
+    return list(await asyncio.gather(*[_one_sample() for _ in range(n)]))
 
 # Max size for stored output snapshot (chars)
 _TRACE_OUTPUT_MAX = 2048
@@ -75,6 +348,17 @@ def _wrap_node_with_condition(step: Dict[str, Any], node_impl):
     return _node
 
 
+def _step_history_silent(step: Dict[str, Any]) -> bool:
+    """True when step should not append to execution_trace (silent history policy)."""
+    raw = (step.get("history_policy") or "").strip().lower()
+    return raw in ("silent", "off")
+
+
+def _is_exclusive(step: Dict[str, Any]) -> bool:
+    """When true and the step runs (not condition-skipped), graph routes to END instead of the next node."""
+    return bool(step.get("exclusive"))
+
+
 def _wrap_with_tracing(
     step: Dict[str, Any],
     node_impl,
@@ -84,6 +368,7 @@ def _wrap_with_tracing(
     step_name = step.get("name") or step.get("output_key") or f"step_{step_index}"
     step_type = _step_type(step)
     action_name = step.get("action") if step_type == "tool" else None
+    silent = _step_history_silent(step)
 
     async def _node(state: PlaybookGraphState) -> Dict[str, Any]:
         ps = state.get("playbook_state") or {}
@@ -98,20 +383,22 @@ def _wrap_with_tracing(
             logger.exception("Playbook step failed: %s", step_name)
             duration_ms = None
             completed_at = datetime.now(timezone.utc).isoformat()
-            trace.append({
-                "step_index": step_index,
-                "step_name": step_name,
-                "step_type": step_type,
-                "action_name": action_name,
-                "status": "failed",
-                "started_at": started_at,
-                "completed_at": completed_at,
-                "duration_ms": duration_ms,
-                "inputs_snapshot": _truncate_for_trace(inputs_snapshot),
-                "outputs_snapshot": {},
-                "error_details": str(e),
-                "tool_call_trace": None,
-            })
+            if not silent:
+                trace.append({
+                    "step_index": step_index,
+                    "step_name": step_name,
+                    "step_type": step_type,
+                    "action_name": action_name,
+                    "status": "failed",
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                    "duration_ms": duration_ms,
+                    "inputs_snapshot": _truncate_for_trace(inputs_snapshot),
+                    "outputs_snapshot": {},
+                    "error_details": str(e),
+                    "tool_call_trace": None,
+                    "acquired_tool_log": None,
+                })
             raise
 
         completed_at = datetime.now(timezone.utc).isoformat()
@@ -126,8 +413,12 @@ def _wrap_with_tracing(
         key = step.get("output_key") or step_name
         step_result = new_ps.get(key) if key else None
         tool_call_trace = None
+        acquired_tool_log = None
+        skill_execution_events = None
         if step_type == "llm_agent" and isinstance(step_result, dict):
             tool_call_trace = step_result.pop("_tool_call_trace", None)
+            acquired_tool_log = step_result.pop("_acquired_tool_log", None)
+            skill_execution_events = step_result.pop("_skill_execution_events", None)
             trace_inputs = step_result.pop("_trace_inputs", None)
             if isinstance(trace_inputs, dict) and trace_inputs:
                 inputs_snapshot = {**inputs_snapshot, **trace_inputs}
@@ -162,11 +453,16 @@ def _wrap_with_tracing(
             "outputs_snapshot": outputs_snapshot,
             "error_details": error_details,
             "tool_call_trace": tool_call_trace,
+            "acquired_tool_log": acquired_tool_log,
+            "skill_execution_events": skill_execution_events,
         }
         if token_usage and isinstance(token_usage, dict):
             trace_entry["input_tokens"] = token_usage.get("input_tokens", 0)
             trace_entry["output_tokens"] = token_usage.get("output_tokens", 0)
-        trace.append(trace_entry)
+        # Do not journal condition-skipped steps: they never ran; a lone inherit step skipped
+        # would otherwise leave a trace entry and force log_agent_execution for an otherwise all-silent run.
+        if not silent and status != "skipped":
+            trace.append(trace_entry)
         return {**result, "execution_trace": trace}
     return _node
 
@@ -192,22 +488,59 @@ def _make_tool_node(step: Dict[str, Any]):
 
 
 def _make_deep_agent_node(step: Dict[str, Any]):
-    """Return a node that runs a deep_agent step (multi-phase graph)."""
+    """Return a node that runs a deep_agent step (multi-phase graph), with optional fan-out and best-of-N."""
+
     async def _node(state: PlaybookGraphState) -> Dict[str, Any]:
-        ps = state.get("playbook_state") or {}
-        result = await _execute_deep_agent_step(
-            step, ps, state.get("inputs") or {},
-            user_id=state.get("user_id", "system"),
-            metadata=state.get("metadata"),
-        )
-        new_ps = {**ps}
+        fan = step.get("fan_out")
+        n = _effective_samples(step)
         key = step.get("output_key") or step.get("name")
+
+        async def _run_single(sub_state: PlaybookGraphState) -> Dict[str, Any]:
+            results = await _gather_deep_agent_samples(sub_state, step, n)
+            if n <= 1:
+                return results[0]
+            return await _select_best_of_n_result(results, step, sub_state, is_deep_agent=True)
+
+        if isinstance(fan, dict) and str(fan.get("source") or "").strip():
+            source = str(fan.get("source")).strip()
+            items = _resolve_dot_path(state.get("playbook_state") or {}, source)
+            if not isinstance(items, list):
+                items = [items] if items is not None and items != [] else []
+            item_var = (fan.get("item_variable") or "current_item").strip() or "current_item"
+            if not _ITEM_VAR_RE.match(item_var):
+                item_var = "current_item"
+            try:
+                mi = int(fan.get("max_items", 10))
+            except (TypeError, ValueError):
+                mi = 10
+            mi = max(1, min(MAX_PARALLEL_SUBSTEPS, mi))
+            items = items[:mi]
+            if not items:
+                new_ps = {**(state.get("playbook_state") or {})}
+                empty = {
+                    "_fan_out": True,
+                    "_fan_out_count": 0,
+                    "items": [],
+                    "formatted": "(No items to process.)",
+                }
+                if key:
+                    new_ps[key] = empty
+                return {**state, "playbook_state": new_ps}
+            sub_results = await asyncio.gather(
+                *[_run_single(_state_for_fan_item(state, it, item_var)) for it in items]
+            )
+            merged = _compose_fan_out_merged_value(sub_results, str(fan.get("merge") or "list"))
+            new_ps = {**(state.get("playbook_state") or {})}
+            if key:
+                new_ps[key] = merged
+            return {**state, "playbook_state": new_ps}
+
+        result = await _run_single(state)
+        new_ps = {**(state.get("playbook_state") or {})}
         if key:
             new_ps[key] = result
-        return {
-            **state,
-            "playbook_state": new_ps,
-        }
+        return {**state, "playbook_state": new_ps}
+
     return _node
 
 
@@ -233,40 +566,73 @@ def _make_llm_task_node(step: Dict[str, Any]):
 
 
 def _make_llm_agent_node(step: Dict[str, Any]):
-    """Return a node that runs an llm_agent step (ReAct with bound tools). May set pending_auth on _interaction_required."""
+    """Return a node that runs an llm_agent step (ReAct), with optional fan-out and best-of-N."""
+
     async def _node(state: PlaybookGraphState) -> Dict[str, Any]:
-        ps = state.get("playbook_state") or {}
-        meta = dict(state.get("metadata") or {})
-        result = await _execute_llm_agent_step(
-            step, ps, state.get("inputs") or {},
-            user_id=state.get("user_id", "system"),
-            metadata=meta,
-        )
-        new_ps = {**ps}
+        fan = step.get("fan_out")
+        n = _effective_samples(step)
         key = step.get("output_key") or step.get("name")
+
+        async def _run_single(sub_state: PlaybookGraphState) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+            results, pend = await _gather_llm_agent_samples(sub_state, step, n)
+            if pend is not None:
+                return results[0], pend
+            if n <= 1:
+                return results[0], None
+            best = await _select_best_of_n_result(results, step, sub_state, is_deep_agent=False)
+            return best, None
+
+        if isinstance(fan, dict) and str(fan.get("source") or "").strip():
+            source = str(fan.get("source")).strip()
+            items = _resolve_dot_path(state.get("playbook_state") or {}, source)
+            if not isinstance(items, list):
+                items = [items] if items is not None and items != [] else []
+            item_var = (fan.get("item_variable") or "current_item").strip() or "current_item"
+            if not _ITEM_VAR_RE.match(item_var):
+                item_var = "current_item"
+            try:
+                mi = int(fan.get("max_items", 10))
+            except (TypeError, ValueError):
+                mi = 10
+            mi = max(1, min(MAX_PARALLEL_SUBSTEPS, mi))
+            items = items[:mi]
+            if not items:
+                new_ps = {**(state.get("playbook_state") or {})}
+                empty = {
+                    "_fan_out": True,
+                    "_fan_out_count": 0,
+                    "items": [],
+                    "formatted": "(No items to process.)",
+                }
+                if key:
+                    new_ps[key] = empty
+                return {**state, "playbook_state": new_ps}
+
+            async def _per_item(item: Any) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+                sub = _state_for_fan_item(state, item, item_var)
+                return await _run_single(sub)
+
+            pairs = await asyncio.gather(*[_per_item(it) for it in items])
+            for res, pend in pairs:
+                if pend is not None:
+                    new_ps = {**(state.get("playbook_state") or {})}
+                    if key:
+                        new_ps[key] = res
+                    return {**state, "playbook_state": new_ps, "pending_auth": pend}
+            merged = _compose_fan_out_merged_value([p[0] for p in pairs], str(fan.get("merge") or "list"))
+            new_ps = {**(state.get("playbook_state") or {})}
+            if key:
+                new_ps[key] = merged
+            return {**state, "playbook_state": new_ps}
+
+        result, pend = await _run_single(state)
+        new_ps = {**(state.get("playbook_state") or {})}
         if key:
             new_ps[key] = result
-        if isinstance(result, dict) and result.get("_interaction_required"):
-            interaction_data = result.get("interaction_data") or {}
-            pending_auth = {
-                "step_name": step.get("name") or step.get("output_key") or "llm_agent",
-                "interaction_type": result.get("interaction_type", "browser_login"),
-                "interaction_data": interaction_data,
-                "session_id": result.get("session_id"),
-                "site_domain": result.get("site_domain"),
-                "screenshot": interaction_data.get("screenshot"),
-                "login_url": interaction_data.get("login_url"),
-                "prompt": result.get("formatted", "Authentication required."),
-            }
-            return {
-                **state,
-                "playbook_state": new_ps,
-                "pending_auth": pending_auth,
-            }
-        return {
-            **state,
-            "playbook_state": new_ps,
-        }
+        if pend is not None:
+            return {**state, "playbook_state": new_ps, "pending_auth": pend}
+        return {**state, "playbook_state": new_ps}
+
     return _node
 
 
@@ -419,7 +785,16 @@ def _make_approval_node(step: Dict[str, Any]):
 
 def _make_parallel_node(step: Dict[str, Any]):
     """Return a node that runs parallel_steps concurrently via asyncio.gather."""
-    children = step.get("parallel_steps", [])
+    raw = step.get("parallel_steps") or []
+    if len(raw) > MAX_PARALLEL_SUBSTEPS:
+        logger.warning(
+            "Parallel step %s: %d sub-steps exceeds max %d; running first %d only",
+            step.get("name") or step.get("output_key") or "parallel",
+            len(raw),
+            MAX_PARALLEL_SUBSTEPS,
+            MAX_PARALLEL_SUBSTEPS,
+        )
+    children = raw[:MAX_PARALLEL_SUBSTEPS]
 
     async def _node(state: PlaybookGraphState) -> Dict[str, Any]:
         ps = state.get("playbook_state") or {}
@@ -477,7 +852,10 @@ def _build_loop_subgraph(step: Dict[str, Any], checkpointer: Optional[AsyncPostg
                 "user_id": user_id,
                 "metadata": metadata or {},
             }
-            result = await child_graph.ainvoke(initial)
+            result = await invoke_with_optional_timeout(
+                child_graph.ainvoke(initial),
+                settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
+            )
             ps = result.get("playbook_state") or ps
             if result.get("pending_approval"):
                 return {
@@ -517,13 +895,16 @@ def _make_branch_node(step: Dict[str, Any], checkpointer: Optional[AsyncPostgres
         if target_graph is None:
             return state
 
-        result = await target_graph.ainvoke(
-            {
-                "playbook_state": dict(ps),
-                "inputs": inputs,
-                "user_id": state.get("user_id", "system"),
-                "metadata": state.get("metadata") or {},
-            }
+        result = await invoke_with_optional_timeout(
+            target_graph.ainvoke(
+                {
+                    "playbook_state": dict(ps),
+                    "inputs": inputs,
+                    "user_id": state.get("user_id", "system"),
+                    "metadata": state.get("metadata") or {},
+                }
+            ),
+            settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
         )
         return {
             **state,
@@ -557,8 +938,9 @@ def build_playbook_graph(
         step_type = _step_type(step)
         name = step.get("name") or step.get("output_key") or f"step_{i}"
 
-        def _wrap_cond_and_trace(raw_node):
-            return _wrap_with_tracing(step, _wrap_node_with_condition(step, raw_node), i)
+        def _wrap_cond_and_trace(raw_node, _step=step, _i=i):
+            # Default-arg bind: loop `step`/`i` must not close over the final iteration (wrong condition/trace).
+            return _wrap_with_tracing(_step, _wrap_node_with_condition(_step, raw_node), _i)
 
         if step_type == "approval":
             workflow.add_node(name, _wrap_cond_and_trace(_make_approval_node(step)))
@@ -585,8 +967,50 @@ def build_playbook_graph(
         if i == 0:
             workflow.set_entry_point(name)
         if prev_node_name is not None:
-            if prev_step_type == "llm_agent":
-                next_name = name
+            prev_step = steps[i - 1]
+            prev_output_key = prev_step.get("output_key") or prev_step.get("name") or f"step_{i - 1}"
+            prev_exclusive = _is_exclusive(prev_step)
+            next_name = name
+
+            if prev_step_type == "llm_agent" and prev_exclusive:
+
+                def _route_after_exclusive_llm_agent(
+                    s: PlaybookGraphState,
+                    _pk: str = prev_output_key,
+                    _next: str = next_name,
+                ) -> str:
+                    if s.get("pending_auth"):
+                        return "end"
+                    ps = s.get("playbook_state") or {}
+                    result = ps.get(_pk)
+                    if isinstance(result, dict) and result.get("_skipped"):
+                        return _next
+                    return "end"
+
+                workflow.add_conditional_edges(
+                    prev_node_name,
+                    _route_after_exclusive_llm_agent,
+                    {"end": END, next_name: name},
+                )
+            elif prev_exclusive:
+
+                def _route_after_exclusive(
+                    s: PlaybookGraphState,
+                    _pk: str = prev_output_key,
+                    _next: str = next_name,
+                ) -> str:
+                    ps = s.get("playbook_state") or {}
+                    result = ps.get(_pk)
+                    if isinstance(result, dict) and result.get("_skipped"):
+                        return _next
+                    return "end"
+
+                workflow.add_conditional_edges(
+                    prev_node_name,
+                    _route_after_exclusive,
+                    {"end": END, next_name: name},
+                )
+            elif prev_step_type == "llm_agent":
 
                 def _route_after_llm_agent(s: PlaybookGraphState, next_node: str = next_name) -> str:
                     return "end" if s.get("pending_auth") else next_node

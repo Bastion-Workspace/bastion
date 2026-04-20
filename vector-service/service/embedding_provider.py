@@ -81,6 +81,7 @@ class OpenAICompatibleProvider(EmbeddingProvider):
         max_retries: int,
         provider_label: str,
         max_text_length: int = 8000,
+        embedding_dimensions: Optional[int] = None,
     ):
         self._api_key = api_key
         self._base_url = base_url
@@ -89,6 +90,7 @@ class OpenAICompatibleProvider(EmbeddingProvider):
         self._max_retries = max_retries
         self._provider_label = provider_label
         self._max_text_length = max_text_length
+        self._embedding_dimensions = embedding_dimensions
         self._client = None
 
     @property
@@ -110,18 +112,31 @@ class OpenAICompatibleProvider(EmbeddingProvider):
         if self._base_url:
             kwargs["base_url"] = self._base_url
         self._client = AsyncOpenAI(**kwargs)
+        log_dims = ""
+        if self._openai_dimensions_kwarg() is not None:
+            log_dims = f" dimensions={self._embedding_dimensions}"
         logger.info(
-            f"Embedding provider initialized: {self._provider_label} model={self._model}"
+            f"Embedding provider initialized: {self._provider_label} model={self._model}{log_dims}"
         )
+
+    def _openai_dimensions_kwarg(self) -> Optional[int]:
+        """text-embedding-3-* supports the API ``dimensions`` parameter (Matryoshka)."""
+        if self._embedding_dimensions is None:
+            return None
+        m = (self._model or "").lower()
+        if "text-embedding-3" in m:
+            return int(self._embedding_dimensions)
+        return None
 
     async def generate_embedding(self, text: str) -> List[float]:
         if not self._client:
             raise RuntimeError("Provider not initialized")
         text = self._truncate_text(text, self._max_text_length)
-        response = await self._client.embeddings.create(
-            input=[text],
-            model=self._model,
-        )
+        kwargs: dict = {"input": [text], "model": self._model}
+        d = self._openai_dimensions_kwarg()
+        if d is not None:
+            kwargs["dimensions"] = d
+        response = await self._client.embeddings.create(**kwargs)
         embedding = response.data[0].embedding
         logger.debug(f"Generated embedding (dim: {len(embedding)})")
         return embedding
@@ -149,10 +164,11 @@ class OpenAICompatibleProvider(EmbeddingProvider):
             logger.debug(
                 f"Processing batch {batch_num}/{total_batches} ({len(batch)} texts)"
             )
-            response = await self._client.embeddings.create(
-                input=batch,
-                model=self._model,
-            )
+            create_kwargs: dict = {"input": batch, "model": self._model}
+            d = self._openai_dimensions_kwarg()
+            if d is not None:
+                create_kwargs["dimensions"] = d
+            response = await self._client.embeddings.create(**create_kwargs)
             batch_embeddings = [item.embedding for item in response.data]
             all_embeddings.extend(batch_embeddings)
             logger.debug(f"Batch {batch_num}/{total_batches} complete")

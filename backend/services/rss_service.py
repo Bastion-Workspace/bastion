@@ -1,8 +1,6 @@
 """
 RSS Service
-Database operations and business logic for RSS feed management
-
-**BULLY!** Now using the centralized DatabaseManager for all database operations!
+Database operations and business logic for RSS feed management via DatabaseManager helpers.
 """
 
 import logging
@@ -28,17 +26,12 @@ logger = logging.getLogger(__name__)
 
 class RSSService:
     """
-    RSS Service for feed and article management
-    
-    **BULLY!** This service handles all RSS database operations and business logic!
+    RSS feeds, articles, subscriptions, and polling persistence.
     """
     
     def __init__(self):
-        # **BULLY!** No more connection pool chaos - using centralized DatabaseManager!
         self._database_manager = None
         logger.info("🔧 RSS Service initialized with centralized DatabaseManager")
-    
-    # **BULLY!** No more connection pool methods - DatabaseManager handles everything!
     
     async def initialize(self, shared_db_pool=None):
         """Initialize the RSS service with centralized DatabaseManager"""
@@ -57,13 +50,10 @@ class RSSService:
         """Close RSS service - DatabaseManager handles connection cleanup"""
         logger.info("🔄 RSS service closed - DatabaseManager handles cleanup")
     
-    # **BULLY!** Celery pool method removed - DatabaseManager handles all environments!
-    
     # RSS Feed Operations
     async def get_feed_by_url(self, feed_url: str, user_id: str) -> Optional[RSSFeed]:
         """Get RSS feed by URL and user ID"""
         try:
-            # **BULLY!** Using DatabaseManager - no more pool management!
             # Handle global feeds (user_id = None) and user-specific feeds
             if user_id is None:
                 # For global feeds, look for feeds with user_id = NULL
@@ -116,7 +106,6 @@ class RSSService:
             # Prepare tags as JSON string
             tags_json = json.dumps(feed_data.tags) if feed_data.tags else '[]'
             
-            # **BULLY!** Using DatabaseManager for feed creation!
             row_data = await fetch_one("""
                 INSERT INTO rss_feeds (feed_id, feed_url, feed_name, category, tags, check_interval, user_id, created_at, updated_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
@@ -228,7 +217,6 @@ class RSSService:
     async def get_feed(self, feed_id: str) -> Optional[RSSFeed]:
         """Get RSS feed by ID using centralized DatabaseManager"""
         try:
-            # **BULLY!** Simple, reliable database query - DatabaseManager handles retries!
             row_data = await fetch_one("SELECT * FROM rss_feeds WHERE feed_id = $1", feed_id)
             
             if row_data:
@@ -249,7 +237,6 @@ class RSSService:
     async def get_user_feeds(self, user_id: str, is_admin: bool = False) -> List[RSSFeed]:
         """Get all RSS feeds for a user"""
         try:
-            # **BULLY!** Using DatabaseManager for user feeds!
             if is_admin:
                 # Admin users can see their own feeds + global feeds (user_id IS NULL)
                 # But NOT other users' feeds to maintain proper separation
@@ -476,17 +463,6 @@ class RSSService:
             if not can_delete:
                 return False
 
-            # Remove associated News articles synthesized from this feed's RSS articles
-            await execute(
-                """
-                DELETE FROM news_articles 
-                WHERE id IN (
-                    SELECT article_id FROM rss_articles WHERE feed_id = $1
-                )
-                """,
-                feed_id,
-            )
-
             # Delete the feed (will cascade delete rss_articles via FK)
             if is_admin:
                 result = await execute("DELETE FROM rss_feeds WHERE feed_id = $1", feed_id)
@@ -540,7 +516,6 @@ class RSSService:
     async def get_article(self, article_id: str) -> Optional[RSSArticle]:
         """Get RSS article by ID using centralized DatabaseManager"""
         try:
-            # **BULLY!** Simple, reliable database query - DatabaseManager handles retries!
             row_data = await fetch_one("SELECT * FROM rss_articles WHERE article_id = $1", article_id)
             
             if row_data:
@@ -558,13 +533,30 @@ class RSSService:
             logger.error(f"❌ RSS SERVICE ERROR: Failed to get article {article_id}: {e}")
             return None
     
-    async def get_feed_articles(self, feed_id: str, user_id: str, limit: int = 100) -> List[RSSArticle]:
-        """Get articles for a specific feed"""
+    async def get_feed_articles(
+        self,
+        feed_id: str,
+        user_id: str,
+        limit: int = 100,
+        read_filter: str = "all",
+    ) -> List[RSSArticle]:
+        """Get articles for a specific feed.
+
+        read_filter: ``all`` (default), ``unread`` (not marked read), ``read`` (marked read).
+        """
         try:
-            # **BULLY!** Using DatabaseManager for feed articles!
-            rows = await fetch_all("""
-                SELECT * FROM rss_articles 
-                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL)
+            rf = (read_filter or "all").strip().lower()
+            if rf not in ("all", "unread", "read"):
+                rf = "all"
+            read_clause = ""
+            if rf == "unread":
+                read_clause = " AND (is_read IS NOT TRUE)"
+            elif rf == "read":
+                read_clause = " AND (is_read IS TRUE)"
+
+            rows = await fetch_all(f"""
+                SELECT * FROM rss_articles
+                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL){read_clause}
                 ORDER BY published_date DESC NULLS LAST, created_at DESC
                 LIMIT $3
             """, feed_id, user_id, limit)
@@ -908,7 +900,6 @@ class RSSService:
                 return 0
             for r in rows:
                 aid = r["article_id"] if isinstance(r, dict) else r[0]
-                await execute("DELETE FROM news_articles WHERE id = $1", aid)
             del_rows = await fetch_all(
                 """
                 DELETE FROM rss_articles
@@ -1050,9 +1041,6 @@ class RSSService:
             if owner_id is not None and owner_id != user_id:
                 return False
 
-            # Delete associated News article first
-            await execute("DELETE FROM news_articles WHERE id = $1", article_id)
-
             # Delete RSS article
             result = await execute(
                 "DELETE FROM rss_articles WHERE article_id = $1 AND (user_id = $2 OR user_id IS NULL)",
@@ -1067,7 +1055,6 @@ class RSSService:
     async def get_unread_count(self, user_id: str) -> Dict[str, int]:
         """Get unread article count per feed"""
         try:
-            # **BULLY!** Using DatabaseManager for unread count!
             rows = await fetch_all("""
                 SELECT feed_id, COUNT(*) as unread_count
                 FROM rss_articles
@@ -1154,8 +1141,8 @@ class RSSService:
                     feed_id=feed_id,
                     is_healthy=is_healthy,
                     last_successful_poll=feed_row['last_check'],
-                    consecutive_failures=0,  # TODO: Implement failure tracking
-                    average_response_time=None,  # TODO: Implement response time tracking
+                    consecutive_failures=0,  # not persisted from polls yet
+                    average_response_time=None,  # not collected yet
                     articles_per_day=recent_articles / 7 if recent_articles > 0 else 0,
                     last_article_date=last_article_date
                 )
@@ -1191,7 +1178,6 @@ class RSSService:
     async def cleanup_stuck_polling_feeds(self) -> int:
         """Clean up feeds that have been stuck in polling state for too long"""
         try:
-            # **BULLY!** Using DatabaseManager for cleanup operations!
             result = await execute("""
                 UPDATE rss_feeds 
                 SET is_polling = false, updated_at = NOW()

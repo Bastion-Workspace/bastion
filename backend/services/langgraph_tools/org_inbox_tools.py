@@ -7,7 +7,6 @@ universal todo API (backend/services/org_todo_service.py). Only inbox path
 resolution and raw append/tag-index utilities remain here.
 """
 
-import glob
 import logging
 import re
 from pathlib import Path
@@ -33,10 +32,38 @@ class OrgInboxTools:
         self._global_upload_dir = Path(settings.UPLOAD_DIR)
         self._user_id = user_id
 
+    async def _ds_read(self, path: Path) -> str:
+        from services import ds_upload_library_fs as dsf
+
+        if not self._user_id:
+            raise RuntimeError("OrgInboxTools requires user_id for document-service I/O")
+        return await dsf.read_text(self._user_id, path)
+
+    async def _ds_write(self, path: Path, text: str) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        if not self._user_id:
+            raise RuntimeError("OrgInboxTools requires user_id for document-service I/O")
+        await dsf.write_text(self._user_id, path, text)
+
+    async def _ds_append(self, path: Path, text: str) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        if not self._user_id:
+            raise RuntimeError("OrgInboxTools requires user_id for document-service I/O")
+        await dsf.append_text(self._user_id, path, text)
+
+    async def _ds_exists(self, path: Path) -> bool:
+        from services import ds_upload_library_fs as dsf
+
+        if not self._user_id:
+            return False
+        return await dsf.exists(self._user_id, path)
+
     async def _base_dir(self) -> Path:
         if self._user_id:
             info = await ensure_user_org_files(self._user_id)
-            return Path(info["org_base_dir"])  # type: ignore[arg-type]
+            return Path(str(info["org_base_dir"]))
         return self._global_upload_dir
 
     async def _find_inbox_path(self) -> Optional[Path]:
@@ -53,7 +80,7 @@ class OrgInboxTools:
 
             if settings_obj.inbox_file:
                 inbox_path = user_base_dir / settings_obj.inbox_file
-                if inbox_path.exists():
+                if await self._ds_exists(inbox_path):
                     return inbox_path
                 logger.warning("Configured inbox not found: %s", inbox_path)
 
@@ -76,12 +103,9 @@ class OrgInboxTools:
         if self._user_id:
             info = await ensure_user_org_files(self._user_id)
             return Path(info["inbox_path"])
-        base = await self._base_dir()
-        base.mkdir(parents=True, exist_ok=True)
-        path = base / "inbox.org"
-        if not path.exists():
-            path.write_text("* Inbox\n", encoding="utf-8")
-        return path
+        raise RuntimeError(
+            "OrgInboxTools requires user_id; document-service cannot create an inbox without it"
+        )
 
     async def get_inbox_path(self) -> Optional[str]:
         path = await self._find_inbox_path()
@@ -91,11 +115,10 @@ class OrgInboxTools:
         path = await self.ensure_inbox()
         try:
             to_write = content if content.endswith("\n") else content + "\n"
-            existing = path.read_text(encoding="utf-8")
+            existing = await self._ds_read(path)
             if existing and not existing.endswith("\n"):
                 to_write = "\n" + to_write
-            with path.open("a", encoding="utf-8") as f:
-                f.write(to_write)
+            await self._ds_append(path, to_write)
             return {"path": str(path), "appended_chars": len(to_write)}
         except Exception as e:
             logger.error(f"Failed to append text: {e}")
@@ -106,10 +129,9 @@ class OrgInboxTools:
         path = await self.ensure_inbox()
         try:
             block_text = block.strip("\n") + "\n"
-            existing_lines = path.read_text(encoding="utf-8").splitlines()
+            existing_lines = (await self._ds_read(path)).splitlines()
             start_idx = len(existing_lines)
-            with path.open("a", encoding="utf-8") as f:
-                f.write(block_text)
+            await self._ds_append(path, block_text)
             added_count = len(block_text.splitlines())
             end_idx = start_idx + added_count - 1
             return {
@@ -131,18 +153,26 @@ class OrgInboxTools:
         return tags
 
     async def index_tags(self) -> Dict[str, int]:
-        """Scan .org files under uploads to build a tag frequency index."""
+        """Scan .org files under the user's org tree to build a tag frequency index."""
+        if not self._user_id:
+            return {}
+        from services.database_manager.database_helpers import fetch_one
+        from services import ds_upload_library_fs as dsf
+
         base = await self._base_dir()
         counts: Dict[str, int] = {}
         try:
-            if not base.exists():
-                return counts
-            for m in glob.glob(str(base / "**" / "*.org"), recursive=True):
-                if "/.versions/" in m or "\\.versions\\" in m:
+            row = await fetch_one("SELECT username FROM users WHERE user_id = $1", self._user_id)
+            username = row["username"] if row else self._user_id
+            base_str = str(base.resolve()).replace("\\", "/")
+            for org_file in await dsf.walk_org_files(self._user_id, username, include_archives=False):
+                pstr = str(org_file.resolve()).replace("\\", "/")
+                if "/.versions/" in pstr:
                     continue
-                p = Path(m)
+                if not pstr.startswith(base_str):
+                    continue
                 try:
-                    for line in p.read_text(encoding="utf-8").splitlines():
+                    for line in (await dsf.read_text(self._user_id, org_file)).splitlines():
                         if line.lstrip().startswith("*"):
                             for t in self._extract_tags_from_headline(line):
                                 counts[t] = counts.get(t, 0) + 1
@@ -184,7 +214,7 @@ class OrgInboxTools:
         """List task-like items from inbox.org. Used internally by gRPC AddOrgInboxItem handler."""
         path = await self.ensure_inbox()
         try:
-            content = path.read_text(encoding="utf-8")
+            content = await self._ds_read(path)
             lines = content.splitlines()
             items: List[Dict[str, Any]] = []
             for idx, line in enumerate(lines):
@@ -211,17 +241,18 @@ class OrgInboxTools:
             line = f"- [ ] {text}\n"
         created_line = await self._created_timestamp_line()
         try:
-            with path.open("a", encoding="utf-8") as f:
-                existing = path.read_text(encoding="utf-8")
-                if existing and not existing.endswith("\n"):
-                    f.write("\n")
-                f.write(line)
-                if created_line:
-                    f.write(created_line)
-                if kind == "todo" and body and body.strip():
-                    body_text = body.strip()
-                    f.write(body_text + "\n" if not body_text.endswith("\n") else body_text)
-            lines = path.read_text(encoding="utf-8").splitlines()
+            existing = await self._ds_read(path)
+            chunk = ""
+            if existing and not existing.endswith("\n"):
+                chunk += "\n"
+            chunk += line
+            if created_line:
+                chunk += created_line
+            if kind == "todo" and body and body.strip():
+                body_text = body.strip()
+                chunk += body_text + "\n" if not body_text.endswith("\n") else body_text
+            await self._ds_append(path, chunk)
+            lines = (await self._ds_read(path)).splitlines()
             added_index = len(lines) - 1
             if created_line:
                 added_index = len(lines) - 2
@@ -234,7 +265,7 @@ class OrgInboxTools:
         """Toggle done state of a task line. Used internally by gRPC ToggleOrgInboxItem handler."""
         path = await self.ensure_inbox()
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = (await self._ds_read(path)).splitlines()
             if line_index < 0 or line_index >= len(lines):
                 return {"path": str(path), "error": "line_index out of range"}
             line = lines[line_index]
@@ -252,7 +283,7 @@ class OrgInboxTools:
                 lines[line_index] = line.replace("** DONE ", "** TODO ", 1)
             else:
                 return {"path": str(path), "error": "line is not a task"}
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await self._ds_write(path, "\n".join(lines) + "\n")
             return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
         except Exception as e:
             logger.error(f"Failed to toggle item: {e}")
@@ -262,7 +293,7 @@ class OrgInboxTools:
         """Update the text of a task line. Used internally by gRPC UpdateOrgInboxItem handler."""
         path = await self.ensure_inbox()
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = (await self._ds_read(path)).splitlines()
             if line_index < 0 or line_index >= len(lines):
                 return {"path": str(path), "error": "line_index out of range"}
             prefix = ""
@@ -280,7 +311,7 @@ class OrgInboxTools:
             elif stripped.startswith("** DONE "):
                 prefix = "** DONE "
             lines[line_index] = f"{prefix}{new_text}".rstrip()
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await self._ds_write(path, "\n".join(lines) + "\n")
             return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
         except Exception as e:
             logger.error(f"Failed to update line: {e}")
@@ -290,7 +321,7 @@ class OrgInboxTools:
         """Apply tags to a specific line. Used internally by gRPC ApplyOrgInboxTags handler."""
         path = await self.ensure_inbox()
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = (await self._ds_read(path)).splitlines()
             if line_index < 0 or line_index >= len(lines):
                 return {"path": str(path), "error": "line_index out of range"}
             line = lines[line_index]
@@ -300,7 +331,7 @@ class OrgInboxTools:
             else:
                 tag_suffix = "  :" + ":".join(sorted(set(t.strip() for t in tags if t.strip()))) + ":"
                 lines[line_index] = (line.rstrip() + tag_suffix)
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await self._ds_write(path, "\n".join(lines) + "\n")
             return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
         except Exception as e:
             logger.error(f"Failed to apply tags: {e}")
@@ -310,7 +341,7 @@ class OrgInboxTools:
         """Set SCHEDULED and optional repeater. Used internally by gRPC SetOrgInboxSchedule handler."""
         path = await self.ensure_inbox()
         try:
-            lines = path.read_text(encoding="utf-8").splitlines()
+            lines = (await self._ds_read(path)).splitlines()
             if line_index < 0 or line_index >= len(lines):
                 return {"path": str(path), "error": "line_index out of range"}
             if not lines[line_index].lstrip().startswith("*"):
@@ -332,7 +363,7 @@ class OrgInboxTools:
                 lines[sched_idx] = content
             else:
                 lines.insert(insert_idx, content)
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await self._ds_write(path, "\n".join(lines) + "\n")
             return {"path": str(path), "updated_index": line_index, "scheduled_index": (sched_idx or insert_idx), "scheduled_line": content}
         except Exception as e:
             logger.error(f"Failed to set schedule/repeater: {e}")
@@ -360,16 +391,6 @@ async def org_inbox_path(user_id: Optional[str] = None) -> str:
 async def org_inbox_append_text(content: str, user_id: Optional[str] = None) -> Dict[str, Any]:
     inst = await _get_instance(user_id)
     return await inst.append_text(content=content)
-
-
-async def org_inbox_append_block(block: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-    inst = await _get_instance(user_id)
-    return await inst.append_block(block=block)
-
-
-async def org_inbox_index_tags(user_id: Optional[str] = None) -> Dict[str, int]:
-    inst = await _get_instance(user_id)
-    return await inst.index_tags()
 
 
 # ── Internal wrappers used by gRPC handlers (not registered in tool registry) ──
@@ -414,7 +435,7 @@ async def org_inbox_archive_done(user_id: str) -> Dict[str, Any]:
         done_states = await _resolve_done_states(user_id)
         inst = await _get_instance(user_id)
         inbox_path = await inst.ensure_inbox()
-        lines = inbox_path.read_text(encoding="utf-8").splitlines()
+        lines = (await inst._ds_read(inbox_path)).splitlines()
         entries = _parse_inbox_entries(lines)
         to_archive: List[List[str]] = []
         remaining: List[str] = []
@@ -432,17 +453,23 @@ async def org_inbox_archive_done(user_id: str) -> Dict[str, Any]:
                 "archived_count": 0,
             }
         from services.org_files_service import get_user_archive_path
+        from services import ds_upload_library_fs as dsf
+
         archive_path = Path(await get_user_archive_path(user_id))
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
         ts = await _format_archive_ts(user_id)
         source_label = str(inbox_path.name)
-        with archive_path.open("a", encoding="utf-8") as f:
-            for entry_lines in to_archive:
-                block = OrgTodoService._upsert_properties_entry(entry_lines, "ARCHIVE_TIME", f"[{ts}]")
-                block = OrgTodoService._upsert_properties_entry(block, "ARCHIVE_FILE", source_label)
-                for line in block:
-                    f.write(line + "\n" if not line.endswith("\n") else line)
-        inbox_path.write_text("\n".join(remaining) + ("\n" if remaining else ""), encoding="utf-8")
+        for entry_lines in to_archive:
+            block = OrgTodoService._upsert_properties_entry(entry_lines, "ARCHIVE_TIME", f"[{ts}]")
+            block = OrgTodoService._upsert_properties_entry(block, "ARCHIVE_FILE", source_label)
+            chunk = "".join(
+                (line + "\n" if not line.endswith("\n") else line) for line in block
+            )
+            await dsf.append_text(user_id, archive_path, chunk)
+        await dsf.write_text(
+            user_id,
+            inbox_path,
+            "\n".join(remaining) + ("\n" if remaining else ""),
+        )
         return {
             "path": str(inbox_path),
             "archived_to": str(archive_path),

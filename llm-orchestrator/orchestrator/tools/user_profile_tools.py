@@ -199,8 +199,10 @@ async def save_user_fact_tool(
 ) -> Dict[str, Any]:
     """
     Save or update a fact about the user in their persistent fact store.
-    Use when the user shares personal information they'd like remembered across conversations.
-    Examples: job title, location, hobbies, dietary restrictions, programming language preference.
+    Use ONLY for stable, cross-conversation knowledge the user wants remembered permanently.
+    Good examples: job title, location, hobbies, dietary restrictions, preferred programming language, timezone.
+    Do NOT save: details of the current task, debugging findings, project-specific state, or anything that would be irrelevant in a different conversation tomorrow.
+    Prefer updating an existing key over creating a new one.
     """
     try:
         client = await get_backend_tool_client()
@@ -237,7 +239,7 @@ async def save_user_fact_tool(
 register_action(
     name="save_user_fact",
     category="user",
-    description="Save or update a fact about the user in their persistent fact store. Use when the user shares information they want remembered (e.g. job title, location, dietary preference, hobbies).",
+    description="Save or update a fact about the user in their persistent fact store. Use ONLY for stable, cross-conversation knowledge the user wants remembered permanently (e.g. job title, location, dietary preference, hobbies, preferred language, timezone). Do NOT save current-task details, debugging findings, or project-specific state. Prefer updating an existing key over creating a new one.",
     short_description="Save or update a fact about the user",
     inputs_model=SaveUserFactInputs,
     params_model=SaveUserFactParams,

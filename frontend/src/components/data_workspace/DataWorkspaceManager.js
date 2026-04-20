@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -13,18 +13,22 @@ import {
   Card,
   CardContent,
   Menu,
-  MenuItem
+  MenuItem,
+  ListItemText,
+  Breadcrumbs,
+  Link
 } from '@mui/material';
 import {
   Add as AddIcon,
   Refresh as RefreshIcon,
-  ViewInAr as ViewInArIcon,
   Dashboard as DashboardIcon,
   Storage as StorageIcon,
   MoreVert as MoreVertIcon,
   Delete as DeleteIcon,
   Edit as EditIcon,
-  Code as CodeIcon
+  Code as CodeIcon,
+  Fullscreen,
+  FullscreenExit
 } from '@mui/icons-material';
 
 import dataWorkspaceService from '../../services/dataWorkspaceService';
@@ -34,7 +38,13 @@ import TableSchemaEditDialog from './TableSchemaEditDialog';
 import DataTableView from './DataTableView';
 import RunSqlDialog from './RunSqlDialog';
 
-const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) => {
+const DataWorkspaceManager = ({ workspaceId, onFullscreenChange }) => {
+  const fullscreenContainerRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const modalContainer =
+    isFullscreen && fullscreenContainerRef.current ? fullscreenContainerRef.current : undefined;
+
   const [workspace, setWorkspace] = useState(null);
   const [databases, setDatabases] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -134,14 +144,76 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
     loadDatabases();
   };
 
-  const handleLaunch3DNavigator = () => {
-    // TODO: Launch 3D navigator in new tab or modal
-    console.log('Launch 3D Navigator for workspace:', workspaceId);
+  const handleToggleFullscreen = async () => {
+    if (!fullscreenContainerRef.current || typeof document === 'undefined' || !document) return;
+
+    const element = fullscreenContainerRef.current;
+    const isCurrentlyFullscreen = !!(
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement
+    );
+
+    try {
+      if (!isCurrentlyFullscreen) {
+        if (element.requestFullscreen) await element.requestFullscreen();
+        else if (element.webkitRequestFullscreen) await element.webkitRequestFullscreen();
+        else if (element.mozRequestFullScreen) await element.mozRequestFullScreen();
+        else if (element.msRequestFullscreen) await element.msRequestFullscreen();
+        else {
+          console.warn('Fullscreen API not supported');
+          return;
+        }
+        setIsFullscreen(true);
+      } else {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) await document.webkitExitFullscreen();
+        else if (document.mozCancelFullScreen) await document.mozCancelFullScreen();
+        else if (document.msExitFullscreen) await document.msExitFullscreen();
+        setIsFullscreen(false);
+      }
+    } catch (err) {
+      console.error('Fullscreen error:', err);
+      setIsFullscreen(false);
+    }
   };
+
+  useEffect(() => {
+    if (typeof document === 'undefined' || !document) return;
+
+    const handleFullscreenChange = () => {
+      const next = !!(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      );
+      setIsFullscreen(next);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof onFullscreenChange === 'function') {
+      onFullscreenChange(isFullscreen);
+    }
+  }, [isFullscreen, onFullscreenChange]);
 
   const handleViewTables = async (database) => {
     setSelectedDatabase(database);
-    setActiveTab(2); // Switch to tables tab
+    setActiveTab(1); // Switch to tables tab
     
     try {
       const tablesData = await dataWorkspaceService.listTables(database.database_id);
@@ -177,6 +249,24 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
     } catch (error) {
       console.error('Failed to parse table schema:', error);
     }
+  };
+
+  const handleOpenLinkedRow = async ({ targetTableId }) => {
+    if (!targetTableId || !selectedDatabase) return;
+    let t = tables.find((x) => x.table_id === targetTableId);
+    if (!t) {
+      try {
+        const fresh = await dataWorkspaceService.listTables(selectedDatabase.database_id);
+        setTables(fresh);
+        t = fresh.find((x) => x.table_id === targetTableId);
+      } catch (e) {
+        console.error('Failed to load tables for linked row:', e);
+        return;
+      }
+    }
+    if (!t) return;
+    await handleSelectTable(t);
+    setActiveTab(1);
   };
 
   const handleBackToDatabases = () => {
@@ -259,12 +349,16 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
   }
 
   return (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', bgcolor: 'background.default' }}>
+    <Box
+      ref={fullscreenContainerRef}
+      sx={{ height: '100%', display: 'flex', flexDirection: 'column', bgcolor: 'background.default', overflow: 'hidden' }}
+    >
       {/* Header */}
       <Paper 
         elevation={1} 
         sx={{ 
-          p: 2, 
+          px: 2,
+          py: 1.25,
           borderRadius: 0,
           borderBottom: 1,
           borderColor: 'divider'
@@ -272,15 +366,15 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
       >
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Box sx={{ fontSize: 32 }}>
+            <Box sx={{ fontSize: 24, lineHeight: 1 }}>
               {workspace.icon || '📊'}
             </Box>
             <Box>
-              <Typography variant="h5" sx={{ fontWeight: 600 }}>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.1 }}>
                 {workspace.name}
               </Typography>
               {workspace.description && (
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', lineHeight: 1.2 }}>
                   {workspace.description}
                 </Typography>
               )}
@@ -288,9 +382,9 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
           </Box>
           
           <Box sx={{ display: 'flex', gap: 1 }}>
-            <Tooltip title="3D Navigator (FSN Style)">
-              <IconButton onClick={handleLaunch3DNavigator} color="primary">
-                <ViewInArIcon />
+            <Tooltip title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}>
+              <IconButton onClick={handleToggleFullscreen} color="primary" aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}>
+                {isFullscreen ? <FullscreenExit /> : <Fullscreen />}
               </IconButton>
             </Tooltip>
             <Tooltip title="Refresh">
@@ -306,13 +400,8 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
       <Paper elevation={0} sx={{ borderBottom: 1, borderColor: 'divider' }}>
         <Tabs value={activeTab} onChange={(e, v) => setActiveTab(v)}>
           <Tab icon={<StorageIcon />} label="Databases" iconPosition="start" />
-          <Tab icon={<DashboardIcon />} label="Overview" iconPosition="start" />
           {selectedDatabase && (
-            <Tab 
-              icon={<StorageIcon />} 
-              label={`Tables - ${selectedDatabase.name}`} 
-              iconPosition="start" 
-            />
+            <Tab icon={<StorageIcon />} label="Tables" iconPosition="start" />
           )}
         </Tabs>
       </Paper>
@@ -326,34 +415,72 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
             loading={loading}
             onRefresh={loadDatabases}
             onViewTables={handleViewTables}
+            modalContainer={modalContainer}
           />
         )}
         
-        {activeTab === 1 && (
+        {activeTab === 1 && selectedDatabase && (
           <Box>
-            <Typography variant="h6" gutterBottom>
-              Workspace Overview
-            </Typography>
-            <Paper sx={{ p: 3, mt: 2 }}>
-              <Typography variant="body2" color="text.secondary">
-                Statistics and visualizations coming soon...
-              </Typography>
-            </Paper>
-          </Box>
-        )}
-
-        {activeTab === 2 && selectedDatabase && (
-          <Box>
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-              <Box>
-                <Button onClick={handleBackToDatabases} sx={{ mb: 1 }}>
-                  ← Back to Databases
-                </Button>
-                <Typography variant="h6">
-                  Tables in {selectedDatabase.name}
-                </Typography>
-              </Box>
-              <Box sx={{ display: 'flex', gap: 1 }}>
+            <Box
+              sx={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                flexWrap: 'wrap',
+                gap: 2,
+                mb: 2
+              }}
+            >
+              <Breadcrumbs aria-label="Data workspace navigation" sx={{ minWidth: 0 }}>
+                <Link
+                  component="button"
+                  variant="body2"
+                  underline="hover"
+                  color="inherit"
+                  onClick={handleBackToDatabases}
+                  sx={{
+                    cursor: 'pointer',
+                    border: 0,
+                    background: 'none',
+                    font: 'inherit',
+                    p: 0,
+                    textAlign: 'left',
+                    maxWidth: { xs: '40vw', sm: 'none' }
+                  }}
+                >
+                  Databases
+                </Link>
+                {selectedTable && tableSchema ? (
+                  <>
+                    <Link
+                      component="button"
+                      variant="body2"
+                      underline="hover"
+                      color="inherit"
+                      onClick={() => setSelectedTable(null)}
+                      sx={{
+                        cursor: 'pointer',
+                        border: 0,
+                        background: 'none',
+                        font: 'inherit',
+                        p: 0,
+                        textAlign: 'left',
+                        maxWidth: { xs: '35vw', sm: 'none' }
+                      }}
+                    >
+                      {selectedDatabase.name}
+                    </Link>
+                    <Typography color="text.primary" variant="body2" noWrap sx={{ maxWidth: { xs: '35vw', sm: 240 } }}>
+                      {selectedTable.name}
+                    </Typography>
+                  </>
+                ) : (
+                  <Typography color="text.primary" variant="body2" noWrap sx={{ maxWidth: { xs: '50vw', sm: 320 } }}>
+                    {selectedDatabase.name}
+                  </Typography>
+                )}
+              </Breadcrumbs>
+              <Box sx={{ display: 'flex', gap: 1, flexShrink: 0 }}>
                 <Button
                   variant="outlined"
                   startIcon={<CodeIcon />}
@@ -373,19 +500,22 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
 
             {selectedTable && tableSchema ? (
               <Box>
-                <Button onClick={() => setSelectedTable(null)} sx={{ mb: 2 }}>
-                  ← Back to Tables
-                </Button>
-                <Paper sx={{ height: 'calc(100vh - 300px)' }}>
+                <Paper sx={{ height: 'calc(100vh - 300px)', mt: 1 }}>
                   <DataTableView
                     tableId={selectedTable.table_id}
                     databaseId={selectedTable.database_id}
                     schema={tableSchema}
+                    modalContainer={modalContainer}
                     onDataChange={() => {}}
                     onRowsLoaded={(rows, total) => {
                       setCurrentRows(rows || []);
                       setCurrentTotalRows(total ?? 0);
                     }}
+                    onEditTableSchema={() => {
+                      setTableForEdit(selectedTable);
+                      setShowEditSchemaDialog(true);
+                    }}
+                    onOpenLinkedRow={handleOpenLinkedRow}
                   />
                 </Paper>
               </Box>
@@ -460,10 +590,19 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
         anchorEl={tableMenuAnchor}
         open={Boolean(tableMenuAnchor)}
         onClose={handleTableMenuClose}
+        container={modalContainer}
       >
-        <MenuItem onClick={handleEditTableSchema}>
-          <EditIcon sx={{ mr: 1 }} fontSize="small" />
-          Edit columns
+        <MenuItem
+          onClick={handleEditTableSchema}
+          sx={{ alignItems: 'flex-start', py: 1, maxWidth: 280 }}
+        >
+          <EditIcon sx={{ mr: 1, mt: 0.25 }} fontSize="small" />
+          <ListItemText
+            primary="Table schema"
+            secondary="Add, remove, or reorder columns"
+            primaryTypographyProps={{ variant: 'body2' }}
+            secondaryTypographyProps={{ variant: 'caption' }}
+          />
         </MenuItem>
         <MenuItem 
           onClick={handleDeleteTable}
@@ -480,6 +619,7 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
         onClose={() => setShowTableWizard(false)}
         databaseId={selectedDatabase?.database_id}
         onTableCreated={handleTableCreated}
+        container={modalContainer}
       />
 
       {/* Table schema edit dialog */}
@@ -488,6 +628,7 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
         onClose={handleEditSchemaDialogClose}
         table={tableForEdit}
         onSaved={handleEditSchemaSaved}
+        container={modalContainer}
       />
 
       {/* Run SQL dialog */}
@@ -495,6 +636,7 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
         open={showRunSqlDialog}
         onClose={() => setShowRunSqlDialog(false)}
         workspaceId={workspaceId}
+        container={modalContainer}
         onSuccess={() => {
           if (selectedDatabase) {
             dataWorkspaceService.listTables(selectedDatabase.database_id).then(setTables).catch(() => {});

@@ -14,7 +14,10 @@ class MusicServiceConfigRequest(BaseModel):
     username: str = Field(..., description="Server username (or API token for Audiobookshelf)")
     password: str = Field(..., description="Server password or API token")
     auth_type: str = Field(default="password", description="Authentication type: 'password' or 'token' (for SubSonic)")
-    service_type: str = Field(default="subsonic", description="Service type: 'subsonic' or 'audiobookshelf'")
+    service_type: str = Field(
+        default="subsonic",
+        description="Service type: 'subsonic', 'audiobookshelf', or 'emby'",
+    )
     service_name: Optional[str] = Field(default=None, description="User-friendly display name for this source")
 
 
@@ -23,7 +26,10 @@ class MusicServiceConfigResponse(BaseModel):
     server_url: str
     username: str
     auth_type: str
-    service_type: str = Field(default="subsonic", description="Service type: 'subsonic' or 'audiobookshelf'")
+    service_type: str = Field(
+        default="subsonic",
+        description="Service type: 'subsonic', 'audiobookshelf', or 'emby'",
+    )
     service_name: Optional[str] = Field(default=None, description="User-friendly display name")
     is_active: bool = Field(default=True, description="Whether this source is active")
     has_config: bool = Field(default=True, description="Whether user has configured a music service")
@@ -50,7 +56,10 @@ class MusicTrack(BaseModel):
     track_number: Optional[int] = None
     cover_art_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
-    service_type: Optional[str] = Field(default=None, description="Service type: 'subsonic' or 'audiobookshelf'")
+    service_type: Optional[str] = Field(
+        default=None,
+        description="Service type: 'subsonic', 'audiobookshelf', or 'emby'",
+    )
 
 
 class MusicAlbum(BaseModel):

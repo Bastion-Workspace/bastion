@@ -322,27 +322,42 @@ export default function IdentitySection({
             sx={{ alignSelf: 'flex-start' }}
           />
           {profile.include_user_facts && (
-            <Autocomplete
-              multiple
-              options={['general', 'work', 'preferences', 'personal']}
-              value={Array.isArray(profile.include_facts_categories) ? profile.include_facts_categories : []}
-              onChange={(_, value) => onChange({ ...profile, include_facts_categories: value || [] })}
-              disabled={readOnly}
-              renderInput={(params) => (
-                <TextField
-                  {...params}
-                  label="Fact categories to include"
-                  placeholder="All if empty"
-                  size="small"
-                />
-              )}
-              renderTags={(value, getTagProps) =>
-                value.map((option, index) => (
-                  <Chip size="small" label={option} {...getTagProps({ index })} key={option} />
-                ))
-              }
-              sx={{ maxWidth: 400 }}
-            />
+            <>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={profile.use_themed_memory !== false}
+                    onChange={(e) => onChange({ ...profile, use_themed_memory: e.target.checked })}
+                    disabled={readOnly}
+                    color="primary"
+                  />
+                }
+                label="Themed memory (cluster similar facts; retrieve by query relevance with adaptive context size)"
+                labelPlacement="start"
+                sx={{ alignSelf: 'flex-start' }}
+              />
+              <Autocomplete
+                multiple
+                options={['general', 'work', 'preferences', 'personal']}
+                value={Array.isArray(profile.include_facts_categories) ? profile.include_facts_categories : []}
+                onChange={(_, value) => onChange({ ...profile, include_facts_categories: value || [] })}
+                disabled={readOnly}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    label="Fact categories to include"
+                    placeholder="All if empty"
+                    size="small"
+                  />
+                )}
+                renderTags={(value, getTagProps) =>
+                  value.map((option, index) => (
+                    <Chip size="small" label={option} {...getTagProps({ index })} key={option} />
+                  ))
+                }
+                sx={{ maxWidth: 400 }}
+              />
+            </>
           )}
           <FormControlLabel
             control={

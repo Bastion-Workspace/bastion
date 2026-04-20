@@ -8,18 +8,33 @@ Routes all operations through Vector Service gRPC for centralized Qdrant access.
 import asyncio
 import logging
 import json
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
-from qdrant_client.models import (
-    PointStruct, Distance, VectorParams, Filter,
-    FieldCondition, MatchValue, ScrollRequest
-)
-
 from config import settings
+from models.vector_point import VectorPoint
 from clients.vector_service_client import get_vector_service_client
 
 logger = logging.getLogger(__name__)
+
+def _is_hybrid_auto_migrate_collection(collection_name: str) -> bool:
+    """Return True if this collection should be auto-deleted and recreated as named_hybrid."""
+    if collection_name in ("help_docs", settings.VECTOR_COLLECTION_NAME):
+        return True
+    if collection_name.startswith("user_") and collection_name.endswith("_documents"):
+        return True
+    if collection_name.startswith("team_"):
+        return True
+    return False
+
+
+def _is_per_user_or_team_document_collection(collection_name: str) -> bool:
+    """Collections scoped by user/team that use EMBEDDING_DIMENSIONS (not fixed-dim encoders)."""
+    if collection_name.startswith("user_") and collection_name.endswith("_documents"):
+        return True
+    if collection_name.startswith("team_"):
+        return True
+    return False
 
 
 class VectorStoreService:
@@ -37,23 +52,67 @@ class VectorStoreService:
     def __init__(self):
         self.vector_service_client = None
         self._initialized = False
-    
+        self._vector_available = False
+
+    def is_vector_available(self) -> bool:
+        """True when gRPC client is healthy and default collection is usable."""
+        return bool(self._vector_available)
+
+    async def refresh_availability(self) -> bool:
+        """Reconnect vector-service if needed and re-ensure default collection."""
+        if not getattr(settings, "VECTOR_EMBEDDING_ENABLED", True):
+            self._vector_available = False
+            return False
+        try:
+            if self.vector_service_client and not self.vector_service_client.is_ready():
+                await self.vector_service_client.try_reconnect()
+            elif not self.vector_service_client:
+                self.vector_service_client = await get_vector_service_client(required=False)
+            if self.vector_service_client and not self.vector_service_client.is_ready():
+                await self.vector_service_client.try_reconnect()
+            ok, _ = await self.ensure_collection_exists(settings.VECTOR_COLLECTION_NAME)
+            self._vector_available = bool(
+                ok
+                and self.vector_service_client
+                and self.vector_service_client.is_ready()
+            )
+            return self._vector_available
+        except Exception as e:
+            logger.warning("Vector store refresh_availability failed: %s", e)
+            self._vector_available = False
+            return False
+
     async def initialize(self):
-        """Initialize Vector Service client"""
+        """Initialize Vector Service client (non-fatal when vector stack is optional)."""
         if self._initialized:
             return
-            
+
         logger.info("Initializing Vector Store Service (via Vector Service)...")
-        
+
         self.vector_service_client = await get_vector_service_client(required=False)
-        
-        # Mark as initialized before ensuring collection to prevent recursion
         self._initialized = True
-        
-        # Ensure default collection exists
-        await self.ensure_collection_exists(settings.VECTOR_COLLECTION_NAME)
-        
-        logger.debug("Vector Store Service initialized (routing through Vector Service)")
+
+        if not getattr(settings, "VECTOR_EMBEDDING_ENABLED", True):
+            self._vector_available = False
+            logger.info("VECTOR_EMBEDDING_ENABLED is false; vector operations disabled")
+            return
+
+        try:
+            ok, _ = await self.ensure_collection_exists(settings.VECTOR_COLLECTION_NAME)
+            self._vector_available = bool(
+                ok
+                and self.vector_service_client
+                and self.vector_service_client.is_ready()
+            )
+            if not self._vector_available:
+                logger.warning(
+                    "Vector store unavailable at startup; searches will be empty until recovery"
+                )
+        except Exception as e:
+            logger.warning("Vector store initialization incomplete: %s", e)
+            self._vector_available = False
+
+        logger.debug("Vector Store Service initialize finished (available=%s)", self._vector_available)
     
     def _get_user_collection_name(self, user_id: str) -> str:
         """Generate collection name for a specific user"""
@@ -63,73 +122,149 @@ class VectorStoreService:
         """Generate collection name for a specific team"""
         return f"team_{team_id}"
     
-    async def ensure_collection_exists(self, collection_name: str) -> bool:
-        """Ensure a collection exists, create if it doesn't"""
+    async def ensure_collection_exists(self, collection_name: str) -> Tuple[bool, bool]:
+        """Ensure a collection exists, create if it doesn't.
+
+        Returns:
+            (success, created_or_migrated): True second element when a new collection was
+            created or an incompatible schema was replaced (caller should full re-index).
+        """
+        hybrid = getattr(settings, "HYBRID_SEARCH_ENABLED", False)
         try:
             # Ensure client is available (but don't call initialize() if already initialized to avoid recursion)
             if not self.vector_service_client:
                 if not self._initialized:
-                    # Only initialize if truly not initialized
                     await self.initialize()
-                    # After initialize(), _initialized is True, so we won't recurse
                 else:
-                    # If initialized but client is None, get it directly
                     self.vector_service_client = await get_vector_service_client(required=False)
-            
-            if not self.vector_service_client:
-                raise RuntimeError("Vector Service client not available")
+
+            if (
+                not self.vector_service_client
+                or not self.vector_service_client.is_ready()
+            ):
+                logger.warning("Vector Service client not ready; cannot ensure collection")
+                return False, False
             
             # Check if collection exists
             collections_result = await self.vector_service_client.list_collections()
             if not collections_result.get("success"):
                 logger.warning(f"Failed to list collections: {collections_result.get('error')}")
-                return False
+                return False, False
             
             collection_names = [col["name"] for col in collections_result.get("collections", [])]
             
+            if collection_name in collection_names:
+                info = await self.vector_service_client.get_collection_info(collection_name)
+                if info.get("success"):
+                    coll = info.get("collection") or {}
+                    needs_recreate = False
+
+                    if hybrid and _is_hybrid_auto_migrate_collection(collection_name):
+                        schema = (coll.get("schema_type") or "").strip().lower()
+                        if schema != "named_hybrid":
+                            logger.warning(
+                                "Replacing collection %s for hybrid schema (schema_type=%r)",
+                                collection_name,
+                                schema or "unknown",
+                            )
+                            needs_recreate = True
+
+                    existing_dims = coll.get("vector_size", 0)
+                    if existing_dims and existing_dims != settings.EMBEDDING_DIMENSIONS:
+                        logger.warning(
+                            "Dimension mismatch for %s: existing=%d, configured=%d. Recreating.",
+                            collection_name,
+                            existing_dims,
+                            settings.EMBEDDING_DIMENSIONS,
+                        )
+                        needs_recreate = True
+
+                    if needs_recreate:
+                        del_result = await self.vector_service_client.delete_collection(
+                            collection_name
+                        )
+                        if not del_result.get("success"):
+                            err = del_result.get("error", "Unknown error")
+                            logger.error(
+                                "Failed to delete collection %s for migration: %s",
+                                collection_name,
+                                err,
+                            )
+                            return False, False
+                        collection_names = [
+                            n for n in collection_names if n != collection_name
+                        ]
+                else:
+                    logger.warning(
+                        "get_collection_info failed for %s: %s",
+                        collection_name,
+                        info.get("error"),
+                    )
+
             if collection_name not in collection_names:
                 # Create collection via Vector Service
                 create_result = await self.vector_service_client.create_collection(
                     collection_name=collection_name,
                     vector_size=settings.EMBEDDING_DIMENSIONS,
-                    distance="COSINE"
+                    distance="COSINE",
+                    enable_sparse=hybrid,
                 )
                 if create_result.get("success"):
                     logger.info(f"Created vector collection: {collection_name}")
-                    return True
+                    return True, True
                 else:
                     error = create_result.get("error", "Unknown error")
                     logger.error(f"Failed to create collection {collection_name}: {error}")
-                    return False
-            # Collection already exists
-            return True
+                    return False, False
+            return True, False
         except Exception as e:
-            logger.error(f"Failed to ensure collection exists: {e}")
-            raise
-    
+            logger.error("Failed to ensure collection exists: %s", e)
+            return False, False
+
     async def ensure_user_collection_exists(self, user_id: str) -> bool:
         """Ensure user-specific collection exists"""
         collection_name = self._get_user_collection_name(user_id)
-        return await self.ensure_collection_exists(collection_name)
+        ok, _ = await self.ensure_collection_exists(collection_name)
+        return ok
     
     async def ensure_team_collection_exists(self, team_id: str) -> bool:
         """Ensure team-specific collection exists"""
         collection_name = self._get_team_collection_name(team_id)
-        return await self.ensure_collection_exists(collection_name)
+        ok, _ = await self.ensure_collection_exists(collection_name)
+        return ok
+
+    async def ensure_collection_ready_for_search(self, collection_name: str) -> None:
+        """Recreate per-user/team document collections if Qdrant size != EMBEDDING_DIMENSIONS.
+
+        Lazy ensure only runs during embed/index today; searches must align dimensions first
+        or Qdrant returns 400 (e.g. expected 3072, got 1536 after lowering EMBEDDING_DIMENSIONS).
+        """
+        if not _is_per_user_or_team_document_collection(collection_name):
+            return
+        try:
+            await self.ensure_collection_exists(collection_name)
+        except Exception as e:
+            logger.warning(
+                "Could not ensure Qdrant collection %s before search: %s",
+                collection_name,
+                e,
+            )
     
     async def insert_points(
         self,
-        points: List[PointStruct],
+        points: List[VectorPoint],
         collection_name: Optional[str] = None,
-        max_retries: int = 3
+        max_retries: int = 3,
+        sparse_vectors: Optional[List[Optional[Dict]]] = None,
     ) -> bool:
         """
         Insert points into vector collection with retry logic
         
         Args:
-            points: List of PointStruct objects to insert
+            points: List of VectorPoint objects to insert
             collection_name: Target collection (defaults to global collection)
             max_retries: Maximum number of retry attempts
+            sparse_vectors: Optional parallel list of BM25 sparse dicts (indices/values)
             
         Returns:
             True if successful, False otherwise
@@ -146,20 +281,29 @@ class VectorStoreService:
         if not points:
             logger.warning("No points provided for insertion")
             return False
-        
-        # Convert PointStruct to dict format for Vector Service
+
+        if not self._vector_available:
+            logger.debug("insert_points skipped: vector stack unavailable")
+            return False
+
+        # Convert VectorPoint to dict format for Vector Service
         points_dict = []
-        for point in points:
+        for idx, point in enumerate(points):
             # Convert payload to dict (handle any complex types)
             payload_dict = {}
             for key, value in point.payload.items():
                 payload_dict[key] = value
             
-            points_dict.append({
+            d = {
                 "id": point.id,
                 "vector": point.vector,
-                "payload": payload_dict
-            })
+                "payload": payload_dict,
+            }
+
+            if sparse_vectors and idx < len(sparse_vectors) and sparse_vectors[idx]:
+                d["sparse_vector"] = sparse_vectors[idx]
+
+            points_dict.append(d)
         
         # Batch insertion for large point sets
         batch_size = 100
@@ -217,7 +361,9 @@ class VectorStoreService:
         team_ids: Optional[List[str]] = None,
         collection_name: Optional[str] = None,
         filter_category: Optional[str] = None,
-        filter_tags: Optional[List[str]] = None
+        filter_tags: Optional[List[str]] = None,
+        shared_collection_scopes: Optional[List[Tuple[str, List[str]]]] = None,
+        query_text: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for similar vectors in collection(s)
@@ -231,28 +377,28 @@ class VectorStoreService:
             collection_name: Specific collection to search (overrides user_id/team_ids)
             filter_category: Filter by document category
             filter_tags: Filter by document tags
+            query_text: Raw query text for BM25 sparse encoding (hybrid search)
             
         Returns:
             List of search results with scores and metadata
         """
         try:
             if collection_name:
-                # Search specific collection
                 return await self._search_collection(
                     collection_name, query_embedding, limit, score_threshold,
-                    filter_category, filter_tags
+                    filter_category, filter_tags, None, query_text=query_text,
                 )
-            elif user_id or team_ids:
-                # Hybrid search: user + team + global collections
+            elif user_id or team_ids or shared_collection_scopes:
                 return await self._hybrid_search(
                     query_embedding, user_id, team_ids, limit, score_threshold,
-                    filter_category, filter_tags
+                    filter_category, filter_tags, shared_collection_scopes,
+                    query_text=query_text,
                 )
             else:
-                # Search global collection only
                 return await self._search_collection(
-                    settings.VECTOR_COLLECTION_NAME, query_embedding, 
-                    limit, score_threshold, filter_category, filter_tags
+                    settings.VECTOR_COLLECTION_NAME, query_embedding,
+                    limit, score_threshold, filter_category, filter_tags, None,
+                    query_text=query_text,
                 )
         except Exception as e:
             logger.error(f"Vector search failed: {e}")
@@ -265,12 +411,19 @@ class VectorStoreService:
         limit: int,
         score_threshold: float,
         filter_category: Optional[str] = None,
-        filter_tags: Optional[List[str]] = None
+        filter_tags: Optional[List[str]] = None,
+        filter_document_ids: Optional[List[str]] = None,
+        query_text: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search a specific collection via Vector Service"""
         try:
             if not self._initialized:
                 await self.initialize()
+
+            if not self._vector_available:
+                return []
+
+            await self.ensure_collection_ready_for_search(collection_name)
             
             # Build filters for Vector Service
             filters = []
@@ -293,15 +446,57 @@ class VectorStoreService:
                         "value": tag,
                         "operator": "equals"
                     })
-            
-            # Execute search via Vector Service
-            search_results = await self.vector_service_client.search_vectors(
-                collection_name=collection_name,
-                query_vector=query_embedding,
-                limit=limit,
-                score_threshold=score_threshold,
-                filters=filters if filters else None
-            )
+            if filter_document_ids:
+                filters.append({
+                    "field": "document_id",
+                    "operator": "any_of",
+                    "values": list(filter_document_ids),
+                })
+
+            # BM25 sparse query when hybrid search is enabled
+            sparse_query = None
+            fusion = ""
+            if getattr(settings, "HYBRID_SEARCH_ENABLED", False) and query_text:
+                try:
+                    from services.bm25_encoder import get_default_bm25_encoder
+                    encoder = get_default_bm25_encoder()
+                    sparse_query = encoder.encode(query_text)
+                    if sparse_query and sparse_query.get("indices"):
+                        fusion = "rrf"
+                    else:
+                        sparse_query = None
+                except Exception as e:
+                    logger.warning("BM25 encode failed for search query, falling back to dense-only: %s", e)
+
+            # Execute search via Vector Service; fall back to dense-only if the
+            # collection does not yet support sparse (named_hybrid) schema.
+            try:
+                search_results = await self.vector_service_client.search_vectors(
+                    collection_name=collection_name,
+                    query_vector=query_embedding,
+                    limit=limit,
+                    score_threshold=score_threshold,
+                    filters=filters if filters else None,
+                    sparse_query_vector=sparse_query,
+                    fusion_mode=fusion,
+                )
+            except Exception as sparse_err:
+                if sparse_query is not None:
+                    logger.warning(
+                        "Sparse search failed for %s, retrying dense-only: %s",
+                        collection_name, sparse_err,
+                    )
+                    search_results = await self.vector_service_client.search_vectors(
+                        collection_name=collection_name,
+                        query_vector=query_embedding,
+                        limit=limit,
+                        score_threshold=score_threshold,
+                        filters=filters if filters else None,
+                        sparse_query_vector=None,
+                        fusion_mode="",
+                    )
+                else:
+                    raise
             
             # Get collection info for diagnostics
             try:
@@ -365,18 +560,23 @@ class VectorStoreService:
         limit: int,
         score_threshold: float,
         filter_category: Optional[str] = None,
-        filter_tags: Optional[List[str]] = None
+        filter_tags: Optional[List[str]] = None,
+        shared_collection_scopes: Optional[List[Tuple[str, List[str]]]] = None,
+        query_text: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Search global, user, and team collections, combining results"""
         try:
             logger.info(f"Hybrid search for user {user_id}, teams {team_ids}")
             
             # Calculate per-collection limit
+            shared_collection_scopes = shared_collection_scopes or []
+            shared_nonempty = [s for s in shared_collection_scopes if s[1]]
             num_collections = 1  # global
             if user_id:
                 num_collections += 1
             if team_ids:
                 num_collections += len(team_ids)
+            num_collections += len(shared_nonempty)
             
             per_collection_limit = max(limit // num_collections, 10)
             
@@ -391,7 +591,9 @@ class VectorStoreService:
                     per_collection_limit,
                     score_threshold,
                     filter_category,
-                    filter_tags
+                    filter_tags,
+                    None,
+                    query_text=query_text,
                 )
             )
             tasks.append(("global", global_task))
@@ -406,7 +608,9 @@ class VectorStoreService:
                         per_collection_limit,
                         score_threshold,
                         filter_category,
-                        filter_tags
+                        filter_tags,
+                        None,
+                        query_text=query_text,
                     )
                 )
                 tasks.append(("user", user_task))
@@ -422,10 +626,28 @@ class VectorStoreService:
                             per_collection_limit,
                             score_threshold,
                             filter_category,
-                            filter_tags
+                            filter_tags,
+                            None,
+                            query_text=query_text,
                         )
                     )
                     tasks.append((f"team_{team_id}", team_task))
+
+            for sharer_id, doc_ids in shared_nonempty:
+                shared_name = self._get_user_collection_name(sharer_id)
+                shared_task = asyncio.create_task(
+                    self._search_collection(
+                        shared_name,
+                        query_embedding,
+                        per_collection_limit,
+                        score_threshold,
+                        filter_category,
+                        filter_tags,
+                        doc_ids,
+                        query_text=query_text,
+                    )
+                )
+                tasks.append((f"shared_{sharer_id}", shared_task))
             
             # Wait for all searches
             results_dict = {}
@@ -495,7 +717,9 @@ class VectorStoreService:
                 limit,
                 score_threshold,
                 filter_category,
-                filter_tags
+                filter_tags,
+                None,
+                query_text=query_text,
             )
     
     async def delete_points_by_filter(
@@ -518,7 +742,14 @@ class VectorStoreService:
         try:
             if not self._initialized:
                 await self.initialize()
-            
+
+            if not self._vector_available:
+                logger.debug(
+                    "delete_points_by_filter skipped for document %s (vector unavailable)",
+                    document_id,
+                )
+                return False
+
             if collection_name:
                 target_collection = collection_name
             elif user_id:
@@ -558,7 +789,10 @@ class VectorStoreService:
         try:
             if not self._initialized:
                 await self.initialize()
-            
+
+            if not self._vector_available or not self.vector_service_client:
+                return False
+
             result = await self.vector_service_client.delete_collection(collection_name)
             
             if result.get("success"):
@@ -582,10 +816,17 @@ class VectorStoreService:
         """Get statistics about a collection via Vector Service"""
         if not self._initialized:
             await self.initialize()
-        
+
         if not collection_name:
             collection_name = settings.VECTOR_COLLECTION_NAME
-        
+
+        if not self._vector_available or not self.vector_service_client:
+            return {
+                "exists": False,
+                "collection_name": collection_name,
+                "error": "vector stack unavailable",
+            }
+
         try:
             result = await self.vector_service_client.get_collection_info(collection_name)
             
@@ -624,7 +865,10 @@ class VectorStoreService:
         try:
             if not self._initialized:
                 await self.initialize()
-            
+
+            if not self._vector_available or not self.vector_service_client:
+                return []
+
             result = await self.vector_service_client.list_collections()
             
             if not result.get("success"):

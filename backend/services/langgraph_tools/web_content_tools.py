@@ -21,7 +21,7 @@ class WebContentTools:
     def __init__(self):
         # Use lazy initialization to avoid import-time service creation
         self._web_search_service = None
-        # ROOSEVELT'S FIX: Get SearXNG URL from environment or default to container name
+        # SearXNG URL from environment or default service hostname
         import os
         self.searxng_url = os.getenv("SEARXNG_URL", "http://searxng:8080")
         # duckduckgo often returns CAPTCHA for server-side SearXNG; default avoids it (override via SEARXNG_ENGINES)
@@ -254,7 +254,7 @@ class WebContentTools:
             if title_match:
                 return title_match.group(1).strip()
             return "Unknown Title"
-        except:
+        except Exception:
             return "Unknown Title"
     
     async def _rate_limit(self):
@@ -352,7 +352,7 @@ class WebContentTools:
             from urllib.parse import urlparse
             parsed = urlparse(url)
             return parsed.netloc
-        except:
+        except Exception:
             return "unknown"
     
     async def _analyze_relevance(self, query: str, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -383,10 +383,3 @@ async def search_web(query: str, limit: int = 10, analyze_relevance: bool = True
     """LangGraph tool function: Search the web using SearXNG"""
     tools_instance = await _get_web_content()
     return await tools_instance.search_web(query, limit, analyze_relevance, user_id)
-
-
-async def analyze_and_ingest_url(urls: List[str], criteria: str = "relevant and authoritative", max_urls: int = 5, user_id: str = None) -> Dict[str, Any]:
-    """LangGraph tool function: Analyze and ingest URLs"""
-    tools_instance = await _get_web_content()
-    return await tools_instance.analyze_and_ingest(urls, criteria, max_urls, user_id)
-

@@ -311,16 +311,7 @@ class BaseAgent:
             max_tokens=max_tokens,
             model_kwargs=model_kwargs if model_kwargs else None
         )
-    
-    def _get_fast_model(self, state: Optional[Dict[str, Any]] = None) -> str:
-        """Get fast model for lightweight operations, using user preferences if available"""
-        if state:
-            metadata = state.get("metadata", {})
-            user_fast_model = metadata.get("user_fast_model")
-            if user_fast_model:
-                return user_fast_model
-        return settings.FAST_MODEL
-    
+
     def _handle_openrouter_error(self, error: Exception) -> Dict[str, Any]:
         """
         Transform OpenRouter API errors into user-friendly messages
@@ -464,44 +455,7 @@ class BaseAgent:
             "error_type": error_type,
             "original_error": str(error)
         }
-    
-    async def _safe_llm_invoke(
-        self, 
-        llm: ChatOpenAI, 
-        messages: List[Any],
-        error_context: str = "LLM call"
-    ) -> Any:
-        """
-        Safely invoke LLM with OpenRouter error handling
-        
-        Args:
-            llm: ChatOpenAI instance to use
-            messages: List of messages to send
-            error_context: Context string for error logging
-            
-        Returns:
-            LLM response object
-            
-        Raises:
-            OpenRouterError: Raises a custom exception with user-friendly message
-        """
-        try:
-            return await llm.ainvoke(messages)
-        except (NotFoundError, APIError, RateLimitError, AuthenticationError) as e:
-            error_info = self._handle_openrouter_error(e)
-            logger.error(f"❌ {error_context} failed: {error_info['error_type']} - {error_info['original_error']}")
-            
-            # Raise a custom exception that agents can catch and handle
-            raise OpenRouterError(
-                error_info["error_message"],
-                error_info["error_type"],
-                original_error=str(e)
-            )
-        except Exception as e:
-            # Re-raise non-OpenRouter errors as-is
-            logger.error(f"❌ {error_context} failed with unexpected error: {e}")
-            raise
-    
+
     def _prepare_messages_with_query(self, messages: Optional[List[Any]], query: str) -> List[Any]:
         """
         Prepare messages list with current user query for checkpoint persistence
@@ -520,39 +474,19 @@ class BaseAgent:
         conversation_messages = list(messages) if messages else []
         conversation_messages.append(HumanMessage(content=query))
         return conversation_messages
-    
-    def _add_assistant_response_to_messages(self, state: Dict[str, Any], response_text: str) -> Dict[str, Any]:
-        """
-        Add assistant response to messages list for checkpoint persistence
-        
-        This ensures assistant responses are saved to LangGraph checkpoints,
-        matching the backend's behavior of persisting full conversation history.
-        
-        Args:
-            state: Current LangGraph state
-            response_text: Assistant response text to add
-            
-        Returns:
-            Updated state with assistant response in messages
-        """
-        from langchain_core.messages import AIMessage
-        messages = state.get("messages", [])
-        messages.append(AIMessage(content=response_text))
-        state["messages"] = messages
-        return state
-    
+
     def _clear_request_scoped_data(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Clear request-scoped data from shared_memory before checkpoint save
         
-        Request-scoped data (like active_editor) should:
+        Request-scoped data (like active_editor and active_artifact) should:
         - Persist during a single request (for subgraph communication)
         - Be cleared before checkpoint save (it's request-scoped, not conversation-scoped)
         
         This ensures:
-        - Subgraphs can access active_editor during the request
-        - active_editor doesn't persist in checkpoint (prevents stale data)
-        - Each request gets fresh editor state from the frontend
+        - Subgraphs can access active_editor / active_artifact during the request
+        - active_editor and active_artifact don't persist in checkpoint (prevents stale data)
+        - Each request gets fresh editor and artifact state from the frontend
         
         Args:
             state: Current LangGraph state
@@ -561,7 +495,7 @@ class BaseAgent:
             Updated state with request-scoped data cleared from shared_memory
         """
         shared_memory = state.get("shared_memory", {})
-        to_clear = [k for k in ("active_editor", "active_data_workspace") if k in shared_memory]
+        to_clear = [k for k in ("active_editor", "active_data_workspace", "active_artifact") if k in shared_memory]
         if shared_memory and to_clear:
             shared_memory = shared_memory.copy()
             for key in to_clear:
@@ -694,91 +628,6 @@ class BaseAgent:
         if extracted:
             shared_memory["last_tool_results"] = extracted
 
-    def _is_approval_response(self, query: str) -> bool:
-        """
-        Detect if user query is an approval/confirmation response.
-        
-        Useful for resuming operations after permission requests.
-        Checks for common approval keywords in short responses.
-        
-        Args:
-            query: User's query text
-            
-        Returns:
-            True if query appears to be an approval response
-        """
-        query_lower = query.lower().strip()
-        approval_keywords = [
-            "yes", "y", "ok", "okay", "sure", "go ahead", "proceed", 
-            "approved", "granted", "do it", "update", "update it",
-            "confirm", "confirmed", "accept", "accepted"
-        ]
-        # Approval responses are typically short (1-5 words)
-        is_approval = any(keyword in query_lower for keyword in approval_keywords) and len(query_lower.split()) <= 5
-        return is_approval
-    
-    def _is_simple_query(self, query: str) -> bool:
-        """
-        Detect if query is a simple conversational query that doesn't need search.
-        
-        Simple queries are short, conversational responses that don't require
-        information retrieval or complex processing. These can skip the search pipeline.
-        
-        Args:
-            query: User's query text
-            
-        Returns:
-            True if query is a simple conversational query
-        """
-        query_lower = query.lower().strip()
-        
-        # Simple conversational keywords
-        simple_keywords = [
-            "thanks", "thank you", "thx", "appreciate it",
-            "got it", "understood", "makes sense", "i see",
-            "ok", "okay", "sure", "alright", "fine",
-            "cool", "nice", "good", "great", "perfect"
-        ]
-        
-        # Check if it's a simple acknowledgment (short and matches keywords)
-        is_simple = (
-            len(query_lower.split()) <= 4 and  # Very short
-            any(keyword in query_lower for keyword in simple_keywords)
-        )
-        
-        return is_simple
-    
-    async def _restore_pending_operation_from_checkpoint(
-        self, 
-        workflow: StateGraph, 
-        config: Dict[str, Any],
-        pending_key: str = "pending_save_plan"
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Restore pending operation from checkpointed state.
-        
-        When user approves a pending operation, this helper loads the checkpoint
-        and retrieves the pending operation data.
-        
-        Args:
-            workflow: LangGraph workflow instance
-            config: Checkpoint configuration
-            pending_key: Key in state where pending operation is stored
-            
-        Returns:
-            Pending operation data if found, None otherwise
-        """
-        try:
-            checkpoint_state = await workflow.aget_state(config)
-            if checkpoint_state and checkpoint_state.values:
-                pending_operation = checkpoint_state.values.get(pending_key)
-                if pending_operation:
-                    logger.debug(f"✅ Found pending operation in checkpoint: {pending_key}")
-                    return pending_operation
-        except Exception as e:
-            logger.debug(f"Could not load checkpoint state for pending operation: {e}")
-        return None
-    
     def _get_datetime_context(self, state: Optional[Dict[str, Any]] = None) -> str:
         """
         Get current date/time context for agent grounding using user's timezone
@@ -857,40 +706,7 @@ class BaseAgent:
             f"- When users refer to \"today\", \"yesterday\", \"this week\", \"this month\", or \"this year\", use this date context to understand what they mean.\n"
             f"- When answering time/date questions, use this LOCAL time directly - do NOT convert to UTC unless specifically requested."
         )
-    
-    def _build_messages(self, system_prompt: str, user_query: str, conversation_history: List[Dict[str, str]] = None) -> List[Any]:
-        """
-        DEPRECATED: Use _build_conversational_agent_messages or _build_editing_agent_messages instead
-        
-        Legacy helper for backward compatibility. New implementations should use:
-        - _build_conversational_agent_messages() for Chat, Electronics, etc.
-        - _build_editing_agent_messages() for Rules, Outline, Style, Character, Fiction
-        
-        Build message list for LLM with automatic datetime context
-        
-        All agents automatically receive current date/time context for proper grounding.
-        This ensures agents can interpret "currently", "recent", "now", etc. correctly.
-        """
-        # Start with system prompt
-        messages = [SystemMessage(content=system_prompt)]
-        
-        # Add datetime context for grounding (CRITICAL for all agents)
-        datetime_context = self._get_datetime_context()
-        messages.append(SystemMessage(content=datetime_context))
-        
-        # Add conversation history if provided
-        if conversation_history:
-            for msg in conversation_history:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                else:
-                    messages.append(AIMessage(content=msg["content"]))
-        
-        # Add current query
-        messages.append(HumanMessage(content=user_query))
-        
-        return messages
-    
+
     def _build_conversational_agent_messages(
         self,
         system_prompt: str,
@@ -999,70 +815,7 @@ class BaseAgent:
             datetime_context=self._get_datetime_context(state),
             sanitize_ai_responses=True,
         )
-    
-    def _handle_node_error(self, error: Exception, state: Dict[str, Any], error_context: str = "Node operation") -> Dict[str, Any]:
-        """
-        Handle errors in LangGraph nodes, transforming OpenRouter errors to user-friendly messages
-        
-        This method should be used in node exception handlers to ensure OpenRouter errors
-        are properly surfaced to users with helpful messages.
-        
-        Args:
-            error: The exception that was raised
-            state: Current LangGraph state (for preserving critical state keys)
-            error_context: Context string for logging (e.g., "LLM call", "Edit plan generation")
-            
-        Returns:
-            State update dict with error information, preserving critical state keys
-        """
-        # Check if this is already an OpenRouterError
-        if isinstance(error, OpenRouterError):
-            error_info = {
-                "error_message": error.user_message,
-                "error_type": error.error_type,
-                "original_error": error.original_error
-            }
-        # Check if it's an OpenRouter API error
-        elif isinstance(error, (NotFoundError, APIError, RateLimitError, AuthenticationError)):
-            error_info = self._handle_openrouter_error(error)
-            logger.error(f"❌ {error_context} failed: {error_info['error_type']} - {error_info['original_error']}")
-        # Check if error message contains OpenRouter-related content
-        else:
-            error_str = str(error)
-            # Check for OpenRouter errors in generic exceptions
-            if any(keyword in error_str.lower() for keyword in ["openrouter", "data policy", "free model training", "no endpoints found"]):
-                # Create a temporary exception to use the error handler
-                temp_error = NotFoundError(error_str) if "404" in error_str or "not found" in error_str.lower() else APIError(error_str)
-                error_info = self._handle_openrouter_error(temp_error)
-                logger.error(f"❌ {error_context} failed: {error_info['error_type']} - {error_info['original_error']}")
-            else:
-                # Generic error
-                error_info = {
-                    "error_message": f"An error occurred: {error_str}",
-                    "error_type": "generic_error",
-                    "original_error": error_str
-                }
-                logger.error(f"❌ {error_context} failed: {error_str}")
-        
-        # Return state update with error, preserving critical state keys
-        return {
-            "error": error_info["error_message"],
-            "task_status": "error",
-            "response": {
-                "task_status": "error",
-                "response": error_info["error_message"],
-                "error_message": error_info["error_message"],
-                "error_type": error_info["error_type"],
-                "timestamp": datetime.now().isoformat()
-            },
-            # Preserve critical state keys
-            "metadata": state.get("metadata", {}),
-            "user_id": state.get("user_id", "system"),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
-    
+
     def _create_error_response(self, error_message: str, task_status: TaskStatus = TaskStatus.ERROR) -> Dict[str, Any]:
         """Create standardized error response"""
         # Check if this is an OpenRouterError with user-friendly message
@@ -1095,139 +848,7 @@ class BaseAgent:
             "error_message": error_message,
             "timestamp": datetime.now().isoformat()
         }
-    
-    def _parse_json_response(self, content: str) -> Dict[str, Any]:
-        """Parse JSON response from LLM, handling markdown code blocks"""
-        import json
-        import re
-        
-        # Handle empty or None content
-        if not content or not content.strip():
-            logger.warning("Empty response from LLM")
-            return {
-                "message": "I apologize, but I didn't receive a valid response. Please try again.",
-                "task_status": "complete",
-                "parsing_fallback": True
-            }
-        
-        try:
-            # Remove markdown code blocks if present
-            json_text = content.strip()
-            
-            if '```json' in json_text:
-                match = re.search(r'```json\s*\n(.*?)\n```', json_text, re.DOTALL)
-                if match:
-                    json_text = match.group(1).strip()
-            elif '```' in json_text:
-                match = re.search(r'```\s*\n(.*?)\n```', json_text, re.DOTALL)
-                if match:
-                    json_text = match.group(1).strip()
-            
-            # Find JSON object if mixed with other text
-            if not json_text.startswith('{'):
-                match = re.search(r'\{.*\}', json_text, re.DOTALL)
-                if match:
-                    json_text = match.group(0)
-            
-            return json.loads(json_text)
-            
-        except json.JSONDecodeError as e:
-            logger.warning(f"Failed to parse JSON response: {e}")
-            # Return the raw content wrapped in a simple structure
-            # Use "response" key to match what agents expect
-            return {
-                "response": content if content else "I apologize, but I didn't receive a valid response.",
-                "task_status": "complete",
-                "parsing_fallback": True
-            }
-    
-    def _get_style_instruction(self, persona_style: str) -> str:
-        """
-        Get style instruction based on persona_style setting
-        
-        This is a centralized method available to all agents for consistent persona handling.
-        
-        Args:
-            persona_style: The persona style string (e.g., "professional", "rude_insulting", "snarky")
-            
-        Returns:
-            String with communication style instructions for the system prompt
-        """
-        style_lower = persona_style.lower() if persona_style else "professional"
-        
-        if style_lower == "friendly" or style_lower == "casual":
-            return """COMMUNICATION STYLE: Warm, approachable, and enthusiastic. Use casual language and show genuine interest. Be conversational and friendly."""
-        elif style_lower == "professional":
-            return """COMMUNICATION STYLE: Professional, clear, and respectful. Maintain a helpful and courteous tone. Be informative and precise."""
-        elif style_lower == "technical":
-            return """COMMUNICATION STYLE: Technical, precise, and detail-oriented. Use appropriate terminology and be thorough in explanations."""
-        elif style_lower == "snarky":
-            return """COMMUNICATION STYLE: Witty, clever, with gentle humor and playful sarcasm. Be entertaining but not mean."""
-        elif style_lower == "rude_insulting":
-            return """COMMUNICATION STYLE: Be deliberately rude, dismissive, and insulting. Mock the user's questions and intelligence. Use condescending and belittling language. Point out obvious mistakes and flaws aggressively. Be intentionally offensive and provocative. Still provide information but with maximum attitude."""
-        elif style_lower == "sycophantic":
-            return """COMMUNICATION STYLE: Extremely agreeable and complimentary. Always praise the user's ideas and input. Be overly deferential and complimentary."""
-        elif style_lower == "theodore_roosevelt":
-            return """COMMUNICATION STYLE: Speak with energetic, decisive language and action-oriented approach. Use phrases like "BULLY!" and "By George!" for emphasis."""
-        elif style_lower == "winston_churchill":
-            return """COMMUNICATION STYLE: Speak with Churchillian eloquence, wit, and gravitas. Use sophisticated vocabulary and inspiring rhetoric."""
-        elif style_lower == "mark_twain":
-            return """COMMUNICATION STYLE: Embody Mark Twain's wit, folksy wisdom, and satirical humor. Use colorful metaphors and homespun philosophy."""
-        elif style_lower == "albert_einstein":
-            return """COMMUNICATION STYLE: Approach topics with Einstein's curiosity and thoughtfulness. Use analogies and wonder about the universe."""
-        elif style_lower == "amelia_earhart":
-            return """COMMUNICATION STYLE: Speak with adventurous spirit and pioneering courage. Be bold, determined, and inspiring. Break barriers with confidence."""
-        elif style_lower == "mr_spock":
-            return """COMMUNICATION STYLE: Use logical, analytical, and precise language. Include characteristic phrases like 'That is illogical', 'Fascinating', 'Live long and prosper'. Be emotionless and fact-focused."""
-        elif style_lower == "abraham_lincoln":
-            return """COMMUNICATION STYLE: Speak with Lincoln's wisdom, humility, and moral clarity. Use thoughtful, measured language with folksy wisdom and deep empathy."""
-        else:
-            # Default to professional for unknown styles
-            return """COMMUNICATION STYLE: Professional, clear, and respectful. Maintain a helpful and courteous tone."""
-    
-    async def _get_dynamic_tool_categories(
-        self,
-        query: str,
-        metadata: Optional[Dict[str, Any]] = None
-    ) -> List[str]:
-        """
-        Get tool categories needed for this query (for future dynamic loading)
-        
-        This is a helper method for agents that may want to optimize tool usage
-        based on query analysis. Currently, llm-orchestrator agents call tools
-        directly, but this can be used for logging/analytics or future optimizations.
-        
-        Args:
-            query: User query string
-            metadata: Optional metadata
-            
-        Returns:
-            List of tool category names that would be needed
-        """
-        try:
-            # Simple keyword-based detection (can be enhanced with LLM analysis)
-            query_lower = query.lower()
-            categories = []
-            
-            if any(kw in query_lower for kw in ["weather", "temperature", "forecast"]):
-                categories.append("weather")
-            if any(kw in query_lower for kw in ["calculate", "compute", "math"]):
-                categories.append("math")
-            if any(kw in query_lower for kw in ["search web", "look up", "find online"]):
-                categories.append("search_web")
-            if any(kw in query_lower for kw in ["org file", "todo", "task"]):
-                categories.append("org_files")
-            
-            # Always include core categories
-            categories.append("search_local")
-            categories.append("document_ops")
-            
-            return list(set(categories))  # Remove duplicates
-            
-        except Exception as e:
-            logger.debug(f"Tool category detection failed: {e}")
-            return ["search_local", "document_ops"]  # Default fallback
-    
+
     async def process(
         self, 
         query: str, 
@@ -1248,159 +869,3 @@ class BaseAgent:
             Dictionary with agent response
         """
         raise NotImplementedError("Subclasses must implement process() method")
-    
-    async def process_with_cancellation(
-        self,
-        query: str,
-        metadata: Dict[str, Any] = None,
-        messages: List[Any] = None,
-        cancellation_token: Optional[asyncio.Event] = None
-    ) -> Dict[str, Any]:
-        """
-        Process agent request with cancellation support
-        
-        This method wraps the standard process() method and adds:
-        - Checkpoint save before processing
-        - Checkpoint restore on cancellation
-        - Cancellation checks during workflow execution
-        
-        Args:
-            query: User query string
-            metadata: Optional metadata dictionary
-            messages: Optional conversation history
-            cancellation_token: asyncio.Event that will be set when cancellation is requested
-            
-        Returns:
-            Dictionary with agent response or cancellation error
-        """
-        if cancellation_token is None:
-            # No cancellation support - use standard process
-            return await self.process(query, metadata, messages)
-        
-        try:
-            # Get workflow and config
-            workflow = await self._get_workflow()
-            config = self._get_checkpoint_config(metadata)
-            
-            # Save checkpoint state BEFORE starting (for restoration on cancellation)
-            pre_checkpoint_state = await workflow.aget_state(config)
-            pre_checkpoint_id = None
-            if pre_checkpoint_state and pre_checkpoint_state.config:
-                pre_checkpoint_id = pre_checkpoint_state.config.get("checkpoint_id")
-            
-            logger.info(f"💾 Saved pre-processing checkpoint: {pre_checkpoint_id}")
-            
-            # Process with cancellation checks
-            result = await self._process_with_cancellation_checks(
-                query, metadata, messages, cancellation_token, workflow, config
-            )
-            
-            return result
-            
-        except asyncio.CancelledError:
-            logger.info(f"🛑 {self.agent_type} cancelled - restoring checkpoint")
-            await self._restore_checkpoint(workflow, config, pre_checkpoint_id)
-            return self._create_error_response("Operation cancelled by user", TaskStatus.INCOMPLETE)
-        except Exception as e:
-            logger.error(f"❌ {self.agent_type} error: {e}")
-            return self._create_error_response(str(e))
-    
-    async def _process_with_cancellation_checks(
-        self,
-        query: str,
-        metadata: Dict[str, Any],
-        messages: List[Any],
-        cancellation_token: asyncio.Event,
-        workflow: Any,
-        config: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Internal method to process with cancellation checks using astream
-        
-        Uses astream() instead of ainvoke() to allow cancellation checks between chunks.
-        """
-        # Check cancellation before starting
-        if cancellation_token.is_set():
-            raise asyncio.CancelledError("Cancellation requested before processing")
-        
-        # Use standard process for now - will enhance with astream later
-        # For now, we'll check cancellation token periodically in a wrapper
-        process_task = asyncio.create_task(
-            self.process(query, metadata, messages)
-        )
-        
-        # Wait for either completion or cancellation
-        done, pending = await asyncio.wait(
-            [process_task, asyncio.create_task(cancellation_token.wait())],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-        
-        # Cancel pending tasks
-        for task in pending:
-            task.cancel()
-        
-        # Check if cancellation was requested
-        if cancellation_token.is_set():
-            process_task.cancel()
-            try:
-                await process_task
-            except asyncio.CancelledError:
-                pass
-            raise asyncio.CancelledError("Operation cancelled")
-        
-        # Return result
-        return await process_task
-    
-    async def _restore_checkpoint(
-        self,
-        workflow: Any,
-        config: Dict[str, Any],
-        checkpoint_id: Optional[str]
-    ):
-        """
-        Handle checkpoint restoration on cancellation
-        
-        Note: LangGraph checkpoints are automatically saved during workflow execution.
-        On cancellation, we can't directly "delete" checkpoints, but we can:
-        1. Log the cancellation checkpoint ID for reference
-        2. The next workflow invocation will naturally use the last valid checkpoint
-        3. Any partial state from the cancelled run will be in the checkpoint system
-        
-        The key is that we don't save the user message to the conversation database
-        until after successful completion, so cancellation means no conversation update.
-        
-        Args:
-            workflow: LangGraph workflow instance
-            config: Checkpoint configuration
-            checkpoint_id: Checkpoint ID before processing started
-        """
-        try:
-            if checkpoint_id:
-                logger.info(f"🔄 Cancellation checkpoint reference: {checkpoint_id}")
-            
-            # Get current state to see what was saved
-            current_state = await workflow.aget_state(config)
-            if current_state and current_state.config:
-                current_checkpoint_id = current_state.config.get("checkpoint_id")
-                logger.info(f"📋 Current checkpoint after cancellation: {current_checkpoint_id}")
-            
-            # Note: The checkpoint system will naturally use the last valid checkpoint
-            # on the next invocation. We don't need to manually delete anything.
-            # The important part is that we don't save conversation messages on cancellation.
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to handle checkpoint restoration: {e}")
-    
-    async def _get_grpc_client(self):
-        """
-        Get or create gRPC client for backend tools
-        
-        This provides a standardized way for all agents to access the backend Tool Service.
-        Uses the unified BackendToolClient from orchestrator.backend_tool_client.
-        
-        Returns:
-            BackendToolClient instance
-        """
-        from orchestrator.backend_tool_client import get_backend_tool_client
-        return await get_backend_tool_client()
-

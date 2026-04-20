@@ -4,6 +4,7 @@ Unified Dispatcher - Single entry point for route-based dispatch.
 All requests flow through this: discover route -> CustomAgentRunner -> yield ChatChunk stream.
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -16,6 +17,18 @@ from orchestrator.routes import get_route_registry, load_all_routes
 logger = logging.getLogger(__name__)
 
 _routes_loaded = False
+
+
+def _persona_ai_name_metadata(result: Dict[str, Any], request_metadata: Dict[str, Any]) -> Dict[str, str]:
+    """Chat UI label: prefer resolved profile persona, else request-level persona."""
+    name = (result.get("persona_ai_name") or "").strip()
+    if not name:
+        p = request_metadata.get("persona") or {}
+        if isinstance(p, dict):
+            name = (p.get("ai_name") or "").strip()
+    if name:
+        return {"persona_ai_name": name}
+    return {}
 
 
 def _ensure_routes_loaded() -> None:
@@ -78,6 +91,8 @@ class UnifiedDispatcher:
                 messages=messages,
                 cancellation_token=cancellation_token,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.exception("Custom agent failed: %s", e)
             yield orchestrator_pb2.ChatChunk(
@@ -117,7 +132,7 @@ class UnifiedDispatcher:
                 agent_name=agent_name,
             )
 
-        content_metadata = {}
+        content_metadata = {**_persona_ai_name_metadata(result, metadata)}
         if agent_display_name:
             content_metadata["agent_display_name"] = agent_display_name
         yield orchestrator_pb2.ChatChunk(
@@ -128,7 +143,10 @@ class UnifiedDispatcher:
             metadata=content_metadata if content_metadata else None,
         )
 
-        complete_metadata = {"agent_profile_id": agent_profile_id}
+        complete_metadata = {
+            "agent_profile_id": agent_profile_id,
+            **_persona_ai_name_metadata(result, metadata),
+        }
         if agent_display_name:
             complete_metadata["agent_display_name"] = agent_display_name
         task_status = result.get("task_status")
@@ -140,12 +158,24 @@ class UnifiedDispatcher:
         if images:
             complete_metadata["images"] = json.dumps(images)
             logger.info("Custom agent dispatch: including %d image(s) in complete metadata", len(images))
+        artifact = result.get("artifact")
+        if artifact and isinstance(artifact, dict):
+            complete_metadata["artifact"] = json.dumps(artifact)
+        artifacts = result.get("artifacts")
+        if artifacts and isinstance(artifacts, list):
+            complete_metadata["artifacts"] = json.dumps(artifacts)
         tools_cats = result.get("tools_used_categories") or []
         if tools_cats:
             complete_metadata["tools_used_categories"] = json.dumps(tools_cats)
         tool_call_summary = result.get("tool_call_summary", "")
         if tool_call_summary:
             complete_metadata["tool_call_summary"] = tool_call_summary
+        acquired_log = result.get("acquired_tool_log")
+        if acquired_log:
+            complete_metadata["acquired_tool_log"] = json.dumps(acquired_log, default=str)
+        skill_exec_events = result.get("skill_execution_events")
+        if skill_exec_events:
+            complete_metadata["skill_execution_events"] = json.dumps(skill_exec_events, default=str)
         yield orchestrator_pb2.ChatChunk(
             type="complete",
             message="Complete",
@@ -237,7 +267,7 @@ class UnifiedDispatcher:
                 agent_name=agent_name,
             )
 
-        content_metadata = {}
+        content_metadata = {**_persona_ai_name_metadata(result, metadata)}
         if agent_display_name:
             content_metadata["agent_display_name"] = agent_display_name
         yield orchestrator_pb2.ChatChunk(
@@ -248,7 +278,10 @@ class UnifiedDispatcher:
             metadata=content_metadata if content_metadata else None,
         )
 
-        complete_metadata = {"agent_profile_id": ceo_id}
+        complete_metadata = {"agent_profile_id": ceo_id, **_persona_ai_name_metadata(result, metadata)}
+        line_id = metadata.get("line_id") or metadata.get("team_id")
+        if line_id:
+            complete_metadata["line_id"] = str(line_id)
         if agent_display_name:
             complete_metadata["agent_display_name"] = agent_display_name
         task_status = result.get("task_status")
@@ -259,6 +292,12 @@ class UnifiedDispatcher:
         images = result.get("images") or result.get("structured_images")
         if images:
             complete_metadata["images"] = json.dumps(images)
+        artifact = result.get("artifact")
+        if artifact and isinstance(artifact, dict):
+            complete_metadata["artifact"] = json.dumps(artifact)
+        artifacts = result.get("artifacts")
+        if artifacts and isinstance(artifacts, list):
+            complete_metadata["artifacts"] = json.dumps(artifacts)
         tools_cats = result.get("tools_used_categories") or []
         if tools_cats:
             complete_metadata["tools_used_categories"] = json.dumps(tools_cats)
@@ -312,6 +351,20 @@ class UnifiedDispatcher:
         pid = resolve_custom_skill_profile_id(uid, skill_name)
         if not pid:
             pid = metadata.get("default_agent_profile_id")
+
+        if not pid and uid != "system":
+            try:
+                from orchestrator.backend_tool_client import get_backend_tool_client
+                client = await get_backend_tool_client()
+                pid = await client.ensure_default_profile(uid)
+                if pid:
+                    logger.info(
+                        "UnifiedDispatcher: ensured default profile %s for user %s on route %s",
+                        pid, uid, skill_name,
+                    )
+            except Exception as e:
+                logger.warning("UnifiedDispatcher: ensure_default_profile failed for user %s: %s", uid, e)
+
         if pid:
             async for c in self.dispatch_custom_agent(pid, query, metadata, messages, cancellation_token):
                 yield c

@@ -61,6 +61,9 @@ message ChatRequest {
   
   // === DATA WORKSPACE CONTEXT (Optional - When data workspace tab is open) ===
   ActiveDataWorkspace active_data_workspace = 16;
+
+  // === CHAT ARTIFACT CONTEXT (Optional - When artifact drawer has an artifact open) ===
+  ActiveArtifact active_artifact = 17;
   
   // === LEGACY METADATA (Deprecated - Use specific fields above) ===
   map<string, string> metadata = 99;
@@ -117,6 +120,14 @@ message EditorFrontmatter {
   repeated string tags = 4;
   string status = 5;  // e.g. "draft", "published"
   map<string, string> custom_fields = 6;  // Extensible frontmatter
+}
+
+// Chat artifact context (HTML, Mermaid, chart, SVG, React) when user has an artifact open in the drawer
+message ActiveArtifact {
+  string artifact_type = 1;  // html, mermaid, chart, svg, react
+  string title = 2;
+  string code = 3;           // Full source of the artifact
+  string language = 4;       // Optional hint for code view
 }
 
 // Data workspace column schema (for active_data_workspace)

@@ -1,6 +1,6 @@
 /**
- * Compact team execution indicators for the StatusBar.
- * Shows pulsing chips for teams with an active heartbeat (running).
+ * Compact line execution indicators for the StatusBar.
+ * Shows pulsing chips for agent lines with an active heartbeat (running).
  */
 
 import React from 'react';
@@ -34,18 +34,18 @@ export default function LineStatusIndicators() {
   const { teamStatusMap } = useTeamExecution();
   const navigate = useNavigate();
 
-  const teamsToShow = Object.entries(teamStatusMap)
+  const linesToShow = Object.entries(teamStatusMap)
     .filter(([, v]) => v.status === 'running' && v.teamName)
     .map(([id, v]) => ({ id, ...v }));
 
-  if (teamsToShow.length === 0) return null;
+  if (linesToShow.length === 0) return null;
 
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-      {teamsToShow.map(({ id, teamName }) => {
-        const label = teamName.length > MAX_NAME_LEN ? `${teamName.slice(0, MAX_NAME_LEN)}…` : teamName;
+      {linesToShow.map(({ id, teamName: lineDisplayName }) => {
+        const label = lineDisplayName.length > MAX_NAME_LEN ? `${lineDisplayName.slice(0, MAX_NAME_LEN)}…` : lineDisplayName;
         return (
-          <Tooltip key={id} title={`${teamName} — Heartbeat running`} arrow>
+          <Tooltip key={id} title={`${lineDisplayName} — Line heartbeat running`} arrow>
             <Chip
               size="small"
               icon={<PulsingDot />}

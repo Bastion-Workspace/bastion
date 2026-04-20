@@ -1,42 +1,68 @@
-FROM python:3.11-slim
+# Builder: compile wheels, install flower deps, gRPC codegen; strip grpcio-tools before final copy.
+FROM python:3.11-slim AS builder
 
-# Install build tools needed for compiling Python packages (e.g., greenlet for SQLAlchemy)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     python3-dev \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
+RUN python -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
 
-# Set PYTHONPATH to /app so that top-level modules like 'utils' can be imported correctly
-ENV PYTHONPATH=/app
+COPY backend/requirements-build.txt backend/requirements-celery-flower.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements-celery-flower.txt && \
+    pip install --no-cache-dir -r /tmp/requirements-build.txt
 
-# Copy shared proto files first
 COPY protos /app/protos
-
-# Copy VERSION file for version management
 COPY VERSION /app/VERSION
-
-# Copy requirements and install Python dependencies (monitoring only)
-COPY backend/requirements-celery-flower.txt .
-RUN pip install --no-cache-dir -r requirements-celery-flower.txt
-
-# Copy application code (full structure needed for task module imports)
 COPY backend /app
 
-# Generate gRPC code from shared proto files (needed for task module imports)
-RUN python -m grpc_tools.protoc \
+RUN mkdir -p /app/_proto_out && \
+    python -m grpc_tools.protoc \
     -I/app \
-    --python_out=/app \
-    --grpc_python_out=/app \
-    --pyi_out=/app \
+    --python_out=/app/_proto_out \
+    --grpc_python_out=/app/_proto_out \
+    --pyi_out=/app/_proto_out \
     /app/protos/tool_service.proto \
     /app/protos/orchestrator.proto \
     /app/protos/vector_service.proto \
     /app/protos/data_service.proto \
-    /app/protos/crawl_service.proto
+    /app/protos/crawl_service.proto \
+    /app/protos/image_vision.proto \
+    /app/protos/connections_service.proto \
+    /app/protos/document_service.proto \
+    /app/protos/voice_service.proto && \
+    cp /app/_proto_out/protos/*_pb2.py /app/protos/ && \
+    cp /app/_proto_out/protos/*_pb2_grpc.py /app/protos/ && \
+    (cp /app/_proto_out/protos/*_pb2.pyi /app/protos/ 2>/dev/null || true) && \
+    rm -rf /app/_proto_out
 
-# Celery flower command (will be overridden in docker-compose.yml)
+RUN pip uninstall -y grpcio-tools && pip cache purge
+
+# Runtime: Flower is broker/UI only; no native apt packages.
+FROM python:3.11-slim
+
+ARG BASTION_RUNTIME_UID=10001
+ARG BASTION_RUNTIME_GID=10001
+
+RUN groupadd --gid "${BASTION_RUNTIME_GID}" appgroup && \
+    useradd --uid "${BASTION_RUNTIME_UID}" --gid appgroup --create-home --shell /bin/bash appuser
+
+WORKDIR /app
+ENV PYTHONPATH=/app
+ENV PATH=/opt/venv/bin:$PATH
+
+COPY --from=builder /opt/venv /opt/venv
+COPY backend /app
+COPY --from=builder /app/protos /app/protos
+COPY VERSION /app/VERSION
+
+RUN mkdir -p /app/logs && chown -R appuser:appgroup /app
+
+USER appuser
+
+EXPOSE 5555
+
 CMD ["celery", "-A", "services.celery_app", "flower", "--port=5555"]
-

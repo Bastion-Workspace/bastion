@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_MESSAGE_LIMIT = 40
 IDLE_MINUTES = 15
-MAX_FACTS_PER_SESSION = 5
+MAX_FACTS_PER_SESSION = 3
 EPISODE_TYPES = "chat, research, editing, coding, automation, file_management, general"
 
 
@@ -129,7 +129,7 @@ async def _run_post_session_analysis(
 
     prompt = f"""Analyze this chat session (multiple turns). Produce:
 1) A concise SESSION SUMMARY (1-3 sentences): what the user wanted and what was accomplished overall.
-2) Durable USER FACTS only if universally useful across future unrelated conversations (same rules as strict fact extraction).
+2) Durable USER FACTS only — things that define who the user IS or what they ALWAYS prefer across unrelated future conversations.
 3) episode_type, key_topics, outcome for the session.
 
 EXISTING FACTS (do not duplicate; refine only if clearly contradicted):
@@ -137,6 +137,24 @@ EXISTING FACTS (do not duplicate; refine only if clearly contradicted):
 
 TRANSCRIPT:
 {transcript_final[:24000]}
+
+DURABLE FACTS (extract these):
+- Stable identity/profile: job title, employer, location, timezone, dietary needs
+- Lasting preferences: preferred programming language, writing style, communication style
+- Recurring tools/workflows: \"uses Blender for 3D\", \"prefers org-mode for task management\"
+
+NOT DURABLE FACTS (never extract these):
+- Details of today's debugging/troubleshooting session (node names, error messages, commands run, stack traces)
+- One-off technical tasks (migration steps, deployment specifics, a particular PR or branch)
+- Current project state or progress (\"chapter 5 is drafted\", \"PR #42 is open\", \"deployed v2.3 today\")
+- Names of specific files, servers, pods, resources, or hosts being worked on right now
+- Incident-specific findings (iptables rule conflicts, container runtime errors on a specific node)
+- Anything that would be irrelevant if the user started a completely different topic tomorrow
+
+KEY DISCIPLINE:
+- If an existing fact covers the same topic, return that SAME fact_key with a refined value rather than inventing a new key.
+- Prefer broad keys (e.g. \"infrastructure_preferences\") over narrow variants (\"infrastructure_iptables_issue_detailed\").
+- Most sessions produce ZERO durable facts. Return \"facts\": [] unless something clearly permanent was revealed.
 
 Respond with ONLY valid JSON (no markdown):
 {{

@@ -17,6 +17,7 @@ MESSAGE_TYPES = (
     "escalation",
     "report",
     "system",
+    "user_directive",
 )
 
 

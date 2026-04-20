@@ -17,6 +17,9 @@ function readStoredWidth(storageKey, minWidth, maxWidth, fallback) {
  * Right-anchored Drawer with a draggable left edge to change width.
  * Persists width to localStorage when storageKey is set.
  */
+/** Matches `StatusBar` fixed height so drawer content (e.g. save actions) is not covered. */
+const DEFAULT_STATUS_BAR_OFFSET = 32;
+
 export default function ResizableRightDrawer({
   open,
   onClose,
@@ -25,6 +28,8 @@ export default function ResizableRightDrawer({
   minWidth = 260,
   maxWidthFraction = 0.92,
   storageKey = null,
+  /** Inset from viewport bottom (px). App status bar is 32px fixed. */
+  bottomOffset = DEFAULT_STATUS_BAR_OFFSET,
   ModalProps,
   PaperProps,
   ...drawerProps
@@ -96,6 +101,20 @@ export default function ResizableRightDrawer({
     overflow: 'hidden',
     display: 'flex',
     flexDirection: 'column',
+    position: 'fixed',
+    top: 0,
+    right: 0,
+    left: 'auto',
+    ...(bottomOffset > 0
+      ? {
+          bottom: bottomOffset,
+          height: `calc(100dvh - ${bottomOffset}px)`,
+          maxHeight: `calc(100dvh - ${bottomOffset}px)`,
+        }
+      : {
+          height: '100dvh',
+          maxHeight: '100dvh',
+        }),
     ...(PaperProps && typeof PaperProps.sx === 'object' && !Array.isArray(PaperProps.sx) ? PaperProps.sx : {}),
   };
 

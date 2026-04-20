@@ -9,6 +9,7 @@ from typing import Optional
 from .base_client import BaseMusicClient
 from .subsonic_client import SubSonicClient
 from .audiobookshelf_client import AudiobookshelfClient
+from .emby_client import EmbyClient
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,7 @@ class MusicClientFactory:
     _client_classes = {
         "subsonic": SubSonicClient,
         "audiobookshelf": AudiobookshelfClient,
-        # Future clients:
-        # "plex": PlexClient,
-        # "emby": EmbyClient,
-        # "jellyfin": JellyfinClient,
+        "emby": EmbyClient,
     }
     
     @classmethod

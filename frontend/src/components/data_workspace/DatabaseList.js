@@ -5,7 +5,6 @@ import {
   Grid,
   Card,
   CardContent,
-  CardActions,
   Button,
   IconButton,
   Dialog,
@@ -22,20 +21,20 @@ import {
   MoreVert as MoreVertIcon,
   Storage as StorageIcon,
   Upload as UploadIcon,
-  Delete as DeleteIcon,
-  ViewInAr as ViewInArIcon
+  Delete as DeleteIcon
 } from '@mui/icons-material';
 
 import dataWorkspaceService from '../../services/dataWorkspaceService';
 import DataImportWizard from './DataImportWizard';
 
-const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables }) => {
+const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables, modalContainer }) => {
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [newDatabase, setNewDatabase] = useState({ name: '', description: '' });
   const [anchorEl, setAnchorEl] = useState(null);
   const [selectedDatabase, setSelectedDatabase] = useState(null);
   const [importWizardOpen, setImportWizardOpen] = useState(false);
   const [importTargetDatabase, setImportTargetDatabase] = useState(null);
+  const [importExistingTables, setImportExistingTables] = useState([]);
 
   const handleCreateDatabase = async () => {
     try {
@@ -78,20 +77,26 @@ const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables
     setSelectedDatabase(null);
   };
 
-  const handleImportData = (database) => {
+  const handleImportData = async (database) => {
+    if (!database) return;
     setImportTargetDatabase(database);
     setImportWizardOpen(true);
+    try {
+      const tables = await dataWorkspaceService.listTables(database.database_id);
+      setImportExistingTables(Array.isArray(tables) ? tables : []);
+    } catch (e) {
+      console.error('Failed to load tables for import:', e);
+      setImportExistingTables([]);
+    }
     handleMenuClose();
+  };
+
+  const handleOpenDatabase = (database) => {
+    if (onViewTables) onViewTables(database);
   };
 
   const handleImportComplete = () => {
     onRefresh(); // Refresh database stats after import
-  };
-
-  const handleView3D = (database) => {
-    // TODO: Launch 3D navigator for this database
-    console.log('View 3D for database:', database.database_id);
-    handleMenuClose();
   };
 
   if (loading) {
@@ -138,29 +143,50 @@ const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables
         <Grid container spacing={3}>
           {databases.map((database) => (
             <Grid item xs={12} sm={6} md={4} key={database.database_id}>
-              <Card 
-                sx={{ 
+              <Card
+                elevation={1}
+                role="button"
+                tabIndex={0}
+                aria-label={`Open database ${database.name}`}
+                onClick={() => handleOpenDatabase(database)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleOpenDatabase(database);
+                  }
+                }}
+                sx={{
                   height: '100%',
                   display: 'flex',
                   flexDirection: 'column',
+                  cursor: 'pointer',
                   transition: 'transform 0.2s, box-shadow 0.2s',
                   '&:hover': {
                     transform: 'translateY(-4px)',
                     boxShadow: 4
+                  },
+                  '&:focus-visible': {
+                    outline: '2px solid',
+                    outlineColor: 'primary.main',
+                    outlineOffset: 2
                   }
                 }}
               >
                 <CardContent sx={{ flexGrow: 1 }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 2 }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
                       <StorageIcon color="primary" />
                       <Typography variant="h6" component="div" noWrap>
                         {database.name}
                       </Typography>
                     </Box>
-                    <IconButton 
+                    <IconButton
                       size="small"
-                      onClick={(e) => handleMenuOpen(e, database)}
+                      aria-label="Database actions"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleMenuOpen(e, database);
+                      }}
                     >
                       <MoreVertIcon />
                     </IconButton>
@@ -191,23 +217,6 @@ const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables
                     />
                   </Box>
                 </CardContent>
-
-                <CardActions sx={{ justifyContent: 'space-between', px: 2, pb: 2 }}>
-                  <Button 
-                    size="small"
-                    onClick={() => onViewTables && onViewTables(database)}
-                    variant="contained"
-                  >
-                    View Tables
-                  </Button>
-                  <Button 
-                    size="small"
-                    startIcon={<UploadIcon />}
-                    onClick={() => handleImportData(database)}
-                  >
-                    Import
-                  </Button>
-                </CardActions>
               </Card>
             </Grid>
           ))}
@@ -219,14 +228,13 @@ const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables
         anchorEl={anchorEl}
         open={Boolean(anchorEl)}
         onClose={handleMenuClose}
+        container={modalContainer}
       >
-        <MenuItem onClick={() => handleImportData(selectedDatabase)}>
+        <MenuItem
+          onClick={() => selectedDatabase && handleImportData(selectedDatabase)}
+        >
           <UploadIcon sx={{ mr: 1 }} fontSize="small" />
-          Import Data
-        </MenuItem>
-        <MenuItem onClick={() => handleView3D(selectedDatabase)}>
-          <ViewInArIcon sx={{ mr: 1 }} fontSize="small" />
-          View in 3D
+          Import data
         </MenuItem>
         <MenuItem 
           onClick={() => selectedDatabase && handleDeleteDatabase(selectedDatabase.database_id)}
@@ -243,6 +251,7 @@ const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables
         onClose={() => setCreateDialogOpen(false)}
         maxWidth="sm"
         fullWidth
+        container={modalContainer}
       >
         <DialogTitle>Create Database</DialogTitle>
         <DialogContent>
@@ -284,11 +293,13 @@ const DatabaseList = ({ workspaceId, databases, loading, onRefresh, onViewTables
           onClose={() => {
             setImportWizardOpen(false);
             setImportTargetDatabase(null);
+            setImportExistingTables([]);
           }}
           workspaceId={workspaceId}
           databaseId={importTargetDatabase.database_id}
-          existingTables={[]}
+          existingTables={importExistingTables}
           onImportComplete={handleImportComplete}
+          container={modalContainer}
         />
       )}
     </Box>

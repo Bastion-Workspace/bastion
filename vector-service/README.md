@@ -1,6 +1,8 @@
 # Vector Service (Embedding Generation)
 
-Dedicated microservice for embedding generation with intelligent caching.
+Dedicated microservice for embedding generation with intelligent caching and optional pluggable vector storage (Qdrant, Milvus, Elasticsearch/OpenSearch).
+
+**Deployment / backend configuration (env vars, Docker):** see [`docs/VECTOR_STORE_BACKENDS.md`](../docs/VECTOR_STORE_BACKENDS.md) and [`docker/README.md`](../docker/README.md).
 
 ## Overview
 

@@ -27,6 +27,7 @@ import {
 import { SmartToy, PlayArrow, Storage, Build, Close, Group } from '@mui/icons-material';
 import { useMutation, useQuery, useQueryClient } from 'react-query';
 import apiService from '../services/apiService';
+import { invalidateAgentHandlesQuery } from '../services/agentFactoryService';
 import { getSelectableChatModels } from '../utils/chatSelectableModels';
 import AgentListSidebar from './agent-factory/AgentListSidebar';
 import AgentEditor from './agent-factory/AgentEditor';
@@ -34,9 +35,12 @@ import PlaybookEditor from './agent-factory/PlaybookEditor';
 import DataSourceEditor from './agent-factory/DataSourceEditor';
 import SkillEditor from './agent-factory/SkillEditor';
 import LineEditor from './agent-factory/LineEditor';
+import { frostedEditorPaneSx } from '../theme/wallpaperPaneSx';
 
 const AF_TABS_STORAGE_KEY = 'af-tabs';
 const AF_LAST_PATH_KEY = 'af-last-path';
+/** Same max width as agent/playbook/skill/datasource editor roots — frosted pane should not span full main column */
+const AF_NARROW_EDITOR_MAX_WIDTH_PX = 720;
 
 function parseAgentFactorySection(pathname) {
   if (pathname.includes('/line/')) return 'line';
@@ -86,6 +90,7 @@ export default function AgentFactoryPage() {
     {
       onSuccess: (data) => {
         queryClient.invalidateQueries('agentFactoryProfiles');
+        invalidateAgentHandlesQuery(queryClient);
         setCreateOpen(false);
         setCreateForm({ name: '', handle: '', description: '', model_preference: '', default_playbook_id: '', chat_visible: true });
         const id = data?.id;
@@ -97,28 +102,28 @@ export default function AgentFactoryPage() {
   const { data: playbooks = [] } = useQuery(
     'agentFactoryPlaybooks',
     () => apiService.agentFactory.listPlaybooks(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
 
   const { data: profiles = [] } = useQuery(
     'agentFactoryProfiles',
     () => apiService.agentFactory.listProfiles(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: connectors = [] } = useQuery(
     'agentFactoryConnectors',
     () => apiService.agentFactory.listConnectors(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: skillsList = [] } = useQuery(
     'agentFactorySkills',
     () => apiService.agentFactory.listSkills({ include_builtin: true }),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: linesList = [] } = useQuery(
     'agentFactoryLines',
     () => apiService.agentFactory.listLines(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
 
   const getEntityTitle = useCallback(
@@ -258,6 +263,15 @@ export default function AgentFactoryPage() {
     });
   };
 
+  const hasOpenEditor =
+    (section === 'playbook' && Boolean(selectedIdResolved)) ||
+    (section === 'datasource' && Boolean(selectedIdResolved)) ||
+    (section === 'skill' && Boolean(selectedSkillId)) ||
+    (section === 'line' && Boolean(selectedIdResolved)) ||
+    Boolean(
+      ((section === 'agent' || (selectedIdResolved && !section)) && selectedIdResolved)
+    );
+
   return (
     <Box
       sx={{
@@ -287,7 +301,7 @@ export default function AgentFactoryPage() {
             px: 2,
             display: 'flex',
             alignItems: 'center',
-            backgroundColor: 'background.paper',
+            bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
             borderBottom: '1px solid',
             borderColor: 'divider',
           }}
@@ -320,9 +334,10 @@ export default function AgentFactoryPage() {
                     alignItems: 'center',
                     color: 'text.primary',
                     opacity: 1,
+                    bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
                     '&.Mui-selected': {
                       color: 'text.primary',
-                      backgroundColor: 'background.default',
+                      bgcolor: 'background.default',
                       boxShadow: (t) => `inset 0 -2px 0 ${t.palette.primary.main}`,
                     },
                   },
@@ -421,12 +436,57 @@ export default function AgentFactoryPage() {
             </Box>
           )}
         </Box>
-        <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {section === 'playbook' && selectedIdResolved && <PlaybookEditor playbookId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
-          {section === 'datasource' && selectedIdResolved && <DataSourceEditor connectorId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
-          {section === 'skill' && selectedSkillId && <SkillEditor skillId={selectedSkillId} onCloseEntityTab={handleCloseTabForEntity} />}
-          {section === 'line' && selectedIdResolved && <LineEditor lineId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
-          {((section === 'agent' || (selectedIdResolved && !section)) && selectedIdResolved) && <AgentEditor profileId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
+        <Box
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            ...(hasOpenEditor
+              ? {
+                  p: { xs: 1, sm: 1.5 },
+                  pt: { xs: 1, sm: 1.25 },
+                }
+              : { p: 0 }),
+          }}
+        >
+          {hasOpenEditor ? (
+            <Box
+              sx={{
+                flex: 1,
+                minHeight: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                alignItems: section === 'line' ? 'stretch' : 'center',
+              }}
+            >
+              <Box
+                sx={(theme) => ({
+                  flex: 1,
+                  minHeight: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
+                  width: '100%',
+                  ...(section === 'line'
+                    ? {}
+                    : { maxWidth: AF_NARROW_EDITOR_MAX_WIDTH_PX, mx: 'auto' }),
+                  borderRadius: 1,
+                  border: '1px solid',
+                  borderColor: 'divider',
+                  ...frostedEditorPaneSx(theme),
+                })}
+              >
+                {section === 'playbook' && selectedIdResolved && <PlaybookEditor playbookId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
+                {section === 'datasource' && selectedIdResolved && <DataSourceEditor connectorId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
+                {section === 'skill' && selectedSkillId && <SkillEditor skillId={selectedSkillId} onCloseEntityTab={handleCloseTabForEntity} />}
+                {section === 'line' && selectedIdResolved && <LineEditor lineId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
+                {((section === 'agent' || (selectedIdResolved && !section)) && selectedIdResolved) && <AgentEditor profileId={selectedIdResolved} onCloseEntityTab={handleCloseTabForEntity} />}
+              </Box>
+            </Box>
+          ) : null}
         </Box>
       </Box>
 

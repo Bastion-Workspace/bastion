@@ -36,9 +36,10 @@ import {
   TableHead,
   TableRow,
 } from '@mui/material';
-import { Add, PlayArrow, History, Restore, Lock, Download } from '@mui/icons-material';
+import { Add, PlayArrow, History, Restore, Lock, Download, ContentCopy } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import agentFactoryService from '../../services/agentFactoryService';
 import UsageWarningBanner from './UsageWarningBanner';
 import WorkflowSection from './WorkflowSection';
 import AddStepPanel from './AddStepPanel';
@@ -115,21 +116,36 @@ async function writeStepsClipboardPayload(payload) {
   }
 }
 
+/** Matches orchestrator engines/playbook_limits.MAX_PARALLEL_SUBSTEPS */
+const MAX_PARALLEL_SUBSTEPS = 10;
+
 function sanitizeDefinition(def) {
   if (!def || typeof def !== 'object')
     return { steps: [], run_context: 'interactive' };
   const STEP_KEYS = [
+    '_step_id',
     'step_type', 'action', 'output_key', 'inputs', 'params',
     'prompt_template', 'prompt', 'model_override', 'output_schema',
     'timeout_minutes', 'on_reject', 'preview_from',
     'output_destination', 'max_iterations', 'steps', 'name',
-    'available_tools', 'tool_packs', 'heading_level',
+    'available_tools', 'tool_packs', 'heading_level',  // kept for backward compat shim
     'condition', 'parallel_steps', 'branch_condition', 'then_steps', 'else_steps',
     'skill_ids', 'skills',
+    'connection_policy', 'restricted_connections', 'discovery_mode',
     'auto_discover_skills', 'max_auto_skills',
+    'skill_discovery_mode', 'max_discovered_skills',
+    'dynamic_tool_discovery', 'max_skill_acquisitions',
     'site_domain', 'login_url', 'verify_url', 'verify_selector',
     'phases', 'search_tools', 'strategy', 'criteria', 'pass_threshold',
     'on_pass', 'on_fail', 'max_retries', 'target', 'next',
+    'subagents', 'delegation_mode',
+    'samples', 'selection_strategy', 'selection_criteria',
+    'fan_out',
+    'user_facts_policy',
+    'persona_policy',
+    'agent_memory_policy',
+    'history_policy',
+    'exclusive',
   ];
   const PHASE_KEYS = [
     'name', 'type', 'prompt', 'search_tools', 'available_tools', 'strategy',
@@ -149,7 +165,7 @@ function sanitizeDefinition(def) {
       clean.steps = s.steps.map(sanitizeStep);
     }
     if (Array.isArray(s.parallel_steps)) {
-      clean.parallel_steps = s.parallel_steps.map(sanitizeStep);
+      clean.parallel_steps = s.parallel_steps.slice(0, MAX_PARALLEL_SUBSTEPS).map(sanitizeStep);
     }
     if (Array.isArray(s.then_steps)) {
       clean.then_steps = s.then_steps.map(sanitizeStep);
@@ -206,7 +222,7 @@ export default function PlaybookEditor({ playbookId }) {
   const { data: usageAgents = [] } = useQuery(
     ['agentFactoryPlaybookUsage', playbookId],
     () => apiService.agentFactory.getPlaybookUsage(playbookId),
-    { enabled: !!playbookId, retry: false }
+    { enabled: !!playbookId, staleTime: 30_000, retry: false }
   );
   const { data: versions = [] } = useQuery(
     ['agentFactoryPlaybookVersions', playbookId],
@@ -218,19 +234,46 @@ export default function PlaybookEditor({ playbookId }) {
   const { data: actions = [] } = useQuery(
     ['agentFactoryActions', effectiveProfileId],
     () => apiService.agentFactory.getActions(effectiveProfileId),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
 
   const actionList = Array.isArray(actions) ? actions : [];
   const currentPlaybook = localPlaybook ?? playbook;
 
+  const { data: sharedWithMe = [] } = useQuery(
+    'agentFactorySharedWithMe',
+    () => agentFactoryService.listSharedWithMe(),
+    { staleTime: 30_000, retry: false }
+  );
+  const shareIdForPlaybook = (sharedWithMe || []).find(
+    (s) => s.artifact_type === 'playbook' && s.artifact_id === playbookId
+  )?.id;
+  const copySharedToMineMutation = useMutation(
+    (shareId) => agentFactoryService.copySharedToMine(shareId),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('agentFactoryProfiles');
+        queryClient.invalidateQueries('agentFactoryPlaybooks');
+        queryClient.invalidateQueries('agentFactorySkills');
+        queryClient.invalidateQueries('agentFactorySharedWithMe');
+      },
+    }
+  );
+
   const updatePlaybookMutation = useMutation(
     ({ id, body }) => apiService.agentFactory.updatePlaybook(id, body),
     {
       onSuccess: (data, { id }) => {
-        if (data?.id) queryClient.setQueryData(['agentFactoryPlaybook', id], data);
-        else queryClient.invalidateQueries(['agentFactoryPlaybook', id]);
-        queryClient.invalidateQueries('agentFactoryPlaybooks');
+        if (data?.id) {
+          queryClient.setQueryData(['agentFactoryPlaybook', id], data);
+          queryClient.setQueryData('agentFactoryPlaybooks', (old) => {
+            if (!Array.isArray(old)) return old;
+            return old.map((p) => (p.id === id ? { ...p, ...data } : p));
+          });
+        } else {
+          queryClient.invalidateQueries(['agentFactoryPlaybook', id]);
+          queryClient.invalidateQueries('agentFactoryPlaybooks');
+        }
         setLocalPlaybook(null);
       },
     }
@@ -440,7 +483,8 @@ export default function PlaybookEditor({ playbookId }) {
       const parent = steps[parallelIndex];
       if (parent?.step_type !== 'parallel') return;
       const parallelSteps = [...(parent.parallel_steps || [])];
-      const newChild = { step_type: 'tool', action: '', output_key: '', name: '', inputs: {} };
+      if (parallelSteps.length >= MAX_PARALLEL_SUBSTEPS) return;
+      const newChild = { _step_id: crypto.randomUUID(), step_type: 'tool', action: '', output_key: '', name: '', inputs: {} };
       parallelSteps.push(newChild);
       const childIndex = parallelSteps.length - 1;
       steps[parallelIndex] = { ...parent, parallel_steps: parallelSteps };
@@ -461,10 +505,12 @@ export default function PlaybookEditor({ playbookId }) {
   const handleGroupAsParallel = useCallback(
     (sortedIndices) => {
       if (!currentPlaybook?.definition?.steps || sortedIndices.length < 2) return;
+      if (sortedIndices.length > MAX_PARALLEL_SUBSTEPS) return;
       const steps = [...currentPlaybook.definition.steps];
       const extracted = sortedIndices.map((i) => steps[i]).filter(Boolean);
       const firstIdx = sortedIndices[0];
       const parallelStep = {
+        _step_id: crypto.randomUUID(),
         step_type: 'parallel',
         parallel_steps: extracted,
         output_key: `parallel_${firstIdx + 1}`,
@@ -503,7 +549,7 @@ export default function PlaybookEditor({ playbookId }) {
       if (parent?.step_type !== 'branch') return;
       const pathKey = path === 'then' ? 'then_steps' : 'else_steps';
       const pathSteps = [...(parent[pathKey] || [])];
-      const newChild = { step_type: 'tool', action: '', output_key: '', name: '', inputs: {} };
+      const newChild = { _step_id: crypto.randomUUID(), step_type: 'tool', action: '', output_key: '', name: '', inputs: {} };
       pathSteps.push(newChild);
       const childIndex = pathSteps.length - 1;
       steps[branchIndex] = { ...parent, [pathKey]: pathSteps };
@@ -535,6 +581,40 @@ export default function PlaybookEditor({ playbookId }) {
     [currentPlaybook, handlePlaybookChange]
   );
 
+  const handleReorderParallelChild = useCallback(
+    (parallelIndex, fromIdx, toIdx) => {
+      if (!currentPlaybook?.definition?.steps) return;
+      const steps = [...currentPlaybook.definition.steps];
+      const parent = steps[parallelIndex];
+      if (parent?.step_type !== 'parallel') return;
+      const children = [...(parent.parallel_steps || [])];
+      const [removed] = children.splice(fromIdx, 1);
+      children.splice(toIdx, 0, removed);
+      steps[parallelIndex] = { ...parent, parallel_steps: children };
+      handlePlaybookChange({
+        ...currentPlaybook,
+        definition: { ...currentPlaybook.definition, steps },
+      });
+    },
+    [currentPlaybook, handlePlaybookChange]
+  );
+
+  const handleRemoveParallelChild = useCallback(
+    (parallelIndex, childIdx) => {
+      if (!currentPlaybook?.definition?.steps) return;
+      const steps = [...currentPlaybook.definition.steps];
+      const parent = steps[parallelIndex];
+      if (parent?.step_type !== 'parallel') return;
+      const children = [...(parent.parallel_steps || [])].filter((_, i) => i !== childIdx);
+      steps[parallelIndex] = { ...parent, parallel_steps: children };
+      handlePlaybookChange({
+        ...currentPlaybook,
+        definition: { ...currentPlaybook.definition, steps },
+      });
+    },
+    [currentPlaybook, handlePlaybookChange]
+  );
+
   const handleAddStepSave = useCallback(() => {
     if (!currentPlaybook) return;
     const steps = [...(currentPlaybook.definition?.steps ?? [])];
@@ -542,12 +622,13 @@ export default function PlaybookEditor({ playbookId }) {
     let newStep;
     if (newStepType === 'tool') {
       if (!newStepAction) return;
-      newStep = { step_type: 'tool', action: newStepAction, output_key: outputKey, inputs: {} };
+      newStep = { step_type: 'tool', action: newStepAction, output_key: outputKey, name: outputKey, inputs: {} };
     } else if (newStepType === 'llm_task') {
       newStep = {
         step_type: 'llm_task',
         action: newStepAction || 'llm_task',
         output_key: outputKey,
+        name: outputKey,
         prompt_template: 'Summarize or analyze the following:\n\n{context}',
         inputs: {},
       };
@@ -558,7 +639,7 @@ export default function PlaybookEditor({ playbookId }) {
         output_key: outputKey,
         name: outputKey,
         prompt_template: 'Use the available tools to: {query}',
-        available_tools: Array.isArray(newStepAvailableTools) ? newStepAvailableTools : [],
+        skill_ids: [],
         max_iterations: 3,
         inputs: {},
       };
@@ -588,11 +669,13 @@ export default function PlaybookEditor({ playbookId }) {
       newStep = {
         step_type: 'approval',
         output_key: outputKey,
+        name: outputKey,
         prompt: 'Approve to continue?',
         timeout_minutes: 30,
         on_reject: 'stop',
       };
     }
+    newStep._step_id = crypto.randomUUID();
     steps.push(newStep);
     handlePlaybookChange({
       ...currentPlaybook,
@@ -701,7 +784,8 @@ export default function PlaybookEditor({ playbookId }) {
   }
 
   const displayPlaybook = currentPlaybook || { name: '', description: '', definition: { steps: [] } };
-  const isLocked = !!displayPlaybook.is_locked || !!displayPlaybook.is_builtin || !!displayPlaybook.is_template;
+  const isShared = displayPlaybook.ownership === 'shared';
+  const isLocked = !!displayPlaybook.is_locked || !!displayPlaybook.is_builtin || !!displayPlaybook.is_template || isShared;
 
   const handleLockToggle = (e) => {
     const locked = e.target.checked;
@@ -735,6 +819,27 @@ export default function PlaybookEditor({ playbookId }) {
 
   return (
     <Box sx={{ p: 2, overflow: 'auto', maxWidth: 720, flex: 1, minHeight: 0 }}>
+      {isShared && (
+        <Alert
+          severity="info"
+          sx={{ mb: 2 }}
+          action={
+            shareIdForPlaybook && (
+              <Button
+                color="inherit"
+                size="small"
+                startIcon={<ContentCopy />}
+                onClick={() => copySharedToMineMutation.mutate(shareIdForPlaybook)}
+                disabled={copySharedToMineMutation.isLoading}
+              >
+                {copySharedToMineMutation.isLoading ? 'Copying…' : 'Make my own copy'}
+              </Button>
+            )
+          }
+        >
+          This playbook is shared by {displayPlaybook.owner_display_name || displayPlaybook.owner_username || 'another user'}. You can use it as-is or make your own copy to customize.
+        </Alert>
+      )}
       <UsageWarningBanner resourceLabel="This playbook" agents={usageAgents} />
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, flexWrap: 'wrap', gap: 1 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -946,9 +1051,12 @@ export default function PlaybookEditor({ playbookId }) {
         onStepClick={handleStepClick}
         onReorder={handleReorder}
         onAddParallelChild={handleAddParallelChild}
+        onReorderParallelChild={handleReorderParallelChild}
+        onRemoveParallelChild={handleRemoveParallelChild}
         onGroupAsParallel={handleGroupAsParallel}
         onUngroupParallel={handleUngroupParallel}
         onAddBranchChild={handleAddBranchChild}
+        maxParallelSubsteps={MAX_PARALLEL_SUBSTEPS}
         addStepPanelOpen={addStepOpen}
         readOnly={isLocked}
         onCopySteps={isLocked ? undefined : handleCopySteps}
@@ -989,7 +1097,7 @@ export default function PlaybookEditor({ playbookId }) {
         actions={actionList}
         playbookInputs={displayPlaybook?.definition?.inputs ?? []}
         onSave={handleStepConfigSave}
-        profileId={null}
+        profileId={effectiveProfileId}
         readOnly={isLocked}
       />
 

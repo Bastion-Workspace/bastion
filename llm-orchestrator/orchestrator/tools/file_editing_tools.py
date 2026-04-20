@@ -9,7 +9,7 @@ Both always create DB proposals for user approval.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -22,18 +22,52 @@ logger = logging.getLogger(__name__)
 
 # ── I/O models ─────────────────────────────────────────────────────────────────
 
+
+class PatchEdit(BaseModel):
+    """A single edit operation within a patch_file call."""
+
+    operation: Literal["replace", "delete", "insert_after_heading", "append"] = Field(
+        description="The edit operation to perform."
+    )
+    target: Optional[str] = Field(
+        default=None,
+        description=(
+            "For replace/delete: the EXACT verbatim text to find in the document "
+            "(include 2-3 surrounding context lines for reliable matching). "
+            "For insert_after_heading: the heading text (e.g. '## Section Name'). "
+            "Not needed for append."
+        ),
+    )
+    content: Optional[str] = Field(
+        default=None,
+        description=(
+            "The new text for replace, insert_after_heading, or append. "
+            "Not needed for delete."
+        ),
+    )
+    section: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional heading that scopes this edit to a specific section "
+            "(e.g. '## Chapter 3', '## Personality'). "
+            "When set, target matching is restricted to within that section's bounds. "
+            "Use this when the document has repeated sub-headings across sections."
+        ),
+    )
+
+
 class PatchFileInputs(BaseModel):
     """Required inputs for patch_file."""
+
     document_id: str = Field(description="Document ID to edit")
-    edits: List[Dict[str, Any]] = Field(
+    edits: List[PatchEdit] = Field(
         description=(
-            "List of edits. Each edit is an object with: "
-            "operation: 'replace' | 'delete' | 'insert_after_heading' | 'append'; "
-            "target: For replace/delete, the EXACT text to find (include 2-3 surrounding context lines for reliable matching). "
-            "For insert_after_heading, the heading text (e.g. '## Section Name'). Not needed for append. "
-            "content: The new text for replace/insert_after_heading/append; not needed for delete. "
-            "IMPORTANT for replace/delete: 'target' must be VERBATIM text from the document with enough context (2-3 lines) so the match is unambiguous."
-        )
+            "List of edit objects (always a JSON array, never a bare object). Each MUST have 'operation' "
+            "(replace|delete|insert_after_heading|append). replace/delete require 'target' (exact verbatim "
+            "text from the document). replace/insert_after_heading/append require 'content'. Optional "
+            "'section' scopes to a heading line (e.g. '## Chapter 3'). Example: [{\"operation\": \"replace\", "
+            "\"target\": \"exact old text from file\", \"content\": \"new text\", \"section\": \"## Chapter 3\"}]"
+        ),
     )
 
 
@@ -94,6 +128,10 @@ def _normalize_edit(edit: Dict[str, Any]) -> Dict[str, Any]:
     # content / new text: accept text, new_content, content
     if "content" not in out or out.get("content") is None:
         out["content"] = out.get("text") or out.get("new_content")
+    # section scope: accept section_scope, within
+    if "section" not in out or out.get("section") is None:
+        sec = out.get("section_scope") or out.get("within")
+        out["section"] = sec if sec is not None else None
     return out
 
 
@@ -117,27 +155,46 @@ def _edit_to_op_dict(edit: Dict[str, Any], doc_content: str, fm_end: int) -> Opt
     content = edit.get("content")
     if content is None:
         content = ""
+    section = (edit.get("section") or "").strip() or None
 
     if op_name == "replace":
         # search_text (with context) for robust matching; original_text kept as alias
         target = raw_target if raw_target is not None else ""
         if not target or not target.strip():
             return None
+        body = doc_content[fm_end:].strip()
+        if not body:
+            # LLMs often emit replace on an empty body; promote to insert so JIT resolution succeeds.
+            logger.warning(
+                "patch_file: replace on empty document body (frontmatter only); "
+                "promoting to insert_after_heading with empty anchor"
+            )
+            return {
+                "op_type": "insert_after_heading",
+                "anchor_text": "",
+                "text": content,
+                **({"section_scope": section} if section else {}),
+            }
         return {
             "op_type": "replace_range",
             "search_text": target,
             "original_text": target,
             "text": content,
+            **({"section_scope": section} if section else {}),
         }
     if op_name == "delete":
         target = raw_target if raw_target is not None else ""
         if not target or not target.strip():
+            return None
+        body = doc_content[fm_end:].strip()
+        if not body:
             return None
         return {
             "op_type": "delete_range",
             "search_text": target,
             "original_text": target,
             "text": "",
+            **({"section_scope": section} if section else {}),
         }
     if op_name == "insert_after_heading":
         # target is heading text (with or without # prefix); trim ok for anchor
@@ -148,15 +205,24 @@ def _edit_to_op_dict(edit: Dict[str, Any], doc_content: str, fm_end: int) -> Opt
             "op_type": "insert_after_heading",
             "anchor_text": anchor,
             "text": content,
+            **({"section_scope": section} if section else {}),
         }
     if op_name == "append":
-        target = (raw_target or "").strip() if raw_target is not None else ""
         body = doc_content[fm_end:].strip()
         if not body:
             return {
                 "op_type": "insert_after_heading",
                 "anchor_text": "",
                 "text": content,
+                **({"section_scope": section} if section else {}),
+            }
+        if section:
+            # Append at end of the named section (before next same-or-higher-level heading).
+            return {
+                "op_type": "insert_after_heading",
+                "anchor_text": section,
+                "text": content,
+                "section_scope": section,
             }
         last_line = body.split("\n")[-1].strip()
         return {
@@ -167,10 +233,21 @@ def _edit_to_op_dict(edit: Dict[str, Any], doc_content: str, fm_end: int) -> Opt
     return None
 
 
-def _reason_for_invalid_edit(edit: Dict[str, Any]) -> str:
+def _reason_for_invalid_edit(
+    edit: Dict[str, Any],
+    doc_content: Optional[str] = None,
+    fm_end: int = 0,
+) -> str:
     """Return a short reason why an edit was rejected (for skip message and LLM feedback)."""
     edit = _normalize_edit(edit)
     op = (edit.get("operation") or "").strip().lower()
+    if op in ("delete", "delete_range") and doc_content is not None:
+        body = doc_content[fm_end:].strip()
+        if not body:
+            return (
+                "delete skipped: document body is empty (frontmatter only); "
+                "nothing to delete — use append or insert_after_heading to add content."
+            )
     target = edit.get("target")
     target_ok = target is not None and (target if isinstance(target, str) else "").strip()
     if op in ("replace", "replace_range", "delete", "delete_range") and not target_ok:
@@ -191,15 +268,21 @@ def _normalize_edits_arg(edits: Any) -> List[Dict[str, Any]]:
             parsed = json.loads(edits)
             if isinstance(parsed, list):
                 edits = parsed
+            elif isinstance(parsed, dict):
+                edits = [parsed]
             else:
                 return []
         except (json.JSONDecodeError, TypeError):
             return []
+    if isinstance(edits, dict):
+        edits = [edits]
     if not isinstance(edits, list):
         return []
     out: List[Dict[str, Any]] = []
     for i, item in enumerate(edits):
-        if isinstance(item, dict):
+        if isinstance(item, PatchEdit):
+            out.append(item.model_dump())
+        elif isinstance(item, dict):
             out.append(item)
         elif isinstance(item, str):
             try:
@@ -215,7 +298,7 @@ def _normalize_edits_arg(edits: Any) -> List[Dict[str, Any]]:
 
 async def patch_file_tool(
     document_id: str,
-    edits: List[Dict[str, Any]],
+    edits: Any,
     summary: str = "",
     agent_name: str = "unknown",
     user_id: str = "system",
@@ -225,6 +308,15 @@ async def patch_file_tool(
     Propose a batch of edits to a document. Creates a single proposal for user approval.
     Edits are resolved in order; all resolved operations are submitted as one proposal.
     """
+    try:
+        _preview = str(edits)[:300] if edits is not None else "None"
+    except Exception:
+        _preview = "(unprintable)"
+    logger.info(
+        "patch_file: raw edits type=%s preview=%s",
+        type(edits).__name__,
+        _preview,
+    )
     edits = _normalize_edits_arg(edits)
     if not edits:
         err = (
@@ -267,7 +359,7 @@ async def patch_file_tool(
     for i, edit in enumerate(edits):
         op_dict = _edit_to_op_dict(edit, doc_content, fm_end)
         if op_dict is None:
-            reason = _reason_for_invalid_edit(edit)
+            reason = _reason_for_invalid_edit(edit, doc_content, fm_end)
             skipped.append(f"Edit {i + 1} ({edit.get('operation', '?')}): {reason}")
             continue
         semantic_ops.append(op_dict)
@@ -373,9 +465,15 @@ register_action(
     name="patch_file",
     category="document",
     description=(
-        "Propose batched edits to a document for user approval. Edits are matched semantically against "
-        "the current document content at display and apply time — do NOT provide character positions. "
+        "Propose batched edits to a document for user approval. Each edit MUST set 'operation' to one of: "
+        "replace, delete, insert_after_heading, append. "
+        "Use optional 'section' (exact heading line, e.g. '## Chapter 3' or '## Personality') to scope the edit "
+        "to that heading's section when the document repeats sub-headings (e.g. multiple '### Beats'). "
+        "Edits are matched semantically against the current "
+        "document content at display and apply time — do NOT provide character positions. "
         "For replace/delete, provide generous verbatim context in 'target' to ensure unique matching. "
+        "If the document body is empty (frontmatter only), use append or insert_after_heading to add content — "
+        "replace and delete require existing body text to match. "
         "For org-mode files: do not use for TODO state, tags, or priority — use list_todos and update_todo (or toggle_todo) so changes apply directly."
     ),
     short_description="Propose batched edits to a document for user approval",

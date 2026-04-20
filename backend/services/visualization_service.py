@@ -108,7 +108,7 @@ def _create_bar_chart(data: Dict[str, Any], config: Dict[str, Any]) -> go.Figure
     orientation = data.get("orientation", "v")  # 'v' for vertical, 'h' for horizontal
     color_scheme = config.get("color_scheme", "plotly")
     
-    # **BULLY!** Only set marker_color if it's not the default "plotly" string!
+    # Only set marker_color when not the default plotly string
     # "plotly" is a scheme name, not a CSS color, so we let Plotly use its defaults!
     marker_kwargs = {}
     if color_scheme and color_scheme != "plotly":
@@ -300,7 +300,7 @@ def _chart_to_html(fig: go.Figure, width: int = 800, height: int = 600) -> str:
         # Update figure size
         fig.update_layout(width=width, height=height)
         
-        # Convert to HTML - ROOSEVELT'S STABLE CDN FIX
+        # Convert figure to HTML with pinned Plotly CDN
         html_str = to_html(
             fig, 
             include_plotlyjs='https://cdn.plot.ly/plotly-2.35.2.min.js', 

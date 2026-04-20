@@ -1,6 +1,6 @@
 ---
 title: Creating and configuring connectors
-order: 7
+order: 10
 ---
 
 # Creating and configuring connectors

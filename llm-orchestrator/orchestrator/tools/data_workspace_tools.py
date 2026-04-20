@@ -13,6 +13,122 @@ from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
 
+def _looks_like_sql(text: str) -> bool:
+    if not text or not text.strip():
+        return False
+    u = text.strip().upper()
+    return any(
+        u.startswith(p)
+        for p in (
+            "SELECT",
+            "WITH",
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "EXPLAIN",
+            "SHOW",
+            "CREATE",
+            "ALTER",
+            "DROP",
+            "TRUNCATE",
+            "MERGE",
+            "COPY",
+        )
+    )
+
+
+def _strip_markdown_fences(s: str) -> str:
+    s = (s or "").strip()
+    if s.startswith("```"):
+        # Remove leading ```lang and trailing ```
+        parts = s.split("```")
+        if len(parts) >= 3:
+            return parts[1].split("\n", 1)[1].strip() if "\n" in parts[1] else parts[1].strip()
+    return s
+
+
+def _format_schema_for_nl_to_sql(workspace_id: str, schema_result: Dict[str, Any]) -> str:
+    tables = schema_result.get("tables") or []
+    lines = [f"Workspace {workspace_id} tables:"]
+    for t in tables:
+        tname = t.get("name", "")
+        lines.append(f"- {tname}")
+        for c in t.get("columns", []) or []:
+            cname = c.get("name", "")
+            ctype = c.get("type", "text")
+            desc = (c.get("description") or "").strip()
+            ref_extra = ""
+            if str(ctype).upper() == "REFERENCE":
+                cref = c.get("column_ref_json") or ""
+                if cref:
+                    try:
+                        rj = json.loads(cref)
+                        tid = rj.get("target_table_id", "")
+                        ref_extra = (
+                            f"; REFERENCE -> target_table_id={tid}; "
+                            f"cell stores JSON with _bastion_ref: "
+                            f"v, table_id, row_id, label, optional preview"
+                        )
+                    except (json.JSONDecodeError, TypeError):
+                        ref_extra = "; REFERENCE column (_bastion_ref JSON)"
+                else:
+                    ref_extra = "; REFERENCE column (_bastion_ref JSON)"
+            if desc:
+                lines.append(f"  - {cname} ({ctype}){ref_extra}: {desc}")
+            else:
+                lines.append(f"  - {cname} ({ctype}){ref_extra}")
+    return "\n".join(lines)
+
+
+def _get_llm_for_nl_to_sql(pipeline_metadata: Optional[Dict[str, Any]] = None):
+    try:
+        from langchain_openai import ChatOpenAI
+        from config.settings import settings
+    except Exception:
+        return None
+    meta = pipeline_metadata or {}
+    model = meta.get("user_chat_model") or settings.DEFAULT_MODEL
+    api_key = meta.get("user_llm_api_key") or settings.OPENROUTER_API_KEY or settings.OPENAI_API_KEY
+    base_url = meta.get("user_llm_base_url") or settings.OPENROUTER_BASE_URL
+    return ChatOpenAI(
+        model=model,
+        openai_api_key=api_key,
+        openai_api_base=base_url,
+        temperature=0.0,
+    )
+
+
+async def _nl_to_sql(
+    *,
+    workspace_id: str,
+    natural_language: str,
+    schema_result: Dict[str, Any],
+    read_only: bool,
+    pipeline_metadata: Optional[Dict[str, Any]] = None,
+) -> str:
+    llm = _get_llm_for_nl_to_sql(pipeline_metadata)
+    if not llm:
+        raise RuntimeError("LLM not configured for NL-to-SQL")
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    schema_txt = _format_schema_for_nl_to_sql(workspace_id, schema_result)
+    allowed = "SELECT/WITH (read-only)" if read_only else "SELECT/WITH or INSERT/UPDATE/DELETE/DDL (read-write)"
+    system = (
+        "You translate user questions into a single PostgreSQL SQL statement for a specific workspace schema.\n"
+        f"Rules:\n- Output SQL only (no prose, no markdown).\n- Use only the tables/columns provided.\n"
+        f"- Allowed: {allowed}.\n"
+        + ("- MUST be a SELECT or WITH query (no writes).\n" if read_only else "")
+        + "- Add a LIMIT when returning rows unless the query is an aggregate.\n"
+        "- Prefer ordering by a date/timestamp column when asking for 'last' or 'most recent'.\n\n"
+        + schema_txt
+    )
+    resp = await llm.ainvoke(
+        [SystemMessage(content=system), HumanMessage(content=natural_language)]
+    )
+    sql = _strip_markdown_fences(getattr(resp, "content", "") or "")
+    sql = sql.strip().rstrip(";").strip()
+    return sql
+
 
 class DataWorkspaceOutputs(BaseModel):
     """Legacy minimal outputs; prefer specific output models below."""
@@ -56,6 +172,38 @@ class QueryDataWorkspaceOutputs(BaseModel):
     formatted: str = Field(description="Human-readable result")
     rows_affected: int = Field(default=0, description="For INSERT/UPDATE/DELETE, number of rows affected")
     returning_rows: Optional[List[Dict[str, Any]]] = Field(default=None, description="For write with RETURNING clause")
+
+
+class CreateWorkspaceTableOutputs(BaseModel):
+    table_id: str = Field(description="Created table ID")
+    table: Dict[str, Any] = Field(default_factory=dict, description="Created table dict")
+    success: bool = Field(description="Whether the call succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable result")
+
+
+class InsertWorkspaceRowsOutputs(BaseModel):
+    rows_inserted: int = Field(description="Number of rows inserted")
+    inserted_row_ids: List[str] = Field(default_factory=list, description="Inserted row IDs")
+    success: bool = Field(description="Whether the call succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable result")
+
+
+class UpdateWorkspaceRowsOutputs(BaseModel):
+    rows_updated: int = Field(description="Number of rows updated")
+    updated_row_ids: List[str] = Field(default_factory=list, description="Updated row IDs")
+    success: bool = Field(description="Whether the call succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable result")
+
+
+class DeleteWorkspaceRowsOutputs(BaseModel):
+    rows_deleted: int = Field(description="Number of rows deleted")
+    deleted_row_ids: List[str] = Field(default_factory=list, description="Deleted row IDs")
+    success: bool = Field(description="Whether the call succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable result")
 
 
 async def list_data_workspaces_tool(
@@ -171,10 +319,25 @@ async def get_workspace_schema_tool(
                         ref_c = rel.get("references_column", "id")
                         rel_hint = f" -> references {ref_t}.{ref_c}"
                         break
-                if desc or rel_hint:
-                    response_parts.append(f"    - {col['name']} ({col.get('type', 'text')}, {nullable}){rel_hint} — {desc}" if desc else f"    - {col['name']} ({col.get('type', 'text')}, {nullable}){rel_hint}")
+                ref_cell = ""
+                if str(col.get("type", "")).upper() == "REFERENCE":
+                    cref = col.get("column_ref_json") or ""
+                    if cref:
+                        try:
+                            rj = json.loads(cref)
+                            ref_cell = (
+                                f"; stores _bastion_ref to table_id={rj.get('target_table_id', '')} "
+                                f"(join on row_id; label_field={rj.get('label_field', 'name')})"
+                            )
+                        except (json.JSONDecodeError, TypeError):
+                            ref_cell = "; stores _bastion_ref JSON"
+                    else:
+                        ref_cell = "; stores _bastion_ref JSON"
+                line_base = f"    - {col['name']} ({col.get('type', 'text')}, {nullable}){rel_hint}{ref_cell}"
+                if desc:
+                    response_parts.append(f"{line_base} — {desc}")
                 else:
-                    response_parts.append(f"    - {col['name']} ({col.get('type', 'text')}, {nullable})")
+                    response_parts.append(line_base)
             glossary = meta.get("glossary") or {}
             if isinstance(glossary, dict) and glossary:
                 response_parts.append("  Glossary (column/term definitions):")
@@ -189,6 +352,63 @@ async def get_workspace_schema_tool(
         return {"tables": [], "total_tables": 0, "workspace_id": workspace_id, "workspace_name": None, "success": False, "error": err, "formatted": f"Error getting workspace schema: {err}"}
 
 
+class ResolveWorkspaceLinkOutputs(BaseModel):
+    success: bool = Field(description="Whether resolution succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    label: str = Field(default="", description="Current display label for the linked row")
+    preview: Dict[str, Any] = Field(default_factory=dict, description="Small key/value preview from target row")
+    row_found: bool = Field(default=False, description="Whether the target row still exists")
+    table_id: str = Field(default="", description="Target table id")
+    row_id: str = Field(default="", description="Target row id")
+    formatted: str = Field(description="Human-readable summary")
+
+
+async def resolve_workspace_link_tool(
+    ref_json: str,
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """
+    Resolve a cross-table reference (_bastion_ref JSON) to the current label and preview.
+    ref_json: JSON string of the cell value { \"_bastion_ref\": { \"v\", \"table_id\", \"row_id\", ... } } or the inner object.
+    """
+    try:
+        client = await get_backend_tool_client()
+        payload = json.loads(ref_json) if ref_json and ref_json.strip() else {}
+        result = await client.resolve_workspace_link(ref_payload=payload, user_id=user_id)
+        label = result.get("label") or ""
+        found = bool(result.get("row_found"))
+        formatted = (
+            f"Resolved link: label={label!r}, row_found={found}, "
+            f"table_id={result.get('table_id', '')}, row_id={result.get('row_id', '')}"
+        )
+        if result.get("preview"):
+            formatted += f", preview={json.dumps(result.get('preview'))}"
+        if not result.get("success") and result.get("error"):
+            formatted = f"Resolve failed: {result.get('error')}"
+        return {
+            "success": bool(result.get("success")),
+            "error": result.get("error"),
+            "label": label,
+            "preview": result.get("preview") or {},
+            "row_found": found,
+            "table_id": result.get("table_id") or "",
+            "row_id": result.get("row_id") or "",
+            "formatted": formatted,
+        }
+    except Exception as e:
+        err = str(e)
+        return {
+            "success": False,
+            "error": err,
+            "label": "",
+            "preview": {},
+            "row_found": False,
+            "table_id": "",
+            "row_id": "",
+            "formatted": f"Resolve workspace link failed: {err}",
+        }
+
+
 async def query_data_workspace_tool(
     workspace_id: str,
     query: str,
@@ -197,6 +417,7 @@ async def query_data_workspace_tool(
     limit: int = 100,
     params: Optional[List[Any]] = None,
     read_only: bool = False,
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Execute a query against a data workspace (SQL or natural language)
@@ -217,12 +438,47 @@ async def query_data_workspace_tool(
         
         # Get backend client
         client = await get_backend_tool_client()
+
+        effective_query_type = (query_type or "natural_language").lower().strip()
+        effective_query = query
+
+        # Implement real NL-to-SQL here so agents can ask questions like:
+        # \"When did I last change the oil on the Honda?\"
+        generated_by_llm = None
+        if effective_query_type == "natural_language" and not _looks_like_sql(effective_query):
+            schema_list = (_pipeline_metadata or {}).get("workspace_schemas")
+            schema_result = None
+            if isinstance(schema_list, list):
+                for item in schema_list:
+                    if isinstance(item, dict) and item.get("workspace_id") == workspace_id:
+                        schema_result = item
+                        break
+            if not schema_result:
+                schema_result = await client.get_workspace_schema(
+                    workspace_id=workspace_id, user_id=user_id
+                )
+            generated_by_llm = await _nl_to_sql(
+                workspace_id=workspace_id,
+                natural_language=effective_query,
+                schema_result=schema_result or {"tables": []},
+                read_only=read_only,
+                pipeline_metadata=_pipeline_metadata,
+            )
+
+            u = (generated_by_llm or "").lstrip().upper()
+            if read_only and not (u.startswith("SELECT") or u.startswith("WITH")):
+                raise ValueError("NL-to-SQL produced a non-SELECT statement for a read-only workspace")
+            if not read_only and not _looks_like_sql(generated_by_llm):
+                raise ValueError("NL-to-SQL did not produce valid SQL")
+
+            effective_query_type = "sql"
+            effective_query = generated_by_llm
         
         # Perform query via gRPC
         result = await client.query_data_workspace(
             workspace_id=workspace_id,
-            query=query,
-            query_type=query_type,
+            query=effective_query,
+            query_type=effective_query_type,
             user_id=user_id,
             limit=limit,
             params=params,
@@ -251,6 +507,8 @@ async def query_data_workspace_tool(
         column_names = result.get("column_names", [])
         results_list = result.get("results", [])
         generated_sql = result.get("generated_sql")
+        if generated_by_llm:
+            generated_sql = generated_by_llm
         rows_affected = result.get("rows_affected", 0)
         returning_rows = result.get("returning_rows")
         
@@ -359,12 +617,119 @@ async def query_data_workspace_tool(
         }
 
 
+async def create_workspace_table_tool(
+    workspace_id: str,
+    database_id: str,
+    table_name: str,
+    columns: List[Dict[str, Any]],
+    description: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """Create a native table (structured, no raw SQL required)."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.create_data_workspace_table(
+            workspace_id=workspace_id,
+            database_id=database_id,
+            table_name=table_name,
+            user_id=user_id,
+            description=description or "",
+            columns=columns or [],
+            metadata=metadata or {},
+        )
+        if not res.get("success"):
+            err = res.get("error_message") or "Create table failed"
+            return {"table_id": "", "table": {}, "success": False, "error": err, "formatted": f"Create table failed: {err}"}
+        table_id = res.get("table_id") or (res.get("table") or {}).get("table_id", "")
+        formatted = f"Created table **{table_name}** (ID: {table_id})."
+        return {"table_id": table_id, "table": res.get("table") or {}, "success": True, "error": None, "formatted": formatted}
+    except Exception as e:
+        err = str(e)
+        return {"table_id": "", "table": {}, "success": False, "error": err, "formatted": f"Create table failed: {err}"}
+
+
+async def insert_workspace_rows_tool(
+    workspace_id: str,
+    table_id: str,
+    rows: List[Dict[str, Any]],
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """Insert one or more rows (structured)."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.insert_data_workspace_rows(
+            workspace_id=workspace_id, table_id=table_id, rows=rows or [], user_id=user_id
+        )
+        if not res.get("success"):
+            err = res.get("error_message") or "Insert rows failed"
+            return {"rows_inserted": 0, "inserted_row_ids": [], "success": False, "error": err, "formatted": f"Insert rows failed: {err}"}
+        n = int(res.get("rows_inserted") or 0)
+        ids = res.get("inserted_row_ids") or []
+        return {"rows_inserted": n, "inserted_row_ids": ids, "success": True, "error": None, "formatted": f"Inserted {n} row(s)."}
+    except Exception as e:
+        err = str(e)
+        return {"rows_inserted": 0, "inserted_row_ids": [], "success": False, "error": err, "formatted": f"Insert rows failed: {err}"}
+
+
+async def update_workspace_rows_tool(
+    workspace_id: str,
+    table_id: str,
+    updates: List[Dict[str, Any]],
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """Update one or more rows by row_id (structured)."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.update_data_workspace_rows(
+            workspace_id=workspace_id, table_id=table_id, updates=updates or [], user_id=user_id
+        )
+        if not res.get("success"):
+            err = res.get("error_message") or "Update rows failed"
+            return {"rows_updated": 0, "updated_row_ids": [], "success": False, "error": err, "formatted": f"Update rows failed: {err}"}
+        n = int(res.get("rows_updated") or 0)
+        ids = res.get("updated_row_ids") or []
+        return {"rows_updated": n, "updated_row_ids": ids, "success": True, "error": None, "formatted": f"Updated {n} row(s)."}
+    except Exception as e:
+        err = str(e)
+        return {"rows_updated": 0, "updated_row_ids": [], "success": False, "error": err, "formatted": f"Update rows failed: {err}"}
+
+
+async def delete_workspace_rows_tool(
+    workspace_id: str,
+    table_id: str,
+    row_ids: List[str],
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """Delete one or more rows by row_id (structured)."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.delete_data_workspace_rows(
+            workspace_id=workspace_id, table_id=table_id, row_ids=row_ids or [], user_id=user_id
+        )
+        if not res.get("success"):
+            err = res.get("error_message") or "Delete rows failed"
+            return {"rows_deleted": 0, "deleted_row_ids": [], "success": False, "error": err, "formatted": f"Delete rows failed: {err}"}
+        n = int(res.get("rows_deleted") or 0)
+        ids = res.get("deleted_row_ids") or []
+        return {"rows_deleted": n, "deleted_row_ids": ids, "success": True, "error": None, "formatted": f"Deleted {n} row(s)."}
+    except Exception as e:
+        err = str(e)
+        return {"rows_deleted": 0, "deleted_row_ids": [], "success": False, "error": err, "formatted": f"Delete rows failed: {err}"}
+
+
 class ListDataWorkspacesInputs(BaseModel):
     pass
 
 
 class GetWorkspaceSchemaInputs(BaseModel):
     workspace_id: str = Field(description="Workspace ID")
+
+
+class ResolveWorkspaceLinkInputs(BaseModel):
+    ref_json: str = Field(
+        description='JSON for _bastion_ref cell or inner object, e.g. {"_bastion_ref":{"v":1,"table_id":"...","row_id":"..."}}'
+    )
 
 
 class QueryDataWorkspaceInputs(BaseModel):
@@ -375,15 +740,58 @@ class QueryDataWorkspaceInputs(BaseModel):
     params: Optional[List[Any]] = Field(default=None, description="For SQL: list of values for $1, $2, ...")
     read_only: bool = Field(default=False, description="When true, only SELECT is allowed")
 
+class CreateWorkspaceTableInputs(BaseModel):
+    workspace_id: str = Field(description="Workspace ID")
+    database_id: str = Field(description="Database ID")
+    table_name: str = Field(description="Table name")
+    columns: List[Dict[str, Any]] = Field(description="List of column dicts (name/type/nullable/description)")
+    description: str = Field(default="", description="Optional table description")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional table metadata")
+
+
+class InsertWorkspaceRowsInputs(BaseModel):
+    workspace_id: str = Field(description="Workspace ID")
+    table_id: str = Field(description="Table ID")
+    rows: List[Dict[str, Any]] = Field(description="Rows to insert")
+
+
+class UpdateWorkspaceRowsInputs(BaseModel):
+    workspace_id: str = Field(description="Workspace ID")
+    table_id: str = Field(description="Table ID")
+    updates: List[Dict[str, Any]] = Field(description="List of {row_id, row_data} updates")
+
+
+class DeleteWorkspaceRowsInputs(BaseModel):
+    workspace_id: str = Field(description="Workspace ID")
+    table_id: str = Field(description="Table ID")
+    row_ids: List[str] = Field(description="Row IDs to delete")
+
 
 register_action(name="list_data_workspaces", category="data_workspace", description="List data workspaces", inputs_model=ListDataWorkspacesInputs, outputs_model=ListDataWorkspacesOutputs, tool_function=list_data_workspaces_tool)
 register_action(name="get_workspace_schema", category="data_workspace", description="Get workspace schema", inputs_model=GetWorkspaceSchemaInputs, outputs_model=GetWorkspaceSchemaOutputs, tool_function=get_workspace_schema_tool)
+register_action(
+    name="resolve_workspace_link",
+    category="data_workspace",
+    description="Resolve a _bastion_ref cell to current label and preview from the target row",
+    inputs_model=ResolveWorkspaceLinkInputs,
+    outputs_model=ResolveWorkspaceLinkOutputs,
+    tool_function=resolve_workspace_link_tool,
+)
 register_action(name="query_data_workspace", category="data_workspace", description="Query data workspace", inputs_model=QueryDataWorkspaceInputs, outputs_model=QueryDataWorkspaceOutputs, tool_function=query_data_workspace_tool)
+register_action(name="create_workspace_table", category="data_workspace", description="Create a data workspace table", inputs_model=CreateWorkspaceTableInputs, outputs_model=CreateWorkspaceTableOutputs, tool_function=create_workspace_table_tool)
+register_action(name="insert_workspace_rows", category="data_workspace", description="Insert rows into a table", inputs_model=InsertWorkspaceRowsInputs, outputs_model=InsertWorkspaceRowsOutputs, tool_function=insert_workspace_rows_tool)
+register_action(name="update_workspace_rows", category="data_workspace", description="Update rows in a table", inputs_model=UpdateWorkspaceRowsInputs, outputs_model=UpdateWorkspaceRowsOutputs, tool_function=update_workspace_rows_tool)
+register_action(name="delete_workspace_rows", category="data_workspace", description="Delete rows from a table", inputs_model=DeleteWorkspaceRowsInputs, outputs_model=DeleteWorkspaceRowsOutputs, tool_function=delete_workspace_rows_tool)
 
 
 # Tool registry for LangGraph
 DATA_WORKSPACE_TOOLS = {
     'list_data_workspaces': list_data_workspaces_tool,
     'get_workspace_schema': get_workspace_schema_tool,
-    'query_data_workspace': query_data_workspace_tool
+    'resolve_workspace_link': resolve_workspace_link_tool,
+    'query_data_workspace': query_data_workspace_tool,
+    'create_workspace_table': create_workspace_table_tool,
+    'insert_workspace_rows': insert_workspace_rows_tool,
+    'update_workspace_rows': update_workspace_rows_tool,
+    'delete_workspace_rows': delete_workspace_rows_tool,
 }

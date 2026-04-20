@@ -1,5 +1,6 @@
-grpcio>=1.60.0
-grpcio-tools>=1.60.0
+grpcio==1.80.0
+# Required for generated *_pb2.py (grpcio does not install protobuf); align with grpcio-tools 1.80
+protobuf>=6.31.1,<7
 faster-whisper>=1.0.0
 elevenlabs>=1.0.0
 openai>=1.0.0

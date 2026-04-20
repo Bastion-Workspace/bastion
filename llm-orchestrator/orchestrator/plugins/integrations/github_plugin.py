@@ -1,7 +1,9 @@
 """
-GitHub plugin - list repos, issues, PRs and create issues for Agent Factory (Zone 4).
+GitHub plugin (deprecated).
 
-Uses GitHub REST API. Requires a personal access token (or OAuth token) in connection config.
+Prefer GitHub OAuth under Settings → External connections, the **github** tool pack, and tools in
+`orchestrator.tools.github_tools` (backend resolves tokens via `ExecuteGitHubEndpoint`).
+This plugin remains for backward compatibility with existing `agent_plugin_configs` only.
 """
 
 from typing import Any, Dict, List, Optional

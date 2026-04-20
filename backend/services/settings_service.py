@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from services.database_manager.database_helpers import fetch_all, fetch_one, execute
 from sqlalchemy import text  # kept only for type hints in comments; remove if unused
 
@@ -947,6 +947,203 @@ class SettingsService:
             logger.error(f"❌ Failed to set preferred name for user {user_id}: {e}")
             return False
 
+    def validate_bbs_wallpaper(self, value: str) -> Tuple[bool, str]:
+        """Single-item content rules (tab, LF, CR, printable)."""
+        from models.bbs_wallpaper_models import validate_wallpaper_content
+
+        return validate_wallpaper_content(value)
+
+    async def load_user_bbs_wallpaper_config(self, user_id: str):
+        """Load `bbs_wallpaper_config`, migrating legacy `bbs_wallpaper` string once."""
+        from models.bbs_wallpaper_models import (
+            BbsWallpaperConfig,
+            config_from_legacy_string,
+            empty_bbs_wallpaper_config,
+            parse_bbs_wallpaper_config_json,
+        )
+        from services.user_settings_kv_service import (
+            delete_user_setting,
+            get_user_setting,
+            set_user_setting,
+        )
+
+        try:
+            raw = await get_user_setting(user_id, "bbs_wallpaper_config")
+            if raw and str(raw).strip():
+                parsed = parse_bbs_wallpaper_config_json(str(raw))
+                if parsed:
+                    return parsed.normalized()
+                logger.warning(
+                    "Invalid bbs_wallpaper_config JSON for user %s; using empty config",
+                    user_id,
+                )
+            legacy = await get_user_setting(user_id, "bbs_wallpaper")
+            if legacy is not None:
+                cfg = (
+                    config_from_legacy_string(str(legacy))
+                    if str(legacy).strip()
+                    else empty_bbs_wallpaper_config()
+                )
+                await set_user_setting(
+                    user_id,
+                    "bbs_wallpaper_config",
+                    cfg.model_dump_json(),
+                    "json",
+                )
+                await delete_user_setting(user_id, "bbs_wallpaper")
+                return cfg.normalized()
+            return empty_bbs_wallpaper_config()
+        except Exception as e:
+            logger.warning("Failed to load BBS wallpaper config for user %s: %s", user_id, e)
+            from models.bbs_wallpaper_models import empty_bbs_wallpaper_config
+
+            return empty_bbs_wallpaper_config()
+
+    async def get_user_bbs_wallpaper_bundle(
+        self,
+        user_id: str,
+        *,
+        animation_cols: int | None = None,
+        animation_rows: int | None = None,
+    ) -> Dict[str, Any]:
+        """Resolved wallpaper string plus full config for Settings UI."""
+        from models.bbs_wallpaper_models import cycling_active, resolve_display_wallpaper
+        from services.document_text_file_reader import read_user_document_text
+        from utils.bbs_ascii_animation_parse import parse_bbs_animation_document
+        from utils.bbs_builtin_wallpaper_animations import (
+            BUILTIN_ANIM_MATRIX_RAIN,
+            BUILTIN_ANIM_SNOWMAN,
+            matrix_rain_animation_payload,
+            snowman_winter_animation_payload,
+        )
+
+        cfg = await self.load_user_bbs_wallpaper_config(user_id)
+        wallpaper = resolve_display_wallpaper(cfg)
+        animation_payload: Optional[Dict[str, Any]] = None
+        if cfg.display_mode == "animated":
+            doc_id = (cfg.animation_document_id or "").strip()
+            if doc_id == BUILTIN_ANIM_MATRIX_RAIN:
+                ac = animation_cols if animation_cols is not None else None
+                ar = animation_rows if animation_rows is not None else None
+                kwargs: Dict[str, Any] = {}
+                if ac is not None:
+                    kwargs["cols"] = int(ac)
+                if ar is not None:
+                    kwargs["rows"] = int(ar)
+                animation_payload = matrix_rain_animation_payload(
+                    float(cfg.animation_fps), bool(cfg.animation_loop), **kwargs
+                )
+            elif doc_id == BUILTIN_ANIM_SNOWMAN:
+                ac = animation_cols if animation_cols is not None else None
+                ar = animation_rows if animation_rows is not None else None
+                skwargs: Dict[str, Any] = {}
+                if ac is not None:
+                    skwargs["cols"] = int(ac)
+                if ar is not None:
+                    skwargs["rows"] = int(ar)
+                animation_payload = snowman_winter_animation_payload(
+                    float(cfg.animation_fps), bool(cfg.animation_loop), **skwargs
+                )
+            elif doc_id:
+                raw = await read_user_document_text(doc_id, user_id)
+                if raw:
+                    parsed = parse_bbs_animation_document(raw)
+                    if parsed and parsed.get("frames"):
+                        animation_payload = {
+                            "frames": parsed["frames"],
+                            "fps": float(cfg.animation_fps),
+                            "loop": bool(cfg.animation_loop),
+                        }
+        return {
+            "wallpaper": wallpaper,
+            "config": cfg.model_dump(),
+            "cycling": cycling_active(cfg),
+            "animation": animation_payload,
+        }
+
+    async def set_user_bbs_wallpaper_config(self, user_id: str, config: Any) -> Tuple[bool, str]:
+        """Persist wallpaper library JSON. Returns (success, error_message)."""
+        from models.bbs_wallpaper_models import BbsWallpaperConfig, validate_full_config
+
+        if not isinstance(config, BbsWallpaperConfig):
+            return False, "Invalid config type"
+        from services.user_settings_kv_service import set_user_setting
+
+        ok, err = validate_full_config(config)
+        if not ok:
+            return False, err
+        cfg = config.normalized()
+        try:
+            await set_user_setting(
+                user_id,
+                "bbs_wallpaper_config",
+                cfg.model_dump_json(),
+                "json",
+            )
+            return True, ""
+        except Exception as e:
+            logger.error("Failed to set BBS wallpaper config for user %s: %s", user_id, e)
+            return False, str(e)
+
+    async def load_user_ui_wallpaper_config(self, user_id: str):
+        """Load web UI wallpaper JSON from `ui_wallpaper_config`."""
+        from models.ui_wallpaper_models import (
+            empty_ui_wallpaper_config,
+            parse_ui_wallpaper_config_json,
+            validate_and_normalize_payload,
+        )
+        from services.user_settings_kv_service import get_user_setting
+
+        try:
+            raw = await get_user_setting(user_id, "ui_wallpaper_config")
+            if raw and str(raw).strip():
+                parsed = parse_ui_wallpaper_config_json(str(raw))
+                if parsed:
+                    norm, err = validate_and_normalize_payload(parsed)
+                    if norm is not None:
+                        return norm
+                    logger.warning(
+                        "Invalid ui_wallpaper_config for user %s: %s",
+                        user_id,
+                        err or "unknown",
+                    )
+            return empty_ui_wallpaper_config()
+        except Exception as e:
+            logger.warning("Failed to load ui_wallpaper_config for user %s: %s", user_id, e)
+            from models.ui_wallpaper_models import empty_ui_wallpaper_config
+
+            return empty_ui_wallpaper_config()
+
+    async def get_user_ui_wallpaper_bundle(self, user_id: str) -> Dict[str, Any]:
+        """Full config for Settings UI and clients."""
+        from models.ui_wallpaper_models import UI_WALLPAPER_BUILTIN_KEYS
+
+        cfg = await self.load_user_ui_wallpaper_config(user_id)
+        return {
+            "config": cfg.model_dump(),
+            "allowed_builtin_keys": sorted(UI_WALLPAPER_BUILTIN_KEYS),
+        }
+
+    async def set_user_ui_wallpaper_config(self, user_id: str, config: Any) -> Tuple[bool, str]:
+        """Persist UI wallpaper JSON. Returns (success, error_message)."""
+        from models.ui_wallpaper_models import validate_and_normalize_payload
+        from services.user_settings_kv_service import set_user_setting
+
+        norm, err = validate_and_normalize_payload(config)
+        if norm is None:
+            return False, err or "Invalid config"
+        try:
+            await set_user_setting(
+                user_id,
+                "ui_wallpaper_config",
+                norm.model_dump_json(),
+                "json",
+            )
+            return True, ""
+        except Exception as e:
+            logger.error("Failed to set ui_wallpaper_config for user %s: %s", user_id, e)
+            return False, str(e)
+
     async def get_user_phone_number(self, user_id: str) -> Optional[str]:
         """Get user's phone number."""
         try:
@@ -1049,11 +1246,12 @@ class SettingsService:
         """Get all facts for a user, ordered by category then fact_key. Includes source, confidence, expires_at for formatting."""
         try:
             rows = await fetch_all(
-                """SELECT fact_key, value, category, created_at, updated_at,
+                """SELECT id, fact_key, value, category, created_at, updated_at,
                    COALESCE(source, 'user_manual') AS source,
                    COALESCE(confidence, 1.0) AS confidence,
                    expires_at,
-                   embedding
+                   embedding,
+                   theme_id
                    FROM user_facts WHERE user_id = $1 ORDER BY category, fact_key""",
                 user_id,
             )
@@ -1069,10 +1267,12 @@ class SettingsService:
                     out = []
                     for r in (rows or []):
                         d = dict(r)
+                        d.setdefault("id", None)
                         d.setdefault("source", "user_manual")
                         d.setdefault("confidence", 1.0)
                         d.setdefault("expires_at", None)
                         d.setdefault("embedding", None)
+                        d.setdefault("theme_id", None)
                         out.append(d)
                     return out
                 except Exception as fallback_e:

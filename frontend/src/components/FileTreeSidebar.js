@@ -51,7 +51,6 @@ import {
   RssFeed,
   ChevronLeft,
   ChevronRight,
-  Newspaper,
   FindInPage,
   Block,
   Audiotrack,
@@ -60,7 +59,12 @@ import {
   AccountTree,
   Hub,
   Search,
-  DoneAll
+  DoneAll,
+  People,
+  IosShare,
+  Lock,
+  LockOpen,
+  HelpOutline,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -72,11 +76,20 @@ import DocumentMetadataPane from './DocumentMetadataPane';
 import FolderMetadataPane from './FolderMetadataPane';
 import rssService from '../services/rssService';
 import DataWorkspacesSection from './data_workspace/DataWorkspacesSection';
+import ArtifactLibrarySection from './ArtifactLibrarySection';
+import EbooksOpdsSidebarSection from './EbooksOpdsSidebarSection';
 import ImageMetadataModal from './images/ImageMetadataModal';
 import DescribeFolderImagesDialog from './images/DescribeFolderImagesDialog';
 import DocumentSearchOverlay from './DocumentSearchOverlay';
+import EncryptedDocumentDialog from './EncryptedDocumentDialog';
+import {
+  HELP_TOPIC_DOCUMENT_ENCRYPTION,
+  openHelpTopic,
+} from '../constants/helpTopics';
 import { documentDiffStore } from '../services/documentDiffStore';
+import { devLog } from '../utils/devConsole';
 import { formatInstantDateTime } from '../utils/userTimeDisplay';
+import DocumentSharingDialog from './DocumentSharingDialog';
 
 // Helper function to filter out .metadata.json files from document lists
 const filterMetadataFiles = (documents) => {
@@ -85,6 +98,41 @@ const filterMetadataFiles = (documents) => {
     const filename = doc?.filename || '';
     return !filename.toLowerCase().endsWith('.metadata.json');
   });
+};
+
+/**
+ * Merge POST /api/folders/contents/batch response into folderContents state.
+ * @param {object} prev - previous folderContents map
+ * @param {object} batchResponse - { contents: { [id]: folderPayload }, errors?: {} }
+ * @param {{ allowEmptyOverwrite?: boolean }} [options] - if true, always apply server empty lists (e.g. tree refresh)
+ */
+const mergeBatchFolderContents = (prev, batchResponse, options = {}) => {
+  const allowEmptyOverwrite = Boolean(options.allowEmptyOverwrite);
+  if (!batchResponse?.contents || typeof batchResponse.contents !== 'object') {
+    return prev;
+  }
+  const newContents = { ...prev };
+  Object.entries(batchResponse.contents).forEach(([folderId, contents]) => {
+    if (!contents) return;
+    const docs = filterMetadataFiles(contents.documents || []);
+    const subs = Array.isArray(contents.subfolders) ? contents.subfolders : [];
+    const existing = prev[folderId];
+    if (
+      !allowEmptyOverwrite &&
+      existing &&
+      (existing.documents?.length > 0 || existing.subfolders?.length > 0) &&
+      docs.length === 0 &&
+      subs.length === 0
+    ) {
+      return;
+    }
+    newContents[folderId] = {
+      ...contents,
+      documents: docs,
+      subfolders: subs
+    };
+  });
+  return newContents;
 };
 
 /** Group RSS feeds by feed.category for sidebar hierarchy (virtual folders only). */
@@ -144,13 +192,43 @@ async function markAllRssFeedsReadSequential(feedIds) {
   return { total: ids.length, failed };
 }
 
+/** Values that map to document_metadata.processing_status; do not overwrite with WebSocket notification statuses. */
+const PROCESSING_STATUSES = new Set([
+  'pending',
+  'uploading',
+  'processing',
+  'embedding',
+  'completed',
+  'failed',
+]);
+
+const FILE_TREE_TOAST_STYLE_ID = 'bastion-filetree-toast-keyframes';
+const FOLDER_WS_CONTENTS_DEBOUNCE_MS = 400;
+const FILE_TREE_TOAST_BATCH_MS = 450;
+
+function ensureFileTreeToastKeyframes() {
+  if (typeof document === 'undefined') return;
+  if (document.getElementById(FILE_TREE_TOAST_STYLE_ID)) return;
+  const style = document.createElement('style');
+  style.id = FILE_TREE_TOAST_STYLE_ID;
+  style.textContent = `
+    @keyframes bastionFileTreeToastSlideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 const FileTreeSidebar = ({ 
-  selectedFolderId, 
+  selectedFolderId,
+  selectedDocumentId,
   onFolderSelect, 
   onFileSelect,
   onRSSFeedClick,
   onRSSCategoryClick,
   onAddRSSFeed,
+  onOPDSHubClick,
   width = 280,
   isCollapsed: collapsedProp,
   onToggleCollapse
@@ -178,6 +256,10 @@ const FileTreeSidebar = ({
   });
   const [contextMenu, setContextMenu] = useState(null);
   const [contextMenuTarget, setContextMenuTarget] = useState(null);
+  const [sharingDialog, setSharingDialog] = useState(null);
+  const [sharedMeOpen, setSharedMeOpen] = useState(true);
+  const [expandedSharedFolders, setExpandedSharedFolders] = useState(() => new Set());
+  const [sharedFolderContents, setSharedFolderContents] = useState({});
   const [vectorizationSubmenu, setVectorizationSubmenu] = useState(null);
   const [imageMetadataModalOpen, setImageMetadataModalOpen] = useState(false);
   const [imageMetadataDocument, setImageMetadataDocument] = useState(null);
@@ -212,6 +294,11 @@ const FileTreeSidebar = ({
   const [moveDialogOpen, setMoveDialogOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState(null); // { type: 'folder'|'file', data }
   const [moveDestinationId, setMoveDestinationId] = useState(null);
+  const [fileEncryptionDialog, setFileEncryptionDialog] = useState({
+    open: false,
+    mode: 'encrypt',
+    documentId: null,
+  });
   const [rssFeedsExpanded, setRssFeedsExpanded] = useState(false);
   const [expandedRSSCategories, setExpandedRSSCategories] = useState(() => new Set());
   const [rssBulkBusy, setRssBulkBusy] = useState(false);
@@ -231,6 +318,12 @@ const FileTreeSidebar = ({
   const folderWsRef = useRef(null);
   const folderReconnectAttemptsRef = useRef(0);
   const folderReconnectTimeoutRef = useRef(null);
+  /** Debounce getFolderContents when many document_status_update events hit the same folder. */
+  const folderContentsRefreshTimersRef = useRef({});
+  const completionToastBatchRef = useRef({ names: [], timer: null });
+  const fileUploadedToastBatchRef = useRef({ names: [], timer: null });
+  const fileProcessedToastBatchRef = useRef({ names: [], timer: null });
+  const uploadingInfoToastBatchRef = useRef({ count: 0, timer: null });
   useEffect(() => {
     expandedFoldersRef.current = expandedFolders;
   }, [expandedFolders]);
@@ -254,6 +347,7 @@ const FileTreeSidebar = ({
 
   // Toast notification function
   const showToast = useCallback((message, type = 'info') => {
+    ensureFileTreeToastKeyframes();
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
@@ -268,27 +362,96 @@ const FileTreeSidebar = ({
       z-index: 9999;
       font-size: 14px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-      animation: slideIn 0.3s ease-out;
+      animation: bastionFileTreeToastSlideIn 0.3s ease-out;
     `;
-    
-    // Add animation keyframes
-    const style = document.createElement('style');
-    style.textContent = `
-      @keyframes slideIn {
-        from { transform: translateX(100%); opacity: 0; }
-        to { transform: translateX(0); opacity: 1; }
-      }
-    `;
-    document.head.appendChild(style);
-    
+
     document.body.appendChild(toast);
-    
+
     setTimeout(() => {
       if (document.body.contains(toast)) {
         document.body.removeChild(toast);
       }
     }, 4000);
   }, []);
+
+  const queueProcessingCompletedToast = useCallback(
+    (displayName) => {
+      const batch = completionToastBatchRef.current;
+      batch.names.push(displayName);
+      if (batch.timer) clearTimeout(batch.timer);
+      batch.timer = setTimeout(() => {
+        batch.timer = null;
+        const names = batch.names;
+        batch.names = [];
+        if (names.length === 0) return;
+        if (names.length === 1) {
+          showToast(`✅ "${names[0]}" processing completed!`, 'success');
+        } else {
+          showToast(`✅ ${names.length} files finished processing`, 'success');
+        }
+      }, FILE_TREE_TOAST_BATCH_MS);
+    },
+    [showToast]
+  );
+
+  const queueFileUploadedBurstToast = useCallback(
+    (filename) => {
+      const batch = fileUploadedToastBatchRef.current;
+      batch.names.push(filename || 'File');
+      if (batch.timer) clearTimeout(batch.timer);
+      batch.timer = setTimeout(() => {
+        batch.timer = null;
+        const names = batch.names;
+        batch.names = [];
+        if (names.length === 0) return;
+        if (names.length === 1) {
+          showToast(`📄 ${names[0]} uploaded`, 'success');
+        } else {
+          showToast(`📄 ${names.length} files uploaded`, 'success');
+        }
+      }, FILE_TREE_TOAST_BATCH_MS);
+    },
+    [showToast]
+  );
+
+  const queueFileProcessedBurstToast = useCallback(
+    (filename) => {
+      const batch = fileProcessedToastBatchRef.current;
+      batch.names.push(filename || 'File');
+      if (batch.timer) clearTimeout(batch.timer);
+      batch.timer = setTimeout(() => {
+        batch.timer = null;
+        const names = batch.names;
+        batch.names = [];
+        if (names.length === 0) return;
+        if (names.length === 1) {
+          showToast(`✅ ${names[0]} processed successfully`, 'success');
+        } else {
+          showToast(`✅ ${names.length} files processed successfully`, 'success');
+        }
+      }, FILE_TREE_TOAST_BATCH_MS);
+    },
+    [showToast]
+  );
+
+  const queueUploadingInfoBurstToast = useCallback(
+    (filename) => {
+      const batch = uploadingInfoToastBatchRef.current;
+      batch.count += 1;
+      if (batch.timer) clearTimeout(batch.timer);
+      batch.timer = setTimeout(() => {
+        batch.timer = null;
+        const n = batch.count;
+        batch.count = 0;
+        if (n === 1) {
+          showToast(`📤 ${filename || 'File'} uploading...`, 'info');
+        } else {
+          showToast(`📤 Uploading ${n} files...`, 'info');
+        }
+      }, FILE_TREE_TOAST_BATCH_MS);
+    },
+    [showToast]
+  );
 
   // WebSocket connection for real-time updates
   useEffect(() => {
@@ -314,16 +477,57 @@ const FileTreeSidebar = ({
       }
 
       ws.onopen = () => {
-        console.log('📡 Connected to folder updates WebSocket');
+        devLog('📡 Connected to folder updates WebSocket');
         folderReconnectAttemptsRef.current = 0;
+      };
+
+      const scheduleFolderContentsRefresh = (folderId) => {
+        const timers = folderContentsRefreshTimersRef.current;
+        if (timers[folderId]) clearTimeout(timers[folderId]);
+        timers[folderId] = setTimeout(() => {
+          delete timers[folderId];
+          apiService
+            .getFolderContents(folderId)
+            .then((contents) => {
+              setFolderContents((prev) => {
+                const normalizedContents = {
+                  ...contents,
+                  documents: filterMetadataFiles(
+                    contents.documents?.map((doc) => ({
+                      ...doc,
+                      status: doc.status || doc.processing_status || null,
+                      processing_status: doc.processing_status || doc.status || null,
+                    })) || []
+                  ),
+                };
+                return { ...prev, [folderId]: normalizedContents };
+              });
+            })
+            .catch((error) => {
+              console.error(`Failed to refresh folder ${folderId}:`, error);
+            });
+        }, FOLDER_WS_CONTENTS_DEBOUNCE_MS);
       };
 
       ws.onmessage = (event) => {
         try {
           const update = JSON.parse(event.data);
-          
+
+          if (update.type === 'document_share_update') {
+            queryClient.invalidateQueries(['shared-with-me', user?.user_id]);
+            return;
+          }
+
           if (update.type === 'document_status_update') {
-            console.log('🔄 Received document status update:', update);
+            devLog('🔄 Received document status update:', update);
+
+            if (update.status === 'lock_changed' && update.document_id) {
+              window.dispatchEvent(
+                new CustomEvent('bastion-document-lock-changed', {
+                  detail: { document_id: update.document_id },
+                })
+              );
+            }
 
             // Update has_pending_proposals for a document across all folder state (e.g. after apply/reject)
             if (update.document_id != null && typeof update.has_pending_proposals === 'boolean') {
@@ -346,88 +550,37 @@ const FileTreeSidebar = ({
               });
             }
 
-            // Update specific folder contents when document status changes - REAL-TIME!
+            // Coalesce folder refetches when many documents complete in one burst (reduces UI + network load).
             if (update.folder_id) {
-              console.log(`📁 Real-time status update for folder ${update.folder_id}`);
-              
-              // Immediately update folder contents to show new status
-              apiService.getFolderContents(update.folder_id)
-                .then(contents => {
-                  setFolderContents(prev => {
-                    // Ensure documents have normalized status field (create new object to trigger re-render)
-                    const normalizedContents = {
-                      ...contents,
-                      documents: filterMetadataFiles(contents.documents?.map(doc => ({
-                        ...doc,
-                        status: doc.status || doc.processing_status || null,
-                        processing_status: doc.processing_status || doc.status || null
-                      })) || [])
-                    };
-                    const newContents = { ...prev, [update.folder_id]: normalizedContents };
-                    console.log(`✅ Real-time folder contents updated!`, {
-                      folderId: update.folder_id,
-                      documentCount: normalizedContents.documents?.length || 0,
-                      documents: normalizedContents.documents?.map(d => ({ 
-                        filename: d.filename, 
-                        status: d.status || d.processing_status,
-                        actual_status_field: d.status,
-                        actual_processing_status_field: d.processing_status
-                      }))
-                    });
-                    return newContents;
-                  });
-                  
-                  // Remove from processing files list AFTER folder contents are updated
-                  // Use requestAnimationFrame to ensure folder contents update is rendered first
-                  if (update.status === 'completed') {
-                    requestAnimationFrame(() => {
-                      setProcessingFiles(prev => {
-                        // Find the file to remove (match by filename or document_id)
-                        const fileToRemove = prev.find(f => 
-                          (update.filename && f.filename === update.filename) ||
-                          (update.document_id && f.documentId === update.document_id)
-                        );
-                        
-                        if (fileToRemove) {
-                          const displayName = update.filename || fileToRemove.filename || 'File';
-                          showToast(`✅ "${displayName}" processing completed!`, 'success');
-                          // Remove the matching file
-                          return prev.filter(f => 
-                            !((update.filename && f.filename === update.filename) ||
-                              (update.document_id && f.documentId === update.document_id))
-                          );
-                        }
-                        return prev;
-                      });
-                    });
-                  }
-                })
-                .catch(error => {
-                  console.error(`❌ Failed to refresh folder ${update.folder_id}:`, error);
-                  // Still remove from processing list even if folder refresh fails
-                  if (update.status === 'completed') {
-                    setProcessingFiles(prev => {
-                      const before = prev.length;
-                      const after = prev.filter(f => 
-                        !(update.filename && f.filename === update.filename) &&
-                        !(update.document_id && f.documentId === update.document_id)
-                      );
-                      // Get filename for toast (use from update or find in processingFiles)
-                      const completedFile = prev.find(f => 
+              devLog(`📁 Real-time status update for folder ${update.folder_id}`);
+              scheduleFolderContentsRefresh(update.folder_id);
+
+              if (update.status === 'completed') {
+                requestAnimationFrame(() => {
+                  setProcessingFiles((prev) => {
+                    const fileToRemove = prev.find(
+                      (f) =>
                         (update.filename && f.filename === update.filename) ||
                         (update.document_id && f.documentId === update.document_id)
+                    );
+                    if (fileToRemove) {
+                      const displayName = update.filename || fileToRemove.filename || 'File';
+                      queueProcessingCompletedToast(displayName);
+                      return prev.filter(
+                        (f) =>
+                          !(
+                            (update.filename && f.filename === update.filename) ||
+                            (update.document_id && f.documentId === update.document_id)
+                          )
                       );
-                      const displayName = update.filename || completedFile?.filename || 'File';
-                      if (before > after.length) {
-                        showToast(`✅ "${displayName}" processing completed!`, 'success');
-                      }
-                      return after;
-                    });
-                  }
+                    }
+                    return prev;
+                  });
                 });
+              }
             } else {
               // Folder ID missing - try to find and update the document in loaded folder contents
-              console.log(`⚠️ Document status update received without folder_id, searching loaded folders...`);
+              devLog(`⚠️ Document status update received without folder_id, searching loaded folders...`);
               
               // Try to update in-place if document is in loaded folder contents (optimistic update)
               setFolderContents(prev => {
@@ -443,13 +596,17 @@ const FileTreeSidebar = ({
                     );
                     
                     if (docIndex !== -1) {
-                      // Found the document - update its status
+                      // Found the document - update its status only for real processing states (not lock_changed, edit_proposal*, etc.)
                       found = true;
-                      const updatedDoc = {
-                        ...folder.documents[docIndex],
-                        status: update.status,
-                        processing_status: update.status
-                      };
+                      const isProcessingStatus =
+                        update.status != null && PROCESSING_STATUSES.has(String(update.status).toLowerCase());
+                      const updatedDoc = isProcessingStatus
+                        ? {
+                            ...folder.documents[docIndex],
+                            status: update.status,
+                            processing_status: update.status,
+                          }
+                        : folder.documents[docIndex];
                       newContents[folderId] = {
                         ...folder,
                         documents: [
@@ -458,7 +615,7 @@ const FileTreeSidebar = ({
                           ...folder.documents.slice(docIndex + 1)
                         ]
                       };
-                      console.log(`✅ Updated document status in folder ${folderId} (found in loaded contents)`);
+                      devLog(`✅ Updated document status in folder ${folderId} (found in loaded contents)`);
                       break;
                     }
                   }
@@ -466,7 +623,7 @@ const FileTreeSidebar = ({
                 
                 // If not found, we'll invalidate queries below to ensure UI updates
                 if (!found) {
-                  console.log(`⚠️ Document not found in loaded contents, will invalidate queries...`);
+                  devLog(`⚠️ Document not found in loaded contents, will invalidate queries...`);
                 }
                 
                 return newContents;
@@ -489,7 +646,7 @@ const FileTreeSidebar = ({
                   
                   if (fileToRemove) {
                     const displayName = update.filename || fileToRemove.filename || 'File';
-                    showToast(`✅ "${displayName}" processing completed!`, 'success');
+                    queueProcessingCompletedToast(displayName);
                     // Remove the matching file
                     return prev.filter(f => 
                       !((update.filename && f.filename === update.filename) ||
@@ -501,7 +658,7 @@ const FileTreeSidebar = ({
               }
             }
           } else if (update.type === 'file_deleted') {
-            console.log('🗑️ Received file deleted notification:', update);
+            devLog('🗑️ Received file deleted notification:', update);
             const folderId = update.folder_id;
             const deletedId = update.document_id;
             if (folderId && deletedId) {
@@ -523,7 +680,7 @@ const FileTreeSidebar = ({
             }
 
           } else if (update.type === 'folder_tree_refresh') {
-            console.log('🔄 Received folder tree refresh request:', update);
+            devLog('🔄 Received folder tree refresh request:', update);
             // Folder was deleted from disk but not found in DB - refresh tree to ensure consistency
             queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
             showToast('🔄 Folder tree refreshed', 'info');
@@ -531,29 +688,33 @@ const FileTreeSidebar = ({
             const virtualRoots = new Set(['my_documents_root', 'global_documents_root']);
             const expanded = expandedFoldersRef.current;
             const toRefetch = Array.from(expanded).filter(id => !virtualRoots.has(id));
-            if (toRefetch.length > 0) {
-              Promise.all(
-                toRefetch.map(folderId =>
-                  apiService.getFolderContents(folderId).then(contents => ({ folderId, contents })).catch(() => ({ folderId, contents: null }))
-                )
-              ).then(results => {
-                setFolderContents(prev => {
-                  const next = { ...prev };
-                  results.forEach(({ folderId, contents }) => {
-                    if (!contents) return;
-                    next[folderId] = {
+            if (toRefetch.length > 1) {
+              apiService
+                .getFolderContentsBatch(toRefetch)
+                .then((batch) => {
+                  setFolderContents((prev) => mergeBatchFolderContents(prev, batch, { allowEmptyOverwrite: true }));
+                })
+                .catch(() => {});
+            } else if (toRefetch.length === 1) {
+              const folderId = toRefetch[0];
+              apiService
+                .getFolderContents(folderId)
+                .then((contents) => {
+                  if (!contents) return;
+                  setFolderContents((prev) => ({
+                    ...prev,
+                    [folderId]: {
                       ...contents,
                       documents: filterMetadataFiles(contents.documents || []),
                       subfolders: Array.isArray(contents.subfolders) ? contents.subfolders : []
-                    };
-                  });
-                  return next;
-                });
-              });
+                    }
+                  }));
+                })
+                .catch(() => {});
             }
             
           } else if (update.type === 'folder_event') {
-            console.log('🔄 Received folder event notification:', update);
+            devLog('🔄 Received folder event notification:', update);
             
             // Handle different folder events
             if (update.action === 'created') {
@@ -582,12 +743,23 @@ const FileTreeSidebar = ({
               setFolderContents(prev => {
                 const roots = new Set(['my_documents_root', 'global_documents_root']);
                 const expanded = expandedFoldersRef.current;
+                const idsToLoad = [];
                 expanded.forEach(fid => {
                   if (roots.has(fid)) return;
                   const c = prev[fid];
                   const docLen = (c?.documents && c.documents.length) || 0;
                   const subLen = (c?.subfolders && c.subfolders.length) || 0;
                   if (docLen > 0 || subLen > 0) return;
+                  idsToLoad.push(fid);
+                });
+                if (idsToLoad.length > 1) {
+                  apiService.getFolderContentsBatch(idsToLoad)
+                    .then((batch) => {
+                      setFolderContents(p => mergeBatchFolderContents(p, batch));
+                    })
+                    .catch(() => {});
+                } else if (idsToLoad.length === 1) {
+                  const fid = idsToLoad[0];
                   apiService.getFolderContents(fid)
                     .then(contents => {
                       if (!contents) return;
@@ -604,7 +776,7 @@ const FileTreeSidebar = ({
                       }));
                     })
                     .catch(() => {});
-                });
+                }
                 return prev;
               });
 
@@ -697,14 +869,14 @@ const FileTreeSidebar = ({
                 };
               });
               
-              console.log('✅ Optimistically updated folder tree with new folder');
+              devLog('✅ Optimistically updated folder tree with new folder');
               
               // Auto-expand the parent folder if it exists
               if (update.folder.parent_folder_id) {
                 setExpandedFolders(prev => {
                   const newExpanded = new Set(prev);
                   newExpanded.add(update.folder.parent_folder_id);
-                  console.log(`Auto-expanding parent folder ${update.folder.parent_folder_id} for new subfolder`);
+                  devLog(`Auto-expanding parent folder ${update.folder.parent_folder_id} for new subfolder`);
                   return newExpanded;
                 });
               }
@@ -800,7 +972,7 @@ const FileTreeSidebar = ({
                 };
               });
               
-              console.log('✅ Optimistically updated folder tree - removed deleted folder');
+              devLog('✅ Optimistically updated folder tree - removed deleted folder');
             } else if (update.action === 'renamed') {
               const oldName = update.old_name || 'Folder';
               const newName = update.folder?.name || 'Folder';
@@ -837,7 +1009,7 @@ const FileTreeSidebar = ({
                 };
               });
               
-              console.log('✅ Optimistically updated folder tree - renamed folder');
+              devLog('✅ Optimistically updated folder tree - renamed folder');
             } else if (update.action === 'moved') {
               // Update tree to reflect new parent
               const movedFolder = update.folder;
@@ -909,7 +1081,7 @@ const FileTreeSidebar = ({
               queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
             } else if (update.action === 'file_uploading') {
               const filename = update.filename || 'File';
-              showToast(`📤 ${filename} uploading...`, 'info');
+              queueUploadingInfoBurstToast(filename);
               
               // Optimistic update - add file to folder immediately
               queryClient.setQueryData(['folders', 'contents', update.folder_id], (oldData) => {
@@ -931,10 +1103,10 @@ const FileTreeSidebar = ({
                 };
               });
               
-              console.log('✅ Optimistically added uploading file to folder');
+              devLog('✅ Optimistically added uploading file to folder');
             } else if (update.action === 'file_processed') {
               const filename = update.filename || 'File';
-              showToast(`✅ ${filename} processed successfully`, 'success');
+              queueFileProcessedBurstToast(filename);
               
               // Update file status in folder
               queryClient.setQueryData(['folders', 'contents', update.folder_id], (oldData) => {
@@ -952,7 +1124,7 @@ const FileTreeSidebar = ({
                 };
               });
               
-              console.log('✅ Updated file status to processed');
+              devLog('✅ Updated file status to processed');
             } else if (update.action === 'file_failed') {
               const filename = update.filename || 'File';
               showToast(`❌ ${filename} processing failed`, 'error');
@@ -973,27 +1145,27 @@ const FileTreeSidebar = ({
                 };
               });
               
-              console.log('✅ Updated file status to failed');
+              devLog('✅ Updated file status to failed');
             } else if (update.action === 'file_created') {
               const filename = update.filename || 'File';
-              showToast(`📄 ${filename} uploaded`, 'success');
+              queueFileUploadedBurstToast(filename);
               
               // Refresh folder contents to show the new file
               queryClient.invalidateQueries(['folders', 'contents', update.folder_id]);
-              console.log('✅ Refreshed folder contents due to file creation');
+              devLog('✅ Refreshed folder contents due to file creation');
             }
             
           } else if (update.type === 'folder_update') {
-            console.log('🔄 Received folder structure update:', update);
+            devLog('🔄 Received folder structure update:', update);
             
             // If this is a file creation or processing update, expand the folder and refresh contents
             if (update.action === 'file_created' || update.action === 'file_processed') {
-              console.log(`📁 Auto-expanding folder ${update.folder_id} due to ${update.action}`);
+              devLog(`📁 Auto-expanding folder ${update.folder_id} due to ${update.action}`);
               
               // Show toast notification for new file
               if (update.action === 'file_created') {
                 const fileName = update.metadata?.filename || 'New file';
-                showToast(`📄 ${fileName} added to folder`, 'success');
+                queueFileUploadedBurstToast(fileName);
               }
               
               // Auto-expand the folder
@@ -1025,23 +1197,34 @@ const FileTreeSidebar = ({
                       }
                     };
                   });
-                  console.log(`✅ Updated folder ${update.folder_id} contents AND tree via WebSocket for ${update.action}`);
+                  devLog(`✅ Updated folder ${update.folder_id} contents AND tree via WebSocket for ${update.action}`);
 
                   if (update.metadata?.filename?.toLowerCase().endsWith('.org')) {
                     setHasOrgFiles(true);
-                    console.log('📋 Detected new org file, enabling Org Tools');
+                    devLog('📋 Detected new org file, enabling Org Tools');
                   }
 
                   // Refetch any expanded folder with no/empty cache so tree under e.g. Reference repopulates after agent-created file
                   setFolderContents(prev => {
                     const roots = new Set(['my_documents_root', 'global_documents_root']);
                     const expanded = expandedFoldersRef.current;
+                    const idsToLoad = [];
                     expanded.forEach(fid => {
                       if (roots.has(fid)) return;
                       const c = prev[fid];
                       const docLen = (c?.documents && c.documents.length) || 0;
                       const subLen = (c?.subfolders && c.subfolders.length) || 0;
                       if (docLen > 0 || subLen > 0) return;
+                      idsToLoad.push(fid);
+                    });
+                    if (idsToLoad.length > 1) {
+                      apiService.getFolderContentsBatch(idsToLoad)
+                        .then((batch) => {
+                          setFolderContents(p => mergeBatchFolderContents(p, batch));
+                        })
+                        .catch(() => {});
+                    } else if (idsToLoad.length === 1) {
+                      const fid = idsToLoad[0];
                       apiService.getFolderContents(fid)
                         .then(res => {
                           if (!res) return;
@@ -1058,7 +1241,7 @@ const FileTreeSidebar = ({
                           }));
                         })
                         .catch(() => {});
-                    });
+                    }
                     return prev;
                   });
                 })
@@ -1076,7 +1259,7 @@ const FileTreeSidebar = ({
       };
 
       ws.onclose = (event) => {
-        console.log(`📡 Disconnected from folder updates WebSocket. Code: ${event.code}, Reason: ${event.reason}`);
+        devLog(`📡 Disconnected from folder updates WebSocket. Code: ${event.code}, Reason: ${event.reason}`);
         folderWsRef.current = null;
 
         if (event.code === 1008) {
@@ -1091,7 +1274,7 @@ const FileTreeSidebar = ({
         }
         folderReconnectAttemptsRef.current = attempts + 1;
         const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
-        console.log(`📡 Folder WebSocket: reconnecting in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+        devLog(`📡 Folder WebSocket: reconnecting in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
         folderReconnectTimeoutRef.current = setTimeout(connect, delay);
       };
 
@@ -1103,6 +1286,24 @@ const FileTreeSidebar = ({
     connect();
 
     return () => {
+      Object.values(folderContentsRefreshTimersRef.current).forEach((t) => clearTimeout(t));
+      folderContentsRefreshTimersRef.current = {};
+      const c = completionToastBatchRef.current;
+      if (c.timer) clearTimeout(c.timer);
+      c.timer = null;
+      c.names = [];
+      const u = fileUploadedToastBatchRef.current;
+      if (u.timer) clearTimeout(u.timer);
+      u.timer = null;
+      u.names = [];
+      const p = fileProcessedToastBatchRef.current;
+      if (p.timer) clearTimeout(p.timer);
+      p.timer = null;
+      p.names = [];
+      const up = uploadingInfoToastBatchRef.current;
+      if (up.timer) clearTimeout(up.timer);
+      up.timer = null;
+      up.count = 0;
       if (folderReconnectTimeoutRef.current) {
         clearTimeout(folderReconnectTimeoutRef.current);
         folderReconnectTimeoutRef.current = null;
@@ -1112,7 +1313,17 @@ const FileTreeSidebar = ({
         folderWsRef.current = null;
       }
     };
-  }, [user?.user_id, apiService, showToast]); // Add showToast to dependencies
+  }, [
+    user?.user_id,
+    user?.role,
+    apiService,
+    queryClient,
+    showToast,
+    queueProcessingCompletedToast,
+    queueFileUploadedBurstToast,
+    queueFileProcessedBurstToast,
+    queueUploadingInfoBurstToast,
+  ]);
 
   // Queries
   const { data: folderTree, isLoading, error, refetch } = useQuery(
@@ -1126,11 +1337,65 @@ const FileTreeSidebar = ({
     }
   );
 
+  const { data: sharedWithMeData, refetch: refetchSharedWithMe } = useQuery(
+    ['shared-with-me', user?.user_id],
+    () => apiService.getSharedWithMe(),
+    {
+      enabled: !!user?.user_id,
+      refetchOnWindowFocus: false,
+      staleTime: 30000,
+    }
+  );
+
+  const canShareUserOwnedFolder = useCallback(
+    (folder) => {
+      if (!folder || !user?.user_id) return false;
+      if (folder.folder_id?.includes('_root')) return false;
+      if (folder.is_virtual_source) return false;
+      if (folder.collection_type !== 'user') return false;
+      return folder.user_id === user.user_id;
+    },
+    [user]
+  );
+
+  const canShareUserOwnedFile = useCallback(
+    (fileOrTarget) => {
+      if (!fileOrTarget || !user?.user_id) return false;
+      const coll = fileOrTarget.collection_type;
+      const owner = fileOrTarget.user_id;
+      return coll === 'user' && owner === user.user_id;
+    },
+    [user]
+  );
+
+  const handleSharedFolderToggle = useCallback(async (folderId) => {
+    if (!folderId) return;
+    let shouldLoad = false;
+    setExpandedSharedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(folderId)) {
+        next.delete(folderId);
+        shouldLoad = false;
+      } else {
+        next.add(folderId);
+        shouldLoad = true;
+      }
+      return next;
+    });
+    if (!shouldLoad) return;
+    try {
+      const c = await apiService.getFolderContents(folderId);
+      setSharedFolderContents((p) => (p[folderId] ? p : { ...p, [folderId]: c }));
+    } catch (e) {
+      console.error('Failed to load shared folder contents', e);
+    }
+  }, []);
+
   // Load contents for expanded folders on mount/tree change
   useEffect(() => {
     if (!folderTree || !expandedFolders.size) return;
     
-    console.log('🔄 Loading contents for expanded folders:', Array.from(expandedFolders));
+    devLog('🔄 Loading contents for expanded folders:', Array.from(expandedFolders));
     
     // Create a set of valid folder IDs from the current folder tree
     const validFolderIds = new Set();
@@ -1188,7 +1453,7 @@ const FileTreeSidebar = ({
     );
     
     if (invalidExpandedFolders.length > 0) {
-      console.log('🧹 Removing invalid expanded folders:', invalidExpandedFolders);
+      devLog('🧹 Removing invalid expanded folders:', invalidExpandedFolders);
       setExpandedFolders(prev => {
         const newExpanded = new Set(prev);
         invalidExpandedFolders.forEach(folderId => newExpanded.delete(folderId));
@@ -1210,40 +1475,15 @@ const FileTreeSidebar = ({
     }
     
     if (realFolders.length > 0) {
-      console.log(`📁 Auto-loading contents for ${realFolders.length} expanded folders`);
-      
-      // Load all folder contents in parallel
-      Promise.all(
-        realFolders.map(async (folderId) => {
-          try {
-            const contents = await apiService.getFolderContents(folderId);
-            return { folderId, contents };
-          } catch (error) {
-            console.error(`Failed to auto-load contents for folder ${folderId}:`, error);
-            return { folderId, contents: null };
-          }
+      devLog(`📁 Auto-loading contents for ${realFolders.length} expanded folders`);
+      apiService
+        .getFolderContentsBatch(realFolders)
+        .then((batchResponse) => {
+          setFolderContents((prev) => mergeBatchFolderContents(prev, batchResponse));
         })
-      ).then(results => {
-        // Update folder contents in batch. Don't overwrite non-empty with empty (avoids race where stale response clears subfolders).
-        setFolderContents(prev => {
-          const newContents = { ...prev };
-          results.forEach(({ folderId, contents }) => {
-            if (!contents) return;
-            const docs = filterMetadataFiles(contents.documents || []);
-            const subs = Array.isArray(contents.subfolders) ? contents.subfolders : [];
-            const existing = prev[folderId];
-            if (existing && (existing.documents?.length > 0 || existing.subfolders?.length > 0) && docs.length === 0 && subs.length === 0) {
-              return;
-            }
-            newContents[folderId] = {
-              ...contents,
-              documents: docs,
-              subfolders: subs
-            };
-          });
-          return newContents;
+        .catch((error) => {
+          console.error('Failed to auto-load folder contents batch:', error);
         });
-      });
     }
   }, [folderTree, expandedFolders, folderContents]); // folderContents: don't treat lazy-loaded subfolders as invalid
 
@@ -1288,7 +1528,7 @@ const FileTreeSidebar = ({
       staleTime: 30000,
       enabled: !!user?.user_id,
       onSuccess: (data) => {
-        console.log('📄 User documents loaded:', data);
+        devLog('📄 User documents loaded:', data);
         // Check if any org files exist
         // **TRUST BUST!** The API returns {documents: [...], total: N}, not a direct array!
         const documents = data?.documents || [];
@@ -1364,7 +1604,7 @@ const FileTreeSidebar = ({
         const hasOrg = response?.has_org === true;
         setHasOrgFiles(hasOrg);
         if (response != null) {
-          console.log('📋 Found org files?', hasOrg);
+          devLog('📋 Found org files?', hasOrg);
         }
       } catch (error) {
         console.error('❌ Failed to check for org files:', error);
@@ -1435,9 +1675,9 @@ const FileTreeSidebar = ({
       refetchOnWindowFocus: false,
       staleTime: 30000, // 30 seconds
       onSuccess: (data) => {
-        console.log('📰 RSS categorized feeds loaded:', data);
-        console.log('📰 User feeds:', data?.user_feeds?.length || 0);
-        console.log('📰 Global feeds:', data?.global_feeds?.length || 0);
+        devLog('📰 RSS categorized feeds loaded:', data);
+        devLog('📰 User feeds:', data?.user_feeds?.length || 0);
+        devLog('📰 Global feeds:', data?.global_feeds?.length || 0);
       },
       onError: (error) => {
         console.error('❌ Failed to load categorized RSS feeds:', error);
@@ -1819,7 +2059,7 @@ const FileTreeSidebar = ({
   const uploadMutation = useMutation(
     ({ formData, isGlobal, filename }) => {
       const endpoint = isGlobal ? '/api/documents/upload' : '/api/user/documents/upload';
-      console.log(`📤 Using ${isGlobal ? 'admin' : 'user'} upload endpoint: ${endpoint}`);
+      devLog(`📤 Using ${isGlobal ? 'admin' : 'user'} upload endpoint: ${endpoint}`);
       
       return apiService.request(endpoint, {
         method: 'POST',
@@ -1829,7 +2069,7 @@ const FileTreeSidebar = ({
     },
     {
       onSuccess: (result, variables) => {
-        console.log('✅ File uploaded successfully:', result);
+        devLog('✅ File uploaded successfully:', result);
         
         // **ROOSEVELT STATUS-AWARE PROCESSING INDICATOR!**
         // Check if file is already completed (e.g., org files are instant)
@@ -1837,11 +2077,11 @@ const FileTreeSidebar = ({
         
         if (isAlreadyComplete) {
           // File processed instantly - no spinner needed!
-          console.log(`"${variables.filename}" processed instantly (${result.status})`);
+          devLog(`"${variables.filename}" processed instantly (${result.status})`);
           showToast(`✅ "${variables.filename}" uploaded and ready!`, 'success');
         } else {
           // File still processing - show spinner
-          console.log(`🔄 "${variables.filename}" processing in background (${result.status})`);
+          devLog(`🔄 "${variables.filename}" processing in background (${result.status})`);
           showToast(`✅ "${variables.filename}" uploaded successfully! Processing in background...`, 'success');
           
           // Add file to processing list
@@ -1857,7 +2097,7 @@ const FileTreeSidebar = ({
             apiService.get(`/api/user/documents/${result.document_id}`)
               .then(doc => {
                 if (doc.processing_status === 'completed' || doc.processing_status === 'failed') {
-                  console.log(`Fallback: manually removing "${variables.filename}" from processing (status: ${doc.processing_status})`);
+                  devLog(`Fallback: manually removing "${variables.filename}" from processing (status: ${doc.processing_status})`);
                   setProcessingFiles(prev => prev.filter(f => f.documentId !== result.document_id));
                 }
               })
@@ -1889,7 +2129,7 @@ const FileTreeSidebar = ({
         
         // Get the target folder ID
         const targetFolderId = contextMenuTarget?.folder_id || uploadTargetFolder?.folder_id;
-        console.log('🎯 Upload success - target folder:', targetFolderId);
+        devLog('🎯 Upload success - target folder:', targetFolderId);
         
         if (targetFolderId) {
           // Expand ancestor chain including target
@@ -1938,11 +2178,67 @@ const FileTreeSidebar = ({
   );
 
   const reprocessDocumentMutation = useMutation(
-    (documentId) => apiService.reprocessUserDocument(documentId),
+    ({ documentId }) => apiService.reprocessUserDocument(documentId),
     {
-      onSuccess: () => {
+      onMutate: async ({ documentId, folderId }) => {
+        if (!folderId) return;
+        setFolderContents((prev) => {
+          const cur = prev[folderId];
+          if (!cur?.documents?.length) return prev;
+          return {
+            ...prev,
+            [folderId]: {
+              ...cur,
+              documents: cur.documents.map((d) =>
+                d.document_id === documentId
+                  ? { ...d, status: 'processing', processing_status: 'processing' }
+                  : d
+              ),
+            },
+          };
+        });
+      },
+      onSuccess: (_data, { folderId }) => {
         queryClient.invalidateQueries(['folders', 'tree']);
         queryClient.invalidateQueries(['documents', 'root']);
+        queryClient.invalidateQueries(['folders', 'contents']);
+        if (folderId) {
+          apiService
+            .getFolderContents(folderId)
+            .then((contents) => {
+              setFolderContents((prev) => ({
+                ...prev,
+                [folderId]: {
+                  ...contents,
+                  documents: filterMetadataFiles(
+                    (contents.documents || []).map((doc) => ({
+                      ...doc,
+                      status: doc.status || doc.processing_status || null,
+                      processing_status: doc.processing_status || doc.status || null,
+                    }))
+                  ),
+                  subfolders: Array.isArray(contents.subfolders) ? contents.subfolders : [],
+                },
+              }));
+            })
+            .catch(() => {});
+        }
+      },
+      onError: (_err, { folderId }) => {
+        if (!folderId) return;
+        apiService
+          .getFolderContents(folderId)
+          .then((contents) => {
+            setFolderContents((prev) => ({
+              ...prev,
+              [folderId]: {
+                ...contents,
+                documents: filterMetadataFiles(contents.documents || []),
+                subfolders: Array.isArray(contents.subfolders) ? contents.subfolders : [],
+              },
+            }));
+          })
+          .catch(() => {});
       },
     }
   );
@@ -2034,12 +2330,10 @@ const FileTreeSidebar = ({
     (feedId) => rssService.refreshFeed(feedId),
     {
       onSuccess: (data, feedId) => {
-        console.log(`✅ RSS feed ${feedId} refreshed:`, data);
         queryClient.invalidateQueries(['rss', 'feeds']);
         queryClient.invalidateQueries(['rss', 'feeds', 'categorized']);
         queryClient.invalidateQueries(['rss', 'unread-counts']);
-        // Show toast notification
-        // TODO: Add toast notification system
+        showToast(`RSS feed refreshed`, 'success');
       },
       onError: (error, feedId) => {
         console.error(`❌ Failed to refresh RSS feed ${feedId}:`, error);
@@ -2112,12 +2406,6 @@ const FileTreeSidebar = ({
       const feedIds = (globalRSSFeeds || []).map((f) => f.feed_id).filter(Boolean);
       onRSSCategoryClick?.('Global RSS Feeds', feedIds, 'global');
       onFolderSelect?.(folderId);
-    } else if (folderId === 'news_virtual') {
-      try {
-        // Open the headlines tab via TabbedContentManager exposed method
-        const event = new CustomEvent('openNewsHeadlines');
-        window.dispatchEvent(event);
-      } catch {}
     } else {
       onFolderSelect?.(folderId);
     }
@@ -2242,19 +2530,22 @@ const FileTreeSidebar = ({
     // Prevent deletion of virtual root folders
     if (contextMenuTarget.folder_id.includes('_root')) {
       alert('Cannot delete system folders (My Documents, Global Documents)');
+      handleContextMenuClose();
       return;
     }
     
     // Prevent deletion of team root folders (must delete team instead)
     if (contextMenuTarget.collection_type === 'team' && !contextMenuTarget.parent_folder_id) {
       alert('Cannot delete team root folder. Delete the team instead to remove the folder.');
+      handleContextMenuClose();
       return;
     }
     
     if (window.confirm('Are you sure you want to delete this folder and all its contents?')) {
       deleteFolderMutation.mutate(contextMenuTarget.folder_id);
     }
-  }, [contextMenuTarget, deleteFolderMutation]);
+    handleContextMenuClose();
+  }, [contextMenuTarget, deleteFolderMutation, handleContextMenuClose]);
 
   const handleUploadFiles = useCallback(() => {
     if (uploadFiles.length === 0) return;
@@ -2262,8 +2553,8 @@ const FileTreeSidebar = ({
     // Get the target folder ID from context menu or upload dialog
     const targetFolderId = contextMenuTarget?.folder_id || uploadTargetFolder?.folder_id || null;
     
-    console.log('🚀 Uploading files to folder:', targetFolderId, 'Context target:', contextMenuTarget, 'Upload target:', uploadTargetFolder);
-    console.log('📁 Upload target folder details:', {
+    devLog('🚀 Uploading files to folder:', targetFolderId, 'Context target:', contextMenuTarget, 'Upload target:', uploadTargetFolder);
+    devLog('📁 Upload target folder details:', {
       contextMenuTarget: contextMenuTarget ? { id: contextMenuTarget.folder_id, name: contextMenuTarget.name } : null,
       uploadTargetFolder: uploadTargetFolder ? { id: uploadTargetFolder.folder_id, name: uploadTargetFolder.name } : null,
       finalTargetId: targetFolderId
@@ -2291,8 +2582,8 @@ const FileTreeSidebar = ({
       const targetFolder = contextMenuTarget || uploadTargetFolder;
       const isGlobal = targetFolder?.collection_type === 'global';
       
-      console.log(`📁 Upload to ${isGlobal ? 'global' : 'user'} folder:`, targetFolder?.name, `(${targetFolder?.collection_type})`);
-      console.log(`📋 Metadata - category: ${uploadCategory}, tags: ${uploadTags.join(', ')}`);
+      devLog(`📁 Upload to ${isGlobal ? 'global' : 'user'} folder:`, targetFolder?.name, `(${targetFolder?.collection_type})`);
+      devLog(`📋 Metadata - category: ${uploadCategory}, tags: ${uploadTags.join(', ')}`);
       
       uploadMutation.mutate({ formData, isGlobal, filename: file.name });
     });
@@ -2303,11 +2594,18 @@ const FileTreeSidebar = ({
     setUploadTagInput('');
   }, [uploadFiles, uploadMutation, contextMenuTarget, uploadTargetFolder, uploadCategory, uploadTags]);
 
-  const handleReprocessDocument = useCallback((documentId) => {
-    if (window.confirm('Are you sure you want to reprocess this document? This will update its embeddings and metadata.')) {
-      reprocessDocumentMutation.mutate(documentId);
-    }
-  }, [reprocessDocumentMutation]);
+  const handleReprocessDocument = useCallback(
+    (documentId, folderId) => {
+      if (
+        window.confirm(
+          'Are you sure you want to reprocess this document? This will update its embeddings and metadata.'
+        )
+      ) {
+        reprocessDocumentMutation.mutate({ documentId, folderId: folderId ?? null });
+      }
+    },
+    [reprocessDocumentMutation]
+  );
 
   const handleEditMetadata = useCallback((document, event) => {
     setMetadataPane({
@@ -2332,7 +2630,8 @@ const FileTreeSidebar = ({
     if (window.confirm('Are you sure you want to delete this file?')) {
       deleteDocumentMutation.mutate(contextMenuTarget.document_id);
     }
-  }, [contextMenuTarget, deleteDocumentMutation]);
+    handleContextMenuClose();
+  }, [contextMenuTarget, deleteDocumentMutation, handleContextMenuClose]);
 
   const handleRenameFile = useCallback(() => {
     if (!contextMenuTarget?.document_id) return;
@@ -2900,18 +3199,6 @@ const FileTreeSidebar = ({
                 ? 'primary.main' 
                 : 'action.hover',
             },
-            ...(isVirtualRoot && {
-              backgroundColor: theme.palette.mode === 'dark' 
-                ? 'rgba(25, 118, 210, 0.35)' 
-                : 'primary.light',
-              '&:hover': {
-                backgroundColor: 'primary.main',
-              },
-              '& .MuiListItemText-primary': {
-                fontWeight: 'bold',
-                color: 'primary.contrastText',
-              },
-            }),
           }}
           onContextMenu={(e) => handleContextMenu(e, folder)}
           {...longPressHandlers}
@@ -2968,12 +3255,14 @@ const FileTreeSidebar = ({
             </ListItemIcon>
             
             <ListItemIcon sx={{ minWidth: 24 }}>
-              {folder.folder_id === 'news_virtual' ? (
-                <Newspaper color="primary" />
-              ) : isVirtualRoot ? (
-                isExpanded ? <FolderOpen color="inherit" /> : <Folder color="inherit" />
+              {isVirtualRoot ? (
+                isExpanded ? <FolderOpen color="primary" /> : <Folder color="primary" />
               ) : folder.is_virtual_source ? (
-                isExpanded ? <FolderOpen color="success" /> : <Folder color="success" />
+                isExpanded ? (
+                  <FolderOpen color="success" />
+                ) : (
+                  <Folder color="success" />
+                )
               ) : (
                 isExpanded ? <FolderOpen color="primary" /> : <Folder color="primary" />
               )}
@@ -3258,12 +3547,15 @@ const FileTreeSidebar = ({
     userRssByCategory,
     globalRssByCategory,
     rssDisplayTimeFormat,
-    rssDisplayTimeZone
+    rssDisplayTimeZone,
   ]);
 
   // Render file item (parentFolder used for context menu to know collection_type)
   const renderFileItem = useCallback((file, level = 0, parentFolder = null) => {
-    const isSelected = false; // TODO: Implement file selection
+    const isSelected =
+      selectedDocumentId != null &&
+      selectedDocumentId !== '' &&
+      String(file.document_id) === String(selectedDocumentId);
     
     const getFileIcon = (filename, status) => {
       const ext = filename.split('.').pop()?.toLowerCase();
@@ -3363,7 +3655,12 @@ const FileTreeSidebar = ({
       }
     };
 
-    const fileWithFolder = { ...file, folder_id: parentFolder?.folder_id, collection_type: parentFolder?.collection_type };
+    const fileWithFolder = {
+      ...file,
+      folder_id: parentFolder?.folder_id,
+      collection_type: parentFolder?.collection_type ?? file.collection_type,
+      user_id: file.user_id || parentFolder?.user_id,
+    };
     const longPressHandlers = createLongPressHandlers(fileWithFolder);
     const isDragged = draggedItem?.type === 'file' && draggedItem?.id === file.document_id;
 
@@ -3404,9 +3701,18 @@ const FileTreeSidebar = ({
           <ListItemText
             primary={
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                <Typography variant="body2" noWrap sx={{ flex: 1 }}>
+                <Typography
+                  variant="body2"
+                  noWrap
+                  sx={{ flex: 1, opacity: file.is_encrypted ? 0.85 : 1 }}
+                >
                   {file.filename}
                 </Typography>
+                {file.is_encrypted && (
+                  <Tooltip title="Encrypted">
+                    <Lock sx={{ fontSize: 14, color: 'text.secondary', flexShrink: 0 }} />
+                  </Tooltip>
+                )}
                 {(() => {
                   // Check if file is an image with searchable metadata
                   const filename = file.filename || '';
@@ -3444,7 +3750,7 @@ const FileTreeSidebar = ({
         </ListItemButton>
       </ListItem>
     );
-  }, [getEffectiveFileExemption, handleContextMenu, createLongPressHandlers, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem, diffStoreRevision]);
+  }, [getEffectiveFileExemption, handleContextMenu, createLongPressHandlers, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem, diffStoreRevision, selectedDocumentId]);
 
   // Render destination item for Move dialog
   const renderDestinationItem = useCallback((folder, level = 0) => {
@@ -3741,6 +4047,123 @@ const FileTreeSidebar = ({
           </Box>
         )}
 
+        {user?.user_id && (sharedWithMeData?.groups || []).length > 0 && (
+          <List dense disablePadding sx={{ borderTop: 1, borderColor: 'divider', mt: 0.5 }}>
+            <ListItemButton onClick={() => setSharedMeOpen((o) => !o)} sx={{ py: 0.5 }}>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <People fontSize="small" />
+              </ListItemIcon>
+              <ListItemText
+                primary="Shared with me"
+                primaryTypographyProps={{ variant: 'body2', fontWeight: 600 }}
+              />
+              {sharedMeOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+            </ListItemButton>
+            <Collapse in={sharedMeOpen} timeout="auto" unmountOnExit>
+              {(sharedWithMeData.groups || []).map((group) => (
+                <Box key={group.sharer_user_id}>
+                  <ListItem sx={{ py: 0, pl: 2 }}>
+                    <ListItemText
+                      primary={group.sharer_username || group.sharer_user_id}
+                      primaryTypographyProps={{
+                        variant: 'caption',
+                        color: 'text.secondary',
+                        fontWeight: 600,
+                      }}
+                    />
+                  </ListItem>
+                  {(group.items || []).map((item) => {
+                    if (item.item_type === 'folder' && item.folder_id) {
+                      const fid = item.folder_id;
+                      const expanded = expandedSharedFolders.has(fid);
+                      const contents = sharedFolderContents[fid];
+                      return (
+                        <React.Fragment key={`${item.share_id}-${fid}`}>
+                          <ListItemButton
+                            sx={{ pl: 3, py: 0.25 }}
+                            onClick={() => handleSharedFolderToggle(fid)}
+                          >
+                            <ListItemIcon sx={{ minWidth: 28 }}>
+                              {expanded ? (
+                                <FolderOpen fontSize="small" />
+                              ) : (
+                                <Folder fontSize="small" />
+                              )}
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={item.name || item.title || 'Folder'}
+                              secondary={item.share_type === 'write' ? 'Can edit' : 'Read only'}
+                              primaryTypographyProps={{ variant: 'body2' }}
+                              secondaryTypographyProps={{ variant: 'caption' }}
+                            />
+                          </ListItemButton>
+                          <Collapse in={expanded} timeout="auto" unmountOnExit>
+                            <List dense disablePadding component="div">
+                              {filterMetadataFiles(contents?.documents || []).map((doc) => (
+                                <ListItem key={doc.document_id} disablePadding>
+                                  <ListItemButton
+                                    sx={{ pl: 5, py: 0.25 }}
+                                    onClick={() =>
+                                      onFileSelect?.({
+                                        ...doc,
+                                        folder_id: fid,
+                                        user_id: group.sharer_user_id,
+                                        collection_type: 'user',
+                                      })
+                                    }
+                                  >
+                                    <ListItemIcon sx={{ minWidth: 24 }}>
+                                      <InsertDriveFile fontSize="small" />
+                                    </ListItemIcon>
+                                    <ListItemText
+                                      primary={doc.filename}
+                                      primaryTypographyProps={{ variant: 'body2' }}
+                                    />
+                                  </ListItemButton>
+                                </ListItem>
+                              ))}
+                            </List>
+                          </Collapse>
+                        </React.Fragment>
+                      );
+                    }
+                    if (item.item_type === 'document' && item.document_id) {
+                      return (
+                        <ListItem key={`${item.share_id}-${item.document_id}`} disablePadding>
+                          <ListItemButton
+                            sx={{ pl: 3, py: 0.25 }}
+                            onClick={() =>
+                              onFileSelect?.({
+                                document_id: item.document_id,
+                                filename: item.filename || item.name || item.title || 'document',
+                                title: item.title,
+                                folder_id: item.parent_folder_id,
+                                user_id: group.sharer_user_id,
+                                collection_type: 'user',
+                              })
+                            }
+                          >
+                            <ListItemIcon sx={{ minWidth: 28 }}>
+                              <Description fontSize="small" />
+                            </ListItemIcon>
+                            <ListItemText
+                              primary={item.filename || item.title || item.name || 'Document'}
+                              secondary={item.share_type === 'write' ? 'Can edit' : 'Read only'}
+                              primaryTypographyProps={{ variant: 'body2' }}
+                              secondaryTypographyProps={{ variant: 'caption' }}
+                            />
+                          </ListItemButton>
+                        </ListItem>
+                      );
+                    }
+                    return null;
+                  })}
+                </Box>
+              ))}
+            </Collapse>
+          </List>
+        )}
+
         {/* ROOSEVELT'S ORG TOOLS SECTION */}
         {hasOrgFiles && (
           <>
@@ -3760,7 +4183,7 @@ const FileTreeSidebar = ({
               >
                 {orgToolsExpanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
                 <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: '0.75rem', textTransform: 'uppercase', ml: 0.5 }}>
-                  🔧 Org Tools
+                  Org Tools
                 </Typography>
               </Box>
               <Collapse in={orgToolsExpanded} timeout="auto">
@@ -3867,32 +4290,23 @@ const FileTreeSidebar = ({
           </>
         )}
 
+        {/* ARTIFACT LIBRARY SECTION */}
+        <ArtifactLibrarySection
+          onArtifactClick={(artifact) => {
+            if (window.tabbedContentManagerRef?.openArtifact) {
+              window.tabbedContentManagerRef.openArtifact(artifact.id, artifact.title);
+            }
+          }}
+        />
+
+        <EbooksOpdsSidebarSection onOpenHub={() => onOPDSHubClick?.()} />
+
         {/* DATA WORKSPACES SECTION */}
         <DataWorkspacesSection onWorkspaceClick={(workspace) => {
           if (window.tabbedContentManagerRef?.openDataWorkspace) {
             window.tabbedContentManagerRef.openDataWorkspace(workspace.workspace_id, workspace.name);
           }
         }} />
-
-        {/* NEWS SECTION */}
-        <Divider sx={{ my: 0.5 }} />
-        <Box sx={{ px: 2, pb: 0.5 }}>
-          <ListItem disablePadding onContextMenu={(e) => e.preventDefault()}>
-            <ListItemButton 
-              onClick={() => handleFolderClick('news_virtual')} 
-              sx={{ 
-                minHeight: 32,
-                borderRadius: 1,
-                '&:hover': { backgroundColor: 'action.hover' }
-              }}
-            >
-              <ListItemIcon sx={{ minWidth: 32 }}>
-                <Newspaper color="primary" />
-              </ListItemIcon>
-              <ListItemText primary={<Typography variant="body2">News</Typography>} />
-            </ListItemButton>
-          </ListItem>
-        </Box>
 
       </Box>
 
@@ -4125,6 +4539,20 @@ const FileTreeSidebar = ({
                   </ListItemIcon>
                   Rename
                 </MenuItem>
+
+                {canShareUserOwnedFolder(contextMenuTarget) && (
+                  <MenuItem
+                    onClick={() => {
+                      setSharingDialog({ type: 'folder', folderId: contextMenuTarget.folder_id });
+                      handleContextMenuClose();
+                    }}
+                  >
+                    <ListItemIcon>
+                      <IosShare fontSize="small" />
+                    </ListItemIcon>
+                    Sharing…
+                  </MenuItem>
+                )}
                 
                 <MenuItem
                   onClick={() => {
@@ -4339,7 +4767,7 @@ const FileTreeSidebar = ({
              
              <MenuItem
                onClick={() => {
-                 handleReprocessDocument(contextMenuTarget.document_id);
+                 handleReprocessDocument(contextMenuTarget.document_id, contextMenuTarget.folder_id);
                  handleContextMenuClose();
                }}
              >
@@ -4377,6 +4805,23 @@ const FileTreeSidebar = ({
               </ListItemIcon>
               Rename
             </MenuItem>
+
+            {canShareUserOwnedFile(contextMenuTarget) && (
+              <MenuItem
+                onClick={() => {
+                  setSharingDialog({
+                    type: 'document',
+                    documentId: contextMenuTarget.document_id,
+                  });
+                  handleContextMenuClose();
+                }}
+              >
+                <ListItemIcon>
+                  <IosShare fontSize="small" />
+                </ListItemIcon>
+                Sharing…
+              </MenuItem>
+            )}
             
             <MenuItem
               onClick={() => {
@@ -4392,6 +4837,96 @@ const FileTreeSidebar = ({
             </MenuItem>
             
             <Divider />
+
+            {(() => {
+              const fn = (contextMenuTarget?.filename || '').toLowerCase();
+              return fn.endsWith('.md') || fn.endsWith('.txt') || fn.endsWith('.org');
+            })() && !contextMenuTarget?.is_encrypted && (
+              <Tooltip
+                placement="left"
+                title="Stores the file encrypted on the server, excludes it from search, and disables collaboration. Each file has its own password. See Help → Document encryption."
+              >
+                <MenuItem
+                  onClick={() => {
+                    setFileEncryptionDialog({
+                      open: true,
+                      mode: 'encrypt',
+                      documentId: contextMenuTarget.document_id,
+                    });
+                    handleContextMenuClose();
+                  }}
+                >
+                  <ListItemIcon>
+                    <Lock fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="Encrypt file…"
+                    secondary="Password on server; not in search"
+                    secondaryTypographyProps={{
+                      variant: 'caption',
+                      sx: { whiteSpace: 'normal', maxWidth: 260 },
+                    }}
+                  />
+                </MenuItem>
+              </Tooltip>
+            )}
+
+            {contextMenuTarget?.is_encrypted && (
+              <Tooltip
+                placement="left"
+                title="Decrypts the file with your document password and restores normal indexing when applicable. Full behavior is described in Help → Document encryption."
+              >
+                <MenuItem
+                  onClick={() => {
+                    setFileEncryptionDialog({
+                      open: true,
+                      mode: 'remove',
+                      documentId: contextMenuTarget.document_id,
+                    });
+                    handleContextMenuClose();
+                  }}
+                >
+                  <ListItemIcon>
+                    <LockOpen fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="Remove encryption…"
+                    secondary="Needs document password"
+                    secondaryTypographyProps={{
+                      variant: 'caption',
+                      sx: { whiteSpace: 'normal', maxWidth: 260 },
+                    }}
+                  />
+                </MenuItem>
+              </Tooltip>
+            )}
+
+            {(() => {
+              const fn = (contextMenuTarget?.filename || '').toLowerCase();
+              return fn.endsWith('.md') || fn.endsWith('.txt') || fn.endsWith('.org');
+            })() && (
+              <>
+                <Divider />
+                <MenuItem
+                  onClick={() => {
+                    openHelpTopic(HELP_TOPIC_DOCUMENT_ENCRYPTION);
+                    handleContextMenuClose();
+                  }}
+                >
+                  <ListItemIcon>
+                    <HelpOutline fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="Document encryption help"
+                    secondary="Sessions, tabs, lock, search"
+                    secondaryTypographyProps={{
+                      variant: 'caption',
+                      sx: { whiteSpace: 'normal', maxWidth: 260 },
+                    }}
+                  />
+                </MenuItem>
+              </>
+            )}
             
             {/* Search Settings - Submenu for Documents */}
             <MenuItem
@@ -4722,6 +5257,17 @@ const FileTreeSidebar = ({
         </DialogActions>
       </Dialog>
 
+      <EncryptedDocumentDialog
+        mode={fileEncryptionDialog.mode}
+        documentId={fileEncryptionDialog.documentId}
+        open={fileEncryptionDialog.open}
+        onClose={() => setFileEncryptionDialog((s) => ({ ...s, open: false }))}
+        onSuccess={async () => {
+          setFileEncryptionDialog((s) => ({ ...s, open: false }));
+          queryClient.invalidateQueries(['folders', 'contents']);
+        }}
+      />
+
       {/* Move Dialog */}
       <Dialog open={moveDialogOpen} onClose={() => setMoveDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Move {moveTarget?.type === 'folder' ? 'Folder' : 'File'}</DialogTitle>
@@ -4983,6 +5529,17 @@ const FileTreeSidebar = ({
           open={folderMetadataPane.open}
           onClose={() => setFolderMetadataPane({ open: false, folder: null, position: { x: 0, y: 0 } })}
           position={folderMetadataPane.position}
+        />
+
+        <DocumentSharingDialog
+          open={Boolean(sharingDialog)}
+          onClose={() => setSharingDialog(null)}
+          targetType={sharingDialog?.type === 'folder' ? 'folder' : 'document'}
+          documentId={sharingDialog?.type === 'document' ? sharingDialog.documentId : undefined}
+          folderId={sharingDialog?.type === 'folder' ? sharingDialog.folderId : undefined}
+          onSaved={() => {
+            refetchSharedWithMe();
+          }}
         />
 
         {/* Image Metadata Modal */}

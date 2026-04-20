@@ -1,7 +1,7 @@
 /**
  * Notification Context
  * State for agent-initiated in-app notifications (bell icon).
- * Receives events from ConversationSidebar WebSocket; no WebSocket management here.
+ * Persists agent-initiated notifications; no WebSocket management here.
  */
 
 import React, { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';

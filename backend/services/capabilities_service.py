@@ -11,16 +11,13 @@ import json
 import logging
 from typing import Dict, Any, Optional
 
+from config import settings
 from services.user_settings_kv_service import get_user_setting, set_user_setting
 
 logger = logging.getLogger(__name__)
 
 
 FEATURE_KEYS = [
-    # News
-    "feature.news.view",
-    "feature.news.agent",
-    "feature.news.notifications",
     # Maps
     "feature.maps.view",
     # Games
@@ -73,34 +70,32 @@ class CapabilitiesService:
     async def is_vision_service_available(self) -> bool:
         """Check if image vision service is running"""
         try:
+            if not settings.IMAGE_VISION_ENABLED:
+                return False
             from clients.image_vision_client import get_image_vision_client
             client = await get_image_vision_client()
-            
-            # Try to initialize if not already initialized
-            if not client._initialized:
+
+            if not client.is_ready():
                 logger.debug("Vision client not initialized, attempting connection...")
                 await client.initialize(required=False)
-            
-            # If still not initialized, service is unavailable
-            if not client._initialized:
+
+            if not client.is_ready():
                 logger.debug("Vision client initialization failed - service unavailable")
                 return False
-            
-            # Try a health check to verify it's actually working
+
             try:
                 from protos import image_vision_pb2
                 health_request = image_vision_pb2.HealthCheckRequest()
                 response = await client.stub.HealthCheck(health_request, timeout=5.0)
                 is_healthy = response.status == "healthy"
-                logger.debug(f"Vision service health check: {response.status} (healthy={is_healthy})")
+                logger.debug("Vision service health check: %s (healthy=%s)", response.status, is_healthy)
                 return is_healthy
             except Exception as e:
-                logger.warning(f"Vision service health check failed: {e}")
-                # If health check fails, mark as uninitialized for retry
-                client._initialized = False
+                logger.warning("Vision service health check failed: %s", e)
+                await client.reset_connection()
                 return False
         except Exception as e:
-            logger.warning(f"Vision service availability check failed: {e}")
+            logger.warning("Vision service availability check failed: %s", e)
             return False
 
 

@@ -67,7 +67,7 @@ async def list_todos(
     states: Optional[str] = Query(None, description="Comma-separated TODO states"),
     tags: Optional[str] = Query(None, description="Comma-separated tags"),
     query: str = Query("", description="Search query"),
-    limit: int = Query(100, ge=1, le=500),
+    limit: int = Query(100, ge=0, le=100_000, description="Max items; 0 = no cap"),
     include_archives: bool = Query(False),
     closed_since_days: Optional[int] = Query(None, description="Only DONE items closed in the last N days (e.g. 7 for last week)"),
     current_user: AuthenticatedUserResponse = Depends(get_current_user),

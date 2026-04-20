@@ -1,6 +1,5 @@
 """
-Org Refile Service - Roosevelt's Moving Day!
-Handles moving/refiling org-mode entries between files and headings
+Org refile service: move org-mode entries between files and headings.
 """
 
 import logging
@@ -17,9 +16,7 @@ logger = logging.getLogger(__name__)
 
 class OrgRefileService:
     """
-    Service for refiling (moving) org-mode entries
-    
-    **BULLY!** Move those TODOs like a well-organized cavalry!
+    Refile (move) org-mode entries between files and headings.
     """
     
     def __init__(self):
@@ -27,10 +24,9 @@ class OrgRefileService:
     
     async def discover_refile_targets(self, user_id: str) -> List[Dict[str, Any]]:
         """
-        Discover all potential refile targets for a user
-        
-        **By George!** Find all the places we can refile to!
-        Respects user's refile_max_level setting
+        Discover potential refile targets for a user.
+
+        Respects the user's refile_max_level setting.
         
         Returns:
             List of targets with file, heading path, and display name
@@ -50,26 +46,21 @@ class OrgRefileService:
             row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
             username = row['username'] if row else user_id
             
-            # Find user's org directory
+            from services import ds_upload_library_fs as dsf
+
             user_base_dir = self.upload_dir / "Users" / username
-            if not user_base_dir.exists():
-                return []
-            
-            # Find all org files
-            org_files = list(user_base_dir.rglob("*.org"))
-            # Exclude files inside .versions directories (historical snapshots)
-            org_files = [f for f in org_files if "/.versions/" not in str(f) and "\\.versions\\" not in str(f)]
-            
+            org_paths = await dsf.walk_org_files(user_id, username, include_archives=False)
             targets = []
-            
-            for org_file in org_files:
-                relative_path = org_file.relative_to(user_base_dir)
-                filename = org_file.name
-                
-                # Read file and parse headings
+
+            for org_file in org_paths:
                 try:
-                    with open(org_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
+                    relative_path = org_file.relative_to(user_base_dir)
+                except ValueError:
+                    continue
+                filename = org_file.name
+
+                try:
+                    content = await dsf.read_text(user_id, org_file)
                     
                     headings = self._parse_headings_for_targets(content, max_level)
                     
@@ -160,7 +151,7 @@ class OrgRefileService:
         """
         Refile an org entry from one location to another
         
-        **ROOSEVELT REFILE OPERATION!**
+        Refile operation
         
         Args:
             user_id: User ID
@@ -184,17 +175,18 @@ class OrgRefileService:
             # Resolve file paths
             source_path = user_base_dir / source_file
             target_path = user_base_dir / target_file
-            
-            if not source_path.exists():
+
+            from services import ds_upload_library_fs as dsf
+
+            if not await dsf.exists(user_id, source_path):
                 raise ValueError(f"Source file not found: {source_file}")
-            if not target_path.exists():
+            if not await dsf.exists(user_id, target_path):
                 raise ValueError(f"Target file not found: {target_file}")
-            
-            # Read both files (BOM-safe for target so header parsing is correct)
-            with open(source_path, 'r', encoding='utf-8') as f:
-                source_content = f.read()
-            with open(target_path, 'r', encoding='utf-8-sig') as f:
-                target_content = f.read()
+
+            source_content = await dsf.read_text(user_id, source_path)
+            target_content = await dsf.read_text(user_id, target_path)
+            if target_content.startswith("\ufeff"):
+                target_content = target_content.lstrip("\ufeff")
 
             # Extract the entry from source
             entry_lines, new_source_content = self._extract_entry(source_content, source_line)
@@ -209,12 +201,8 @@ class OrgRefileService:
             # Insert entry into target
             new_target_content = self._insert_entry(target_content, entry_lines, target_heading_line)
             
-            # Write both files
-            with open(source_path, 'w', encoding='utf-8') as f:
-                f.write(new_source_content)
-            
-            with open(target_path, 'w', encoding='utf-8') as f:
-                f.write(new_target_content)
+            await dsf.write_text(user_id, source_path, new_source_content)
+            await dsf.write_text(user_id, target_path, new_target_content)
             
             logger.info(f"✅ REFILE: Moved entry from {source_file}:{source_line} to {target_file}")
             

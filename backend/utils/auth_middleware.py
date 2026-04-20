@@ -67,7 +67,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             "/api/search",
             "/api/segmentation",
             "/api/pdf-text",
-            "/api/migration"
+            "/api/migration",
+            "/api/games",
+            "/api/saved-artifacts",
         ]
         
         # Paths that don't require authentication
@@ -81,7 +83,8 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             "/api/files",  # Static file serving
             "/api/health",  # Health check endpoints
             "/api/models/available",  # Public model list
-            "/api/models/current"  # Current model info
+            "/api/models/current",  # Current model info
+            "/api/public/artifacts",
         ]
     
     async def dispatch(self, request: Request, call_next):
@@ -144,8 +147,10 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                     # Normal authentication flow
                     current_user = await auth_service.get_current_user(token)
                     if not current_user:
-                        logger.warning(f"❌ Invalid or expired token for path: {path}")
-                        logger.info(f"🔍 Token validation failed - token: {token[:50]}...")
+                        logger.warning(
+                            "Invalid or expired token for path: %s",
+                            path,
+                        )
                         from fastapi.responses import JSONResponse
                         return JSONResponse(
                             status_code=401,
@@ -177,15 +182,17 @@ async def get_current_user(
     
     # Development bypass - return a mock admin user
     if DEVELOPMENT_BYPASS_AUTH:
-        logger.info("🔓 Development auth bypass active - using mock admin user")
+        logger.debug("Development auth bypass active - using mock admin user")
         return AuthenticatedUserResponse(
             user_id="dev-admin-001",
             username="admin",
             email="admin@localhost",
             role="admin",
-            is_active=True,
-            created_at="2024-01-01T00:00:00Z",
-            last_login="2024-01-01T00:00:00Z"
+            display_name="Dev Admin",
+            preferences={},
+            federation_discoverable=True,
+            federation_share_read_receipts=True,
+            federation_share_presence=True,
         )
     
     if not credentials:
@@ -210,9 +217,11 @@ async def get_current_user_optional(
             username="admin",
             email="admin@localhost",
             role="admin",
-            is_active=True,
-            created_at="2024-01-01T00:00:00Z",
-            last_login="2024-01-01T00:00:00Z"
+            display_name="Dev Admin",
+            preferences={},
+            federation_discoverable=True,
+            federation_share_read_receipts=True,
+            federation_share_presence=True,
         )
     
     if not credentials:

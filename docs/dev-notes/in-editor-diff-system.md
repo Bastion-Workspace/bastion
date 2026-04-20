@@ -26,7 +26,7 @@ The in-editor diff system provides a persistent, user-friendly interface for rev
    - Navigation controls
    - Scroll position preservation
 
-4. **Backend Resolver** (`llm-orchestrator/orchestrator/utils/editor_operation_resolver.py`)
+4. **Backend Resolver** (`backend/utils/editor_operations_resolver.py`)
    - Progressive text matching strategies
    - Fuzzy position recovery
    - Frontmatter protection

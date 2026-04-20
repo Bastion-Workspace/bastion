@@ -4,10 +4,14 @@
  * Maximum 5 tabs with persistence across sessions
  */
 
-import React, { useState, useEffect, forwardRef, useImperativeHandle } from 'react';
-import { useTheme } from '@mui/material/styles';
+import React, { useState, useEffect, forwardRef, useImperativeHandle, useCallback } from 'react';
+import { useQuery } from 'react-query';
+import { useTheme, alpha } from '@mui/material/styles';
+import { useAuth } from '../contexts/AuthContext';
+import apiService from '../services/apiService';
+import { UI_WALLPAPER_QUERY_KEY } from '../config/uiWallpaperBuiltins';
+import { isUiWallpaperConfigActive, MAIN_WORKSPACE_WALLPAPER_TINT_ALPHA } from '../theme/wallpaperPaneSx';
 import RSSArticleViewer from './RSSArticleViewer';
-import NewsHeadlinesPane from './NewsHeadlinesPane';
 import RSSFeedManager from './RSSFeedManager';
 import DocumentViewer from './DocumentViewer';
 import OrgSearchView from './OrgSearchView';
@@ -20,10 +24,27 @@ import FileRelationGraph from './graph/FileRelationGraph';
 import EntityRelationGraph from './graph/EntityRelationGraph';
 import UnifiedKnowledgeGraph from './graph/UnifiedKnowledgeGraph';
 import MapViewTabContent from './maps/MapViewTabContent';
+import ArtifactViewerTab from './ArtifactViewerTab';
+import OpdsHubTab from './OpdsHubTab';
+import EbookReaderTab from './EbookReaderTab';
 import { documentDiffStore } from '../services/documentDiffStore';
+import { lockAndRemove } from '../services/encryptionSessionRegistry';
+import { devLog } from '../utils/devConsole';
 
 const TabbedContentManager = forwardRef((props, ref) => {
+    const {
+        onActiveDocumentIdChange,
+        documentsFileTreeCollapsed = false,
+        documentsIsMobile = false,
+    } = props;
     const theme = useTheme();
+    const { isAuthenticated, loading: authLoading } = useAuth();
+    const { data: uiWallpaperData } = useQuery(
+        [UI_WALLPAPER_QUERY_KEY],
+        () => apiService.settings.getUserUiWallpaper(),
+        { enabled: isAuthenticated && !authLoading, staleTime: 60_000 }
+    );
+    const wallpaperTintOnMainShell = isUiWallpaperConfigActive(uiWallpaperData?.config);
     const darkMode = theme.palette.mode === 'dark';
     const [tabs, setTabs] = useState([]);
     const [activeTabId, setActiveTabId] = useState(null);
@@ -62,18 +83,18 @@ const TabbedContentManager = forwardRef((props, ref) => {
     // Subscribe to diff store changes for badge updates
     useEffect(() => {
         const handleDiffChange = (documentId, changeType) => {
-            console.log('🔔 TabbedContentManager: Diff change notification', { documentId, changeType, tabsCount: tabs.length });
+            devLog('🔔 TabbedContentManager: Diff change notification', { documentId, changeType, tabsCount: tabs.length });
             
             // Find all tabs with this documentId
             const matchingTabs = tabs.filter(t => t.type === 'document' && t.documentId === documentId);
             
-            console.log('🔔 TabbedContentManager: Found matching tabs:', matchingTabs.length);
+            devLog('🔔 TabbedContentManager: Found matching tabs:', matchingTabs.length);
             
             matchingTabs.forEach(tab => {
                 const diffs = documentDiffStore.getDiffs(documentId);
                 const diffCount = diffs && Array.isArray(diffs.operations) ? diffs.operations.length : 0;
                 
-                console.log('🔔 TabbedContentManager: Updating tab badge', { tabId: tab.id, diffCount });
+                devLog('🔔 TabbedContentManager: Updating tab badge', { tabId: tab.id, diffCount });
                 
                 setTabDiffCounts(prev => ({
                     ...prev,
@@ -99,6 +120,17 @@ const TabbedContentManager = forwardRef((props, ref) => {
         documentDiffStore.subscribe(handleDiffChange);
         return () => documentDiffStore.unsubscribe(handleDiffChange);
     }, [tabs]);
+
+    // Notify parent when the active document tab changes (e.g. file tree highlight)
+    useEffect(() => {
+        if (typeof onActiveDocumentIdChange !== 'function') return;
+        const active = tabs.find((tab) => tab.id === activeTabId);
+        const docId =
+            active && active.type === 'document' && active.documentId != null && active.documentId !== ''
+                ? String(active.documentId)
+                : null;
+        onActiveDocumentIdChange(docId);
+    }, [tabs, activeTabId, onActiveDocumentIdChange]);
 
     // Save active tab to localStorage whenever it changes
     useEffect(() => {
@@ -163,6 +195,15 @@ const TabbedContentManager = forwardRef((props, ref) => {
             localStorage.removeItem(unsavedKey);
             localStorage.removeItem(`discard_unsaved_${tab.documentId}`);
         }
+        const updatedTabsPreview = tabs.filter(t => t.id !== tabId);
+        if (tab && tab.type === 'document' && tab.documentId) {
+            const stillOpen = updatedTabsPreview.some(
+                (t) => t.type === 'document' && t.documentId === tab.documentId
+            );
+            if (!stillOpen) {
+                void lockAndRemove(tab.documentId);
+            }
+        }
         setTabs(prevTabs => {
             const updatedTabs = prevTabs.filter(t => t.id !== tabId);
             if (activeTabId === tabId) {
@@ -183,12 +224,26 @@ const TabbedContentManager = forwardRef((props, ref) => {
         ));
     };
 
-    const openRSSFeed = (feedId, feedName) => {
-        // Check if tab already exists for this feed
+    const updateArtifactTabTitle = (artifactId, newTitle) => {
+        setTabs(prevTabs => prevTabs.map(tab =>
+            tab.type === 'artifact' && tab.artifactId === artifactId ? { ...tab, title: newTitle } : tab
+        ));
+    };
+
+    const openRSSFeed = (feedId, feedName, articleId = null) => {
         const existingTab = tabs.find(tab => tab.type === 'rss-feed' && tab.feedId === feedId);
-        
+
         if (existingTab) {
             setActiveTabId(existingTab.id);
+            if (articleId) {
+                setTabs(prevTabs =>
+                    prevTabs.map(tab =>
+                        tab.id === existingTab.id
+                            ? { ...tab, initialArticleId: articleId }
+                            : tab
+                    )
+                );
+            }
             return;
         }
 
@@ -196,7 +251,8 @@ const TabbedContentManager = forwardRef((props, ref) => {
             type: 'rss-feed',
             title: feedName,
             feedId: feedId,
-            icon: '📰'
+            icon: '📰',
+            ...(articleId ? { initialArticleId: articleId } : {}),
         });
     };
 
@@ -221,20 +277,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
         });
     };
 
-    const openNewsHeadlines = () => {
-        const existingTab = tabs.find(tab => tab.type === 'news-headlines');
-        if (existingTab) {
-            setActiveTabId(existingTab.id);
-            return;
-        }
-        addTab({
-            type: 'news-headlines',
-            title: 'News',
-            icon: '📰'
-        });
-    };
-
-    const openDocument = (documentId, documentName, options = {}) => {
+    const openDocument = useCallback((documentId, documentName, options = {}) => {
         // Check if tab already exists for this document
         const existingTab = tabs.find(tab => tab.type === 'document' && tab.documentId === documentId);
         
@@ -259,7 +302,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
             scrollToLine: options.scrollToLine,
             scrollToHeading: options.scrollToHeading
         });
-    };
+    }, [tabs]);
 
     const openNote = (noteId, noteName) => {
         // Check if tab already exists for this note
@@ -327,6 +370,21 @@ const TabbedContentManager = forwardRef((props, ref) => {
         });
     };
 
+    const openArtifact = (artifactId, title = null) => {
+        if (!artifactId) return;
+        const existingTab = tabs.find(tab => tab.type === 'artifact' && tab.artifactId === artifactId);
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        addTab({
+            type: 'artifact',
+            title: title || 'Artifact',
+            icon: '📚',
+            artifactId,
+        });
+    };
+
     const openFileGraph = (scope = 'all', folderId = null) => {
         const existingTab = tabs.find(tab => tab.type === 'file-graph');
         if (existingTab) {
@@ -386,33 +444,51 @@ const TabbedContentManager = forwardRef((props, ref) => {
         });
     };
 
+    const openOPDSHub = useCallback(() => {
+        const existingTab = tabs.find((t) => t.type === 'opds-hub');
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        addTab({
+            type: 'opds-hub',
+            title: 'OPDS',
+            icon: '📚',
+        });
+    }, [tabs]);
+
+    const openEbookFromOpds = useCallback((payload) => {
+        const { catalogId, acquisitionUrl, title, digest } = payload || {};
+        if (!catalogId || !acquisitionUrl) return;
+        addTab({
+            type: 'ebook-reader',
+            title: title || 'EPUB',
+            icon: '📖',
+            catalogId,
+            acquisitionUrl,
+            ebookTitle: title || 'EPUB',
+            digest: digest || undefined,
+        });
+    }, []);
+
     const generateTabId = () => {
         return 'tab_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     };
 
     const getTabContent = (tab) => {
         switch (tab.type) {
-            case 'news-headlines':
-                return (
-                    <NewsHeadlinesPane
-                        onOpenArticle={(newsId) => {
-                            try {
-                                if (window?.history && typeof window.history.pushState === 'function') {
-                                    window.history.pushState({}, '', `/news/${newsId}`);
-                                    window.dispatchEvent(new PopStateEvent('popstate'));
-                                } else {
-                                    window.location.href = `/news/${newsId}`;
-                                }
-                            } catch {
-                                window.location.href = `/news/${newsId}`;
-                            }
-                        }}
-                    />
-                );
             case 'rss-feed':
                 return (
                     <RSSArticleViewer
                         feedId={tab.feedId}
+                        initialArticleId={tab.initialArticleId}
+                        onInitialArticleConsumed={() => {
+                            setTabs(prevTabs =>
+                                prevTabs.map(t =>
+                                    t.id === tab.id ? { ...t, initialArticleId: undefined } : t
+                                )
+                            );
+                        }}
                         onClose={() => closeTab(tab.id)}
                     />
                 );
@@ -427,12 +503,14 @@ const TabbedContentManager = forwardRef((props, ref) => {
             case 'document':
                 return (
                     <DocumentViewer
+                        key={tab.id}
                         documentId={tab.documentId}
                         onClose={() => closeTab(tab.id)}
                         scrollToLine={tab.scrollToLine}
                         scrollToHeading={tab.scrollToHeading}
                         initialScrollPosition={tab.scrollPosition || 0}
                         onScrollChange={(scrollPos) => updateTabScrollPosition(tab.id, scrollPos)}
+                        onOpenDocument={openDocument}
                     />
                 );
             case 'note':
@@ -448,7 +526,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgAgendaView
                         onOpenDocument={(result) => {
-                            console.log('Opening document from agenda:', result);
+                            devLog('Opening document from agenda:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -461,7 +539,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgSearchView
                         onOpenDocument={(result) => {
-                            console.log('Opening document from search:', result);
+                            devLog('Opening document from search:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -474,7 +552,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgTodosView
                         onOpenDocument={(result) => {
-                            console.log('Opening document from TODOs:', result);
+                            devLog('Opening document from TODOs:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -487,7 +565,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgContactsView
                         onOpenDocument={(result) => {
-                            console.log('Opening document from Contacts:', result);
+                            devLog('Opening document from Contacts:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -557,6 +635,31 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         darkMode={darkMode}
                     />
                 );
+            case 'artifact':
+                return (
+                    <ArtifactViewerTab
+                        artifactId={tab.artifactId}
+                        onClose={() => closeTab(tab.id)}
+                    />
+                );
+            case 'opds-hub':
+                return (
+                    <OpdsHubTab
+                        onClose={() => closeTab(tab.id)}
+                        onOpenEbook={(payload) => openEbookFromOpds(payload)}
+                    />
+                );
+            case 'ebook-reader':
+                return (
+                    <EbookReaderTab
+                        catalogId={tab.catalogId}
+                        acquisitionUrl={tab.acquisitionUrl}
+                        title={tab.ebookTitle || 'EPUB'}
+                        digest={tab.digest}
+                        documentsFileTreeCollapsed={documentsFileTreeCollapsed}
+                        documentsIsMobile={documentsIsMobile}
+                    />
+                );
             default:
                 return (
                     <div style={placeholderStyle}>
@@ -572,16 +675,24 @@ const TabbedContentManager = forwardRef((props, ref) => {
         openRSSFeed,
         openRSSCategory,
         openDocument,
-        openNewsHeadlines,
         openOrgView,
         openDataWorkspace,
+        openArtifact,
         openFileGraph,
         openEntityGraph,
         openUnifiedGraph,
         openMapView,
+        openOPDSHub,
+        openEbookFromOpds,
         closeDocumentTab,
-        updateDocumentTabTitle
-    }), [tabs]);
+        updateDocumentTabTitle,
+        updateArtifactTabTitle,
+        /** True if a document tab for this id still exists (park session on viewer unmount when switching tabs). */
+        shouldParkEncryptionSession: (documentId) => {
+            if (!documentId) return false;
+            return tabs.some((t) => t.type === 'document' && t.documentId === documentId);
+        },
+    }), [tabs, openOPDSHub, openEbookFromOpds]);
 
     // Keep global ref in sync so sidebar always gets latest API (avoids stale closure after closing tabs)
     useEffect(() => {
@@ -632,7 +743,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
     };
 
     const activeTabStyle = {
-        backgroundColor: theme.palette.background.default,
+        backgroundColor: alpha(theme.palette.background.default, 0.9),
         boxShadow: `inset 0 -2px 0 ${theme.palette.primary.main}`
     };
 
@@ -676,7 +787,9 @@ const TabbedContentManager = forwardRef((props, ref) => {
         flex: 1,
         overflow: 'hidden',
         minWidth: 0,
-        backgroundColor: theme.palette.background.default,
+        backgroundColor: wallpaperTintOnMainShell
+            ? 'transparent'
+            : alpha(theme.palette.background.default, MAIN_WORKSPACE_WALLPAPER_TINT_ALPHA),
         ...(isGraphTab ? { display: 'flex', flexDirection: 'column' } : {})
     };
 

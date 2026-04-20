@@ -20,12 +20,61 @@ class BackendClient:
         self._base_url = getattr(settings, "BACKEND_URL", "").rstrip("/")
         self._service_key = getattr(settings, "INTERNAL_SERVICE_KEY", "")
         self._timeout = getattr(settings, "EXTERNAL_CHAT_TIMEOUT", 300.0)
+        self._transcription_timeout = getattr(settings, "TRANSCRIPTION_TIMEOUT", 120.0)
 
     def _headers(self) -> Dict[str, str]:
         return {
             "Content-Type": "application/json",
             "X-Internal-Service-Key": self._service_key,
         }
+
+    async def transcribe_audio(
+        self,
+        user_id: str,
+        audio_bytes: bytes,
+        filename: str,
+        content_type: Optional[str] = None,
+        prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        POST /api/internal/transcribe-audio (multipart).
+        Returns {"success": True, "text": str} or {"error": str}.
+        """
+        if not self._base_url or not self._service_key:
+            logger.warning("BACKEND_URL or INTERNAL_SERVICE_KEY not set; cannot transcribe")
+            return {"error": "Connections service not configured for transcription"}
+
+        url = f"{self._base_url}/api/internal/transcribe-audio"
+        headers = {"X-Internal-Service-Key": self._service_key}
+        form: Dict[str, Any] = {"user_id": user_id}
+        if prompt and str(prompt).strip():
+            form["prompt"] = str(prompt).strip()
+        mime = content_type or "application/octet-stream"
+        files = {"file": (filename or "audio.bin", audio_bytes, mime)}
+
+        try:
+            async with httpx.AsyncClient(timeout=self._transcription_timeout) as client:
+                resp = await client.post(url, data=form, files=files, headers=headers)
+                if resp.status_code == 413:
+                    return {"error": "Audio file is too large."}
+                if resp.status_code >= 400:
+                    detail = resp.text
+                    try:
+                        body = resp.json()
+                        detail = body.get("detail", detail)
+                    except Exception:
+                        pass
+                    return {"error": str(detail)[:500] if detail else f"HTTP {resp.status_code}"}
+                data = resp.json()
+                if not data.get("success") or not (data.get("text") or "").strip():
+                    return {"error": data.get("detail", "Transcription failed")}
+                return {"success": True, "text": (data.get("text") or "").strip()}
+        except httpx.HTTPStatusError as e:
+            logger.exception("Backend transcribe-audio HTTP error: %s", e)
+            return {"error": str(e.response.text) if e.response.text else str(e)}
+        except Exception as e:
+            logger.exception("Backend transcribe-audio error: %s", e)
+            return {"error": str(e)}
 
     async def send_external_message(
         self,

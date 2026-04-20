@@ -9,7 +9,11 @@ from typing import List, Dict, Any, Optional
 import asyncio
 
 import grpc
-from protos import tool_service_pb2, tool_service_pb2_grpc
+from protos import (
+    document_service_pb2_grpc,
+    tool_service_pb2,
+    tool_service_pb2_grpc,
+)
 
 # For type hints
 from typing import TYPE_CHECKING
@@ -42,35 +46,65 @@ class BackendToolClient:
         self.host = host or os.getenv('BACKEND_TOOL_SERVICE_HOST', 'backend')
         self.port = port or int(os.getenv('BACKEND_TOOL_SERVICE_PORT', '50052'))
         self.address = f'{self.host}:{self.port}'
+        self._document_service_host = os.getenv(
+            'DOCUMENT_SERVICE_GRPC_HOST', 'document-service'
+        )
+        self._document_service_port = int(
+            os.getenv('DOCUMENT_SERVICE_GRPC_PORT', '50058')
+        )
+        self._document_service_address = (
+            f'{self._document_service_host}:{self._document_service_port}'
+        )
         self._channel: Optional[grpc.aio.Channel] = None
         self._stub: Optional[tool_service_pb2_grpc.ToolServiceStub] = None
-        
-        logger.info(f"Backend Tool Client configured for {self.address}")
+        self._doc_channel: Optional[grpc.aio.Channel] = None
+        self._doc_stub: Optional[document_service_pb2_grpc.DocumentServiceStub] = None
+
+        logger.info(
+            "Backend Tool Client: tools=%s document-service=%s",
+            self.address,
+            self._document_service_address,
+        )
     
     async def connect(self):
-        """Establish connection to backend tool service"""
+        """Establish gRPC channels to tools-service and document-service."""
+        options = [
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+        ]
         if self._channel is None:
             logger.debug(f"Connecting to backend tool service at {self.address}...")
-            # Increase message size limits for large responses (default is 4MB)
-            options = [
-                ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
-                ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
-            ]
             self._channel = grpc.aio.insecure_channel(self.address, options=options)
             self._stub = tool_service_pb2_grpc.ToolServiceStub(self._channel)
-            logger.debug(f"✅ Connected to backend tool service")
+            logger.debug("Connected to backend tool service")
+        if self._doc_channel is None:
+            logger.debug(
+                "Connecting to document-service at %s...", self._document_service_address
+            )
+            self._doc_channel = grpc.aio.insecure_channel(
+                self._document_service_address, options=options
+            )
+            self._doc_stub = document_service_pb2_grpc.DocumentServiceStub(
+                self._doc_channel
+            )
+            logger.debug("Connected to document-service")
     
     async def close(self):
-        """Close connection to backend tool service"""
+        """Close gRPC channels."""
         if self._channel:
             await self._channel.close()
             self._channel = None
             self._stub = None
             logger.debug("Disconnected from backend tool service")
+        if self._doc_channel:
+            await self._doc_channel.close()
+            self._doc_channel = None
+            self._doc_stub = None
+            logger.debug("Disconnected from document-service")
     
     async def _ensure_connected(self):
-        """Ensure connection is established"""
-        if self._stub is None:
+        """Ensure tools-service and document-service channels exist."""
+        if self._stub is None or self._doc_stub is None:
             await self.connect()
     
     # ===== Document Operations =====
@@ -106,7 +140,7 @@ class BackendToolClient:
                 exclude_document_ids=exclude_document_ids or [],
             )
             
-            response = await self._stub.SearchDocuments(request)
+            response = await self._doc_stub.SearchDocuments(request)
             
             # Convert proto response to dict
             results = []
@@ -131,6 +165,62 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"Unexpected error in document search: {e}")
             return {'results': [], 'total_count': 0, 'error': str(e)}
+
+    async def rerank_documents(
+        self,
+        query: str,
+        documents: List[str],
+        top_n: int = 10,
+        model: str = "cohere/rerank-4-pro",
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """
+        Rerank a list of text chunks by cross-encoder relevance to a query.
+
+        Args:
+            query: The search query or question.
+            documents: List of text chunks to rerank.
+            top_n: Maximum number of results to return.
+            model: OpenRouter rerank model identifier.
+            user_id: User ID for auth context.
+
+        Returns:
+            Dict with 'results' (list of {index, relevance_score, document}) and 'model'.
+        """
+        try:
+            await self._ensure_connected()
+
+            request = tool_service_pb2.RerankRequest(
+                query=query,
+                documents=documents,
+                top_n=top_n,
+                model=model,
+                user_id=user_id,
+            )
+
+            response = await self._doc_stub.RerankDocuments(request)
+
+            if not response.success:
+                logger.warning(f"RerankDocuments returned error: {response.error}")
+                return {'results': [], 'model': model, 'error': response.error}
+
+            results = [
+                {
+                    'index': r.index,
+                    'relevance_score': r.relevance_score,
+                    'document': r.document,
+                }
+                for r in response.results
+            ]
+
+            return {'results': results, 'model': response.model}
+
+        except grpc.RpcError as e:
+            logger.error(f"RerankDocuments gRPC failed: {e.code()} - {e.details()}")
+            return {'results': [], 'model': model, 'error': str(e)}
+        except Exception as e:
+            logger.error(f"Unexpected error in rerank_documents: {e}")
+            return {'results': [], 'model': model, 'error': str(e)}
 
     async def search_help_docs(
         self,
@@ -199,7 +289,7 @@ class BackendToolClient:
                 user_id=user_id
             )
             
-            response = await self._stub.GetDocument(request)
+            response = await self._doc_stub.GetDocument(request)
             
             return {
                 'document_id': response.document_id,
@@ -242,7 +332,7 @@ class BackendToolClient:
                 user_id=user_id
             )
             
-            response = await self._stub.GetDocumentContent(request)
+            response = await self._doc_stub.GetDocumentContent(request)
             
             return response.content
             
@@ -303,7 +393,7 @@ class BackendToolClient:
                 user_id=user_id
             )
             
-            response = await self._stub.GetDocumentChunks(request)
+            response = await self._doc_stub.GetDocumentChunks(request)
             
             # Convert proto response to list of dicts
             chunks = []
@@ -312,10 +402,9 @@ class BackendToolClient:
                 metadata = {}
                 if chunk_proto.metadata:
                     try:
-                        import json
                         metadata = json.loads(chunk_proto.metadata)
-                    except:
-                        pass
+                    except (json.JSONDecodeError, TypeError, ValueError):
+                        metadata = {}
                 
                 chunks.append({
                     'chunk_id': chunk_proto.chunk_id,
@@ -368,7 +457,7 @@ class BackendToolClient:
                 base_path=base_path or ""
             )
             
-            response = await self._stub.FindDocumentByPath(request)
+            response = await self._doc_stub.FindDocumentByPath(request)
             
             if not response.success:
                 logger.warning(f"Document not found by path: {file_path} - {response.error}")
@@ -416,7 +505,7 @@ class BackendToolClient:
                 limit=limit
             )
 
-            response = await self._stub.FindDocumentsByTags(request)
+            response = await self._doc_stub.FindDocumentsByTags(request)
 
             # Convert response to list of dicts
             documents = []
@@ -485,7 +574,7 @@ class BackendToolClient:
             if content_bytes is not None:
                 request.binary_content = content_bytes
             
-            response = await self._stub.CreateUserFile(request)
+            response = await self._doc_stub.CreateUserFile(request)
             
             return {
                 "success": response.success,
@@ -540,7 +629,7 @@ class BackendToolClient:
                 parent_folder_path=parent_folder_path if parent_folder_path else ""
             )
             
-            response = await self._stub.CreateUserFolder(request)
+            response = await self._doc_stub.CreateUserFolder(request)
             
             return {
                 "success": response.success,
@@ -579,7 +668,7 @@ class BackendToolClient:
         try:
             await self._ensure_connected()
             request = tool_service_pb2.GetFolderTreeRequest(user_id=user_id)
-            response = await self._stub.GetFolderTree(request)
+            response = await self._doc_stub.GetFolderTree(request)
             return [
                 {
                     "folder_id": f.folder_id,
@@ -618,7 +707,7 @@ class BackendToolClient:
                 limit=int(limit) if limit else 500,
                 offset=int(offset) if offset else 0,
             )
-            response = await self._stub.ListFolderDocuments(request)
+            response = await self._doc_stub.ListFolderDocuments(request)
             if response.error:
                 return {
                     "success": False,
@@ -678,7 +767,7 @@ class BackendToolClient:
                 user_id=user_id,
                 file_extension=file_extension or "",
             )
-            response = await self._stub.PickRandomDocumentFromFolder(request)
+            response = await self._doc_stub.PickRandomDocumentFromFolder(request)
             return {
                 "found": response.found,
                 "document_id": response.document_id or "",
@@ -742,7 +831,7 @@ class BackendToolClient:
                 frontmatter_type=frontmatter_type if frontmatter_type else ""
             )
             
-            response = await self._stub.UpdateDocumentMetadata(request)
+            response = await self._doc_stub.UpdateDocumentMetadata(request)
             
             return {
                 "success": response.success,
@@ -789,14 +878,15 @@ class BackendToolClient:
         try:
             await self._ensure_connected()
             
+            # Omit write_initiator: document-service defaults to agent_tool (WS content_source=agent).
             request = tool_service_pb2.UpdateDocumentContentRequest(
                 user_id=user_id,
                 document_id=document_id,
                 content=content,
-                append=append
+                append=append,
             )
             
-            response = await self._stub.UpdateDocumentContent(request)
+            response = await self._doc_stub.UpdateDocumentContent(request)
             
             return {
                 "success": response.success,
@@ -893,7 +983,7 @@ class BackendToolClient:
                 requires_preview=requires_preview
             )
             
-            response = await self._stub.ProposeDocumentEdit(request)
+            response = await self._doc_stub.ProposeDocumentEdit(request)
             
             return {
                 "success": response.success,
@@ -973,7 +1063,7 @@ class BackendToolClient:
                 agent_name=agent_name
             )
             
-            response = await self._stub.ApplyOperationsDirectly(request)
+            response = await self._doc_stub.ApplyOperationsDirectly(request)
             
             return {
                 "success": response.success,
@@ -1024,7 +1114,7 @@ class BackendToolClient:
                 selected_operation_indices=selected_operation_indices or []
             )
             
-            response = await self._stub.ApplyDocumentEditProposal(request)
+            response = await self._doc_stub.ApplyDocumentEditProposal(request)
             
             return {
                 "success": response.success,
@@ -1061,7 +1151,7 @@ class BackendToolClient:
                 user_id=user_id,
                 document_id=document_id
             )
-            response = await self._stub.ListDocumentProposals(request)
+            response = await self._doc_stub.ListDocumentProposals(request)
             if not response.success:
                 return {
                     "success": False,
@@ -1101,7 +1191,7 @@ class BackendToolClient:
                 user_id=user_id,
                 proposal_id=proposal_id
             )
-            response = await self._stub.GetDocumentEditProposal(request)
+            response = await self._doc_stub.GetDocumentEditProposal(request)
             if not response.success:
                 return {
                     "success": False,
@@ -1140,7 +1230,7 @@ class BackendToolClient:
                 user_id=user_id,
                 proposal_id=proposal_id
             )
-            response = await self._stub.RejectDocumentEditProposal(request)
+            response = await self._doc_stub.RejectDocumentEditProposal(request)
             return {
                 "success": response.success,
                 "error": response.error if response.error else None
@@ -1458,7 +1548,7 @@ class BackendToolClient:
                 entity_names=entity_names
             )
             
-            response = await self._stub.FindDocumentsByEntities(request)
+            response = await self._doc_stub.FindDocumentsByEntities(request)
             
             logger.info(f"Found {len(response.document_ids)} documents for entities (RLS filtered)")
             return list(response.document_ids)
@@ -1496,7 +1586,7 @@ class BackendToolClient:
                 max_hops=max_hops
             )
             
-            response = await self._stub.FindRelatedDocumentsByEntities(request)
+            response = await self._doc_stub.FindRelatedDocumentsByEntities(request)
             
             logger.info(f"Found {len(response.document_ids)} related documents (RLS filtered)")
             return list(response.document_ids)
@@ -2443,10 +2533,16 @@ class BackendToolClient:
             
         except grpc.RpcError as e:
             logger.error(f"Image search failed: {e.code()} - {e.details()}")
-            return f"Error searching images: {str(e)}"
+            return {
+                "images_markdown": f"Error searching images: {str(e)}",
+                "metadata": [],
+            }
         except Exception as e:
             logger.error(f"Unexpected error in image search: {e}")
-            return f"Error searching images: {str(e)}"
+            return {
+                "images_markdown": f"Error searching images: {str(e)}",
+                "metadata": [],
+            }
     
     # ===== Face Analysis Operations =====
     
@@ -2712,7 +2808,6 @@ class BackendToolClient:
         color_scheme: str = "plotly",
         width: int = 800,
         height: int = 600,
-        include_static: bool = False
     ) -> Dict[str, Any]:
         """
         Create a chart or graph from structured data
@@ -2727,8 +2822,7 @@ class BackendToolClient:
             color_scheme: Color scheme to use (default: "plotly")
             width: Chart width in pixels (default: 800)
             height: Chart height in pixels (default: 600)
-            include_static: Also generate a static SVG version (default: False)
-            
+
         Returns:
             Dict with success status, output format, and chart_data
         """
@@ -2748,7 +2842,6 @@ class BackendToolClient:
                 color_scheme=color_scheme,
                 width=width,
                 height=height,
-                include_static=include_static
             )
             
             response = await self._stub.CreateChart(request)
@@ -2770,11 +2863,6 @@ class BackendToolClient:
                     "metadata": metadata
                 }
 
-                if response.HasField("static_svg"):
-                    result["static_svg"] = response.static_svg
-                if response.HasField("static_format"):
-                    result["static_format"] = response.static_format
-                
                 return result
             else:
                 return {
@@ -3346,6 +3434,116 @@ class BackendToolClient:
                 "error": str(e),
             }
 
+    async def get_execution_trace(
+        self,
+        user_id: str,
+        execution_id: str,
+        include_io: bool = True,
+        include_tool_calls: bool = False,
+    ) -> Dict[str, Any]:
+        """Fetch one agent execution with per-step trace (same data as REST execution detail)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetExecutionTraceRequest(
+                user_id=user_id,
+                execution_id=execution_id or "",
+            )
+            request.include_io = include_io
+            request.include_tool_calls = include_tool_calls
+            response = await self._stub.GetExecutionTrace(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "error": response.error or "Failed to get execution trace.",
+                    "execution_id": response.execution_id or execution_id or "",
+                    "agent_name": "",
+                    "query": "",
+                    "status": "",
+                    "started_at": "",
+                    "completed_at": "",
+                    "duration_ms": None,
+                    "tokens_input": None,
+                    "tokens_output": None,
+                    "cost_usd": None,
+                    "model_used": "",
+                    "error_details": "",
+                    "steps": [],
+                }
+            steps = []
+            for st in response.steps:
+                step_dict: Dict[str, Any] = {
+                    "step_index": st.step_index,
+                    "step_name": st.step_name or "",
+                    "step_type": st.step_type or "",
+                    "action_name": st.action_name or "",
+                    "status": st.status or "",
+                    "started_at": st.started_at or "",
+                    "completed_at": st.completed_at or "",
+                    "duration_ms": st.duration_ms if st.HasField("duration_ms") else None,
+                    "inputs_json": st.inputs_json or "",
+                    "outputs_json": st.outputs_json or "",
+                    "error_details": st.error_details or "",
+                    "tool_call_trace_json": st.tool_call_trace_json or "",
+                    "input_tokens": st.input_tokens or 0,
+                    "output_tokens": st.output_tokens or 0,
+                }
+                steps.append(step_dict)
+            return {
+                "success": True,
+                "error": None,
+                "execution_id": response.execution_id or "",
+                "agent_name": response.agent_name or "",
+                "query": response.query or "",
+                "status": response.status or "",
+                "started_at": response.started_at or "",
+                "completed_at": response.completed_at or "",
+                "duration_ms": response.duration_ms if response.HasField("duration_ms") else None,
+                "tokens_input": response.tokens_input if response.HasField("tokens_input") else None,
+                "tokens_output": response.tokens_output if response.HasField("tokens_output") else None,
+                "cost_usd": response.cost_usd if response.HasField("cost_usd") else None,
+                "model_used": response.model_used or "",
+                "error_details": response.error_details or "",
+                "steps": steps,
+            }
+        except grpc.RpcError as e:
+            logger.error("GetExecutionTrace failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "error": str(e.details()),
+                "execution_id": execution_id or "",
+                "agent_name": "",
+                "query": "",
+                "status": "",
+                "started_at": "",
+                "completed_at": "",
+                "duration_ms": None,
+                "tokens_input": None,
+                "tokens_output": None,
+                "cost_usd": None,
+                "model_used": "",
+                "error_details": "",
+                "steps": [],
+            }
+        except Exception as e:
+            logger.error("Unexpected error in get_execution_trace: %s", e)
+            return {
+                "success": False,
+                "error": str(e),
+                "execution_id": execution_id or "",
+                "agent_name": "",
+                "query": "",
+                "status": "",
+                "started_at": "",
+                "completed_at": "",
+                "duration_ms": None,
+                "tokens_input": None,
+                "tokens_output": None,
+                "cost_usd": None,
+                "model_used": "",
+                "error_details": "",
+                "steps": [],
+            }
+
     # ===== Universal Todo Operations =====
 
     async def list_todos(
@@ -3355,12 +3553,12 @@ class BackendToolClient:
         states: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         query: str = "",
-        limit: int = 100,
+        limit: int = 0,
         include_archives: bool = False,
         include_body: bool = False,
         closed_since_days: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """List todos. scope: all, inbox, or file path. closed_since_days: only DONE items closed in last N days (e.g. 7 for last week). Returns success, results, count, error."""
+        """List todos. scope: all, inbox, or file path. limit 0 = no cap. closed_since_days: only DONE items closed in last N days (e.g. 7 for last week). Returns success, results, count, error."""
         try:
             await self._ensure_connected()
             request = tool_service_pb2.ListTodosRequest(
@@ -4111,11 +4309,13 @@ class BackendToolClient:
             for table in response.tables:
                 columns = []
                 for col in table.columns:
+                    cref = getattr(col, 'column_ref_json', None) or ''
                     columns.append({
                         'name': col.name,
                         'type': col.type,
                         'is_nullable': col.is_nullable,
-                        'description': getattr(col, 'description', None) or ''
+                        'description': getattr(col, 'description', None) or '',
+                        'column_ref_json': cref,
                     })
                 meta = getattr(table, 'metadata_json', None) or ''
                 try:
@@ -4159,6 +4359,47 @@ class BackendToolClient:
                 'tables': [],
                 'total_tables': 0,
                 'error': str(e)
+            }
+
+    async def resolve_workspace_link(
+        self,
+        ref_payload: Any,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Resolve a _bastion_ref cell value to current label and preview."""
+        try:
+            await self._ensure_connected()
+            ref_json = ref_payload if isinstance(ref_payload, str) else json.dumps(ref_payload)
+            request = tool_service_pb2.ResolveWorkspaceLinkRequest(
+                user_id=user_id,
+                ref_json=ref_json or "{}",
+            )
+            response = await self._stub.ResolveWorkspaceLink(request)
+            preview = {}
+            if response.preview_json:
+                try:
+                    preview = json.loads(response.preview_json)
+                except (json.JSONDecodeError, TypeError):
+                    preview = {}
+            return {
+                "success": response.success,
+                "error": getattr(response, "error", None) or "",
+                "label": response.label or "",
+                "preview": preview,
+                "row_found": response.row_found,
+                "table_id": response.table_id or "",
+                "row_id": response.row_id or "",
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Resolve workspace link failed: {e.code()} - {e.details()}")
+            return {
+                "success": False,
+                "error": str(e),
+                "label": "",
+                "preview": {},
+                "row_found": False,
+                "table_id": "",
+                "row_id": "",
             }
     
     async def query_data_workspace(
@@ -4272,6 +4513,148 @@ class BackendToolClient:
                 'rows_affected': 0,
                 'returning_rows': []
             }
+
+    async def create_data_workspace_table(
+        self,
+        workspace_id: str,
+        database_id: str,
+        table_name: str,
+        user_id: str = "system",
+        description: str = "",
+        columns: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a table in a data workspace (structured)."""
+        try:
+            await self._ensure_connected()
+            req = tool_service_pb2.CreateDataWorkspaceTableRequest(
+                workspace_id=workspace_id,
+                database_id=database_id,
+                table_name=table_name,
+                description=description or "",
+                user_id=user_id,
+                columns_json=json.dumps(columns or []),
+                metadata_json=json.dumps(metadata or {}),
+            )
+            resp = await self._stub.CreateDataWorkspaceTable(req)
+            table = {}
+            if resp.table_json:
+                try:
+                    table = json.loads(resp.table_json)
+                except json.JSONDecodeError:
+                    table = {}
+            return {
+                "success": bool(resp.success),
+                "table_id": resp.table_id,
+                "table": table,
+                "error_message": resp.error_message or "",
+            }
+        except grpc.RpcError as e:
+            return {"success": False, "table_id": "", "table": {}, "error_message": e.details() or str(e)}
+        except Exception as e:
+            return {"success": False, "table_id": "", "table": {}, "error_message": str(e)}
+
+    async def insert_data_workspace_rows(
+        self,
+        workspace_id: str,
+        table_id: str,
+        rows: List[Dict[str, Any]],
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Insert rows into a table (structured)."""
+        try:
+            await self._ensure_connected()
+            req = tool_service_pb2.InsertDataWorkspaceRowsRequest(
+                workspace_id=workspace_id,
+                table_id=table_id,
+                user_id=user_id,
+                rows_json=json.dumps(rows or []),
+            )
+            resp = await self._stub.InsertDataWorkspaceRows(req)
+            ids = []
+            if resp.inserted_row_ids_json:
+                try:
+                    ids = json.loads(resp.inserted_row_ids_json)
+                except json.JSONDecodeError:
+                    ids = []
+            return {
+                "success": bool(resp.success),
+                "rows_inserted": int(resp.rows_inserted),
+                "inserted_row_ids": ids,
+                "error_message": resp.error_message or "",
+            }
+        except grpc.RpcError as e:
+            return {"success": False, "rows_inserted": 0, "inserted_row_ids": [], "error_message": e.details() or str(e)}
+        except Exception as e:
+            return {"success": False, "rows_inserted": 0, "inserted_row_ids": [], "error_message": str(e)}
+
+    async def update_data_workspace_rows(
+        self,
+        workspace_id: str,
+        table_id: str,
+        updates: List[Dict[str, Any]],
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Update rows in a table (structured)."""
+        try:
+            await self._ensure_connected()
+            req = tool_service_pb2.UpdateDataWorkspaceRowsRequest(
+                workspace_id=workspace_id,
+                table_id=table_id,
+                user_id=user_id,
+                updates_json=json.dumps(updates or []),
+            )
+            resp = await self._stub.UpdateDataWorkspaceRows(req)
+            ids = []
+            if resp.updated_row_ids_json:
+                try:
+                    ids = json.loads(resp.updated_row_ids_json)
+                except json.JSONDecodeError:
+                    ids = []
+            return {
+                "success": bool(resp.success),
+                "rows_updated": int(resp.rows_updated),
+                "updated_row_ids": ids,
+                "error_message": resp.error_message or "",
+            }
+        except grpc.RpcError as e:
+            return {"success": False, "rows_updated": 0, "updated_row_ids": [], "error_message": e.details() or str(e)}
+        except Exception as e:
+            return {"success": False, "rows_updated": 0, "updated_row_ids": [], "error_message": str(e)}
+
+    async def delete_data_workspace_rows(
+        self,
+        workspace_id: str,
+        table_id: str,
+        row_ids: List[str],
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Delete rows from a table (structured)."""
+        try:
+            await self._ensure_connected()
+            req = tool_service_pb2.DeleteDataWorkspaceRowsRequest(
+                workspace_id=workspace_id,
+                table_id=table_id,
+                user_id=user_id,
+                row_ids_json=json.dumps(row_ids or []),
+            )
+            resp = await self._stub.DeleteDataWorkspaceRows(req)
+            ids = []
+            if resp.deleted_row_ids_json:
+                try:
+                    ids = json.loads(resp.deleted_row_ids_json)
+                except json.JSONDecodeError:
+                    ids = []
+            return {
+                "success": bool(resp.success),
+                "rows_deleted": int(resp.rows_deleted),
+                "deleted_row_ids": ids,
+                "error_message": resp.error_message or "",
+            }
+        except grpc.RpcError as e:
+            return {"success": False, "rows_deleted": 0, "deleted_row_ids": [], "error_message": e.details() or str(e)}
+        except Exception as e:
+            return {"success": False, "rows_deleted": 0, "deleted_row_ids": [], "error_message": str(e)}
 
     # ===== Navigation Operations (locations and routes) =====
 
@@ -5238,6 +5621,60 @@ class BackendToolClient:
             logger.error(f"delete_contact error: {e}")
             return f"Error: {e}"
 
+    async def m365_graph_invoke(
+        self,
+        user_id: str,
+        operation: str,
+        connection_id: Optional[int] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Microsoft 365 Graph workloads (To Do, Drive, OneNote, Planner) via tools-service."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.M365GraphInvokeRequest(
+                user_id=user_id,
+                connection_id=int(connection_id or 0),
+                operation=(operation or "").strip(),
+                params_json=json.dumps(params or {}),
+            )
+            response = await self._stub.M365GraphInvoke(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "formatted": response.error or "M365 operation failed",
+                }
+            try:
+                data = json.loads(response.result_json or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {"result": data}
+            parts = [f"M365 {operation}"]
+            if data.get("error"):
+                parts.append(f"error: {data['error']}")
+            else:
+                for key in ("lists", "tasks", "items", "notebooks", "sections", "pages", "plans"):
+                    if key in data and isinstance(data[key], list):
+                        parts.append(f"{key}: {len(data[key])}")
+                if "task_id" in data:
+                    parts.append(f"task_id: {data.get('task_id')}")
+                if "item_id" in data:
+                    parts.append(f"item_id: {data.get('item_id')}")
+                if "page_id" in data:
+                    parts.append(f"page_id: {data.get('page_id')}")
+                if data.get("success") is False:
+                    parts.append("success: false")
+            formatted = "\n".join(parts)
+            out: Dict[str, Any] = {"success": True, "formatted": formatted}
+            out.update(data)
+            return out
+        except grpc.RpcError as e:
+            logger.error("m365_graph_invoke failed: %s - %s", e.code(), e.details())
+            return {"success": False, "formatted": str(e.details() or e)}
+        except Exception as e:
+            logger.error("m365_graph_invoke error: %s", e)
+            return {"success": False, "formatted": f"Error: {e}"}
+
     async def list_user_accounts(
         self,
         user_id: str,
@@ -5317,6 +5754,25 @@ class BackendToolClient:
             return None
         except Exception as e:
             logger.error("get_agent_profile error: %s", e)
+            return None
+
+    async def ensure_default_profile(self, user_id: str) -> Optional[str]:
+        """Return the user's active builtin profile id, creating one if needed. Returns profile_id or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.EnsureDefaultProfileRequest(user_id=user_id)
+            response = await self._stub.EnsureDefaultProfile(request)
+            pid = response.profile_id or ""
+            if pid:
+                if response.was_created:
+                    logger.info("ensure_default_profile: created builtin profile %s for user %s", pid, user_id)
+                return pid
+            return None
+        except grpc.RpcError as e:
+            logger.error("ensure_default_profile gRPC failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("ensure_default_profile error: %s", e)
             return None
 
     async def list_auto_routable_profiles(self, user_id: str) -> List[Dict[str, Any]]:
@@ -5527,6 +5983,7 @@ class BackendToolClient:
         query: str,
         limit: int = 3,
         score_threshold: float = 0.5,
+        active_connection_types: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """Semantic search over skills for auto-discovery. Returns list of dicts with id, similarity_score, etc."""
         try:
@@ -5537,7 +5994,12 @@ class BackendToolClient:
                 limit=limit,
                 score_threshold=score_threshold,
             )
-            response = await self._stub.SearchSkills(request)
+            call_kwargs: Dict[str, Any] = {}
+            if active_connection_types is not None:
+                call_kwargs["metadata"] = (
+                    ("active-connection-types", json.dumps(list(active_connection_types))),
+                )
+            response = await self._stub.SearchSkills(request, **call_kwargs)
             if not response.success:
                 logger.warning("search_skills: %s", response.error)
                 return []
@@ -5573,6 +6035,101 @@ class BackendToolClient:
             return []
         except Exception as e:
             logger.error("list_skills error: %s", e)
+            return []
+
+    async def list_skill_summaries(
+        self,
+        user_id: str,
+        include_builtin: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Lightweight skill summaries for manifest/catalog injection (no procedure/schemas)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListSkillSummariesRequest(
+                user_id=user_id,
+                include_builtin=include_builtin,
+            )
+            response = await self._stub.ListSkillSummaries(request)
+            if not response.success:
+                logger.warning("list_skill_summaries: %s", response.error)
+                return []
+            return json.loads(response.summaries_json or "[]")
+        except grpc.RpcError as e:
+            logger.error("list_skill_summaries failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("list_skill_summaries error: %s", e)
+            return []
+
+    async def get_skill_by_slug(
+        self,
+        user_id: str,
+        slug: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a single skill by slug for direct acquisition. Returns full skill dict or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetSkillBySlugRequest(
+                user_id=user_id,
+                slug=slug,
+            )
+            response = await self._stub.GetSkillBySlug(request)
+            if not response.success:
+                logger.warning("get_skill_by_slug(%s): %s", slug, response.error)
+                return None
+            return json.loads(response.skill_json or "null")
+        except grpc.RpcError as e:
+            logger.error("get_skill_by_slug failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("get_skill_by_slug error: %s", e)
+            return None
+
+    async def get_candidate_for_slug(
+        self,
+        user_id: str,
+        slug: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the candidate version of a skill by slug, or None if no candidate."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetCandidateForSlugRequest(
+                user_id=user_id,
+                slug=slug,
+            )
+            response = await self._stub.GetCandidateForSlug(request)
+            if not response.success or not response.has_candidate:
+                return None
+            return json.loads(response.skill_json or "null")
+        except grpc.RpcError as e:
+            logger.error("get_candidate_for_slug failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("get_candidate_for_slug error: %s", e)
+            return None
+
+    async def get_skills_by_slugs(
+        self,
+        user_id: str,
+        slugs: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Batch fetch skills by slugs for dependency resolution."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetSkillsBySlugsRequest(
+                user_id=user_id,
+                slugs=slugs,
+            )
+            response = await self._stub.GetSkillsBySlugs(request)
+            if not response.success:
+                logger.warning("get_skills_by_slugs: %s", response.error)
+                return []
+            return json.loads(response.skills_json or "[]")
+        except grpc.RpcError as e:
+            logger.error("get_skills_by_slugs failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("get_skills_by_slugs error: %s", e)
             return []
 
     async def create_skill(
@@ -5892,6 +6449,45 @@ class BackendToolClient:
             return None
         except Exception as e:
             logger.error("execute_connector error: %s", e)
+            return None
+
+    async def execute_github_endpoint(
+        self,
+        user_id: str,
+        connection_id: int,
+        endpoint_id: str,
+        params: Optional[Dict[str, Any]] = None,
+        max_pages: int = 5,
+    ) -> Optional[Dict[str, Any]]:
+        """Execute a GitHub REST endpoint via Tools Service (OAuth from external_connections)."""
+        import json
+
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ExecuteGitHubEndpointRequest(
+                user_id=user_id,
+                connection_id=int(connection_id),
+                endpoint_id=endpoint_id or "",
+                params_json=json.dumps(params or {}),
+                max_pages=int(max_pages),
+            )
+            response = await self._stub.ExecuteGitHubEndpoint(request)
+            if not response.success:
+                logger.warning("execute_github_endpoint: %s", response.error)
+                return {
+                    "records": [],
+                    "count": 0,
+                    "formatted": response.error or "Failed",
+                    "error": response.error,
+                }
+            if response.result_json:
+                return json.loads(response.result_json)
+            return {"records": [], "count": 0, "formatted": ""}
+        except grpc.RpcError as e:
+            logger.error("execute_github_endpoint failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("execute_github_endpoint error: %s", e)
             return None
 
     async def execute_mcp_tool(
@@ -7519,11 +8115,21 @@ class BackendToolClient:
             logger.error("upsert_user_fact error: %s", e)
             return {"success": False, "error": str(e)}
 
-    async def get_user_facts(self, user_id: str = "system") -> Dict[str, Any]:
-        """Get all facts for a user. Returns { success, facts: list[dict], error }."""
+    async def get_user_facts(
+        self,
+        user_id: str = "system",
+        *,
+        query: str = "",
+        use_themed_memory: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Get facts for a user. Optional query + use_themed_memory for theme-first retrieval."""
         try:
             await self._ensure_connected()
             request = tool_service_pb2.GetUserFactsRequest(user_id=user_id)
+            if query:
+                request.query = query
+            if use_themed_memory is False:
+                request.use_full_fact_list = True
             response = await self._stub.GetUserFacts(request)
             if not response.success:
                 return {"success": False, "facts": [], "error": response.error or "Unknown error"}
@@ -7535,6 +8141,63 @@ class BackendToolClient:
         except Exception as e:
             logger.error("get_user_facts error: %s", e)
             return {"success": False, "facts": [], "error": str(e)}
+
+    async def read_scratchpad(
+        self,
+        user_id: str = "system",
+        pad_index: int = -1,
+    ) -> Dict[str, Any]:
+        """Read the user's scratch pad pads. pad_index=-1 returns all four pads; 0-3 returns a single pad."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ReadScratchpadRequest(
+                user_id=user_id,
+                pad_index=pad_index,
+            )
+            response = await self._stub.ReadScratchpad(request)
+            if not response.success:
+                return {"success": False, "pads": [], "active_index": 0, "error": response.error or "Unknown error"}
+            pads = [
+                {"index": p.index, "label": p.label, "body": p.body}
+                for p in response.pads
+            ]
+            return {
+                "success": True,
+                "pads": pads,
+                "active_index": response.active_index,
+                "error": "",
+            }
+        except grpc.RpcError as e:
+            logger.error("read_scratchpad failed: %s - %s", e.code(), e.details())
+            return {"success": False, "pads": [], "active_index": 0, "error": str(e.details())}
+        except Exception as e:
+            logger.error("read_scratchpad error: %s", e)
+            return {"success": False, "pads": [], "active_index": 0, "error": str(e)}
+
+    async def write_scratchpad_pad(
+        self,
+        pad_index: int,
+        body: str,
+        label: str = "",
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Overwrite the body (and optionally label) of a single scratch pad for the user."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.WriteScratchpadPadRequest(
+                user_id=user_id,
+                pad_index=pad_index,
+                body=body,
+                label=label,
+            )
+            response = await self._stub.WriteScratchpadPad(request)
+            return {"success": response.success, "error": response.error or ""}
+        except grpc.RpcError as e:
+            logger.error("write_scratchpad_pad failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": str(e.details())}
+        except Exception as e:
+            logger.error("write_scratchpad_pad error: %s", e)
+            return {"success": False, "error": str(e)}
 
     async def invoke_device_tool(
         self,
@@ -7574,6 +8237,44 @@ class BackendToolClient:
             return {"success": False, "result": {}, "result_json": "{}", "error": str(e.details()), "formatted": str(e.details())}
         except Exception as e:
             logger.error("invoke_device_tool error: %s", e)
+            return {"success": False, "result": {}, "result_json": "{}", "error": str(e), "formatted": str(e)}
+
+    async def set_device_workspace(
+        self,
+        user_id: str = "system",
+        workspace_root: str = "",
+        device_id: str = "",
+        timeout: int = 30,
+    ) -> Dict[str, Any]:
+        """Set the device-side active workspace root. Returns dict with success, result_json, error, formatted."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SetDeviceWorkspaceRequest(
+                user_id=user_id,
+                device_id=device_id,
+                workspace_root=workspace_root,
+                timeout_seconds=timeout,
+            )
+            response = await self._stub.SetDeviceWorkspace(request)
+            result = {
+                "success": response.success,
+                "result_json": response.result_json or "{}",
+                "error": response.error or "",
+                "formatted": response.formatted or "",
+            }
+            if response.success and response.result_json:
+                try:
+                    result["result"] = json.loads(response.result_json)
+                except json.JSONDecodeError:
+                    result["result"] = {}
+            else:
+                result["result"] = {}
+            return result
+        except grpc.RpcError as e:
+            logger.error("set_device_workspace failed: %s - %s", e.code(), e.details())
+            return {"success": False, "result": {}, "result_json": "{}", "error": str(e.details()), "formatted": str(e.details())}
+        except Exception as e:
+            logger.error("set_device_workspace error: %s", e)
             return {"success": False, "result": {}, "result_json": "{}", "error": str(e), "formatted": str(e)}
 
     async def get_device_capabilities(self, user_id: str = "system") -> List[str]:

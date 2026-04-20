@@ -1,3 +1,23 @@
+/* App root above the canvas; wallpaper layer lives inside #root (sibling to Routes) */
+#root {
+  position: relative;
+  z-index: 1;
+  min-height: 100%;
+}
+
+/* MUI CssBaseline paints an opaque body background; hide it when the wallpaper layer is shown */
+body[data-ui-wallpaper='active'] {
+  background-color: transparent !important;
+}
+
+html:has(body[data-ui-wallpaper='active']) {
+  background-color: transparent !important;
+}
+
+body[data-ui-wallpaper='active'] #root {
+  background-color: transparent !important;
+}
+
 /* Global CSS Variables for Theme Support */
 :root {
   /* Light theme variables */

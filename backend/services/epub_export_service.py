@@ -207,98 +207,90 @@ class EpubExportService:
             
             # Initialize folder service for path resolution
             folder_service = FolderService()
-            
-            # Try to resolve the cover path
-            # cover_src might be a relative path like "./cover.jpg" or "cover.jpg"
-            # or an absolute path, or a document reference
-            
-            # First, try as a relative path from user's upload directory
             upload_dir = Path(settings.UPLOAD_DIR)
-            
-            # Try different path resolution strategies
-            potential_paths = []
-            
-            # Strategy 0: Resolve relative to folder_id if provided
-            if folder_id and not Path(cover_src).is_absolute():
-                folder_path = await folder_service.get_folder_physical_path(folder_id, user_id=user_id)
-                if folder_path:
-                    # Try directly relative to the folder
-                    potential_paths.append(folder_path / cover_src.lstrip("./"))
-            
-            # Strategy 1: Direct path resolution (relative to uploads)
-            if not Path(cover_src).is_absolute():
-                # Try user's base directory
-                try:
-                    row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
-                    username = row['username'] if row else user_id
-                    user_base = upload_dir / "Users" / username
-                    potential_paths.append(user_base / cover_src.lstrip("./"))
-                except Exception:
-                    pass
-                
-                # Try global directory
-                global_base = upload_dir / "Global"
-                potential_paths.append(global_base / cover_src.lstrip("./"))
-                
-                # Try as-is in uploads root
-                potential_paths.append(upload_dir / cover_src.lstrip("./"))
-            else:
-                potential_paths.append(Path(cover_src))
-            
-            # Try each potential path
-            for path in potential_paths:
-                if path.exists() and path.is_file():
-                    # Read image bytes
-                    image_bytes = path.read_bytes()
-                    
-                    # Determine media type from extension
-                    ext = path.suffix.lower()
-                    media_types = {
-                        ".jpg": "image/jpeg",
-                        ".jpeg": "image/jpeg",
-                        ".png": "image/png",
-                        ".gif": "image/gif",
-                        ".webp": "image/webp",
-                    }
-                    media_type = media_types.get(ext, "image/jpeg")
-                    
-                    # Generate href path
-                    cover_href = f"images/cover{ext or '.jpg'}"
-                    
-                    return image_bytes, media_type, cover_href
-
-            # Strategy 2: DB Lookup - If still not found, search for a document with this filename in DB
             clean_filename = Path(cover_src).name
+
+            ext_to_media = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".webp": "image/webp",
+            }
+
+            # Strategy 1: DB + document-service stream (preferred when backend has no local uploads mount)
             db_row = await fetch_one(
                 "SELECT filename, doc_type, document_id, folder_id FROM documents WHERE (filename = $1 OR title = $1) AND user_id = $2 AND doc_type IN ('image', 'jpg', 'png', 'gif', 'webp', 'jpeg')",
                 clean_filename, user_id
             )
-            
+
             if db_row:
-                # We found a document reference, now we need its physical path
-                # Use FolderService to get its physical path
-                target_folder_id = db_row['folder_id']
-                target_filename = db_row['filename']
-                
+                target_folder_id = db_row["folder_id"]
+                target_filename = db_row["filename"]
+
                 full_path = await folder_service.get_document_file_path(
                     filename=target_filename,
                     folder_id=target_folder_id,
-                    user_id=user_id
+                    user_id=user_id,
                 )
-                
-                if full_path and full_path.exists() and full_path.is_file():
-                    image_bytes = full_path.read_bytes()
-                    ext = full_path.suffix.lower()
-                    media_type = {
-                        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                        ".png": "image/png", ".gif": "image/gif",
-                        ".webp": "image/webp"
-                    }.get(ext, "image/jpeg")
-                    
+
+                if full_path and db_row.get("document_id"):
+                    from clients.document_service_client import (
+                        get_document_service_client,
+                    )
+
+                    dsc = get_document_service_client()
+                    await dsc.initialize(required=True)
+                    parts: List[bytes] = []
+                    async for ch in dsc.download_document_stream(
+                        db_row["document_id"],
+                        user_id or "",
+                        role="",
+                    ):
+                        if ch.data:
+                            parts.append(ch.data)
+                    image_bytes = b"".join(parts)
+                    if image_bytes:
+                        ext = Path(str(full_path)).suffix.lower()
+                        media_type = ext_to_media.get(ext, "image/jpeg")
+                        cover_href = f"images/cover{ext or '.jpg'}"
+                        return image_bytes, media_type, cover_href
+
+            # Strategy 2: Local UPLOAD_DIR fallbacks (graceful degradation if stream misses or path-only cover)
+            potential_paths: List[Path] = []
+
+            if folder_id and not Path(cover_src).is_absolute():
+                folder_path = await folder_service.get_folder_physical_path(
+                    folder_id, user_id=user_id
+                )
+                if folder_path:
+                    potential_paths.append(folder_path / cover_src.lstrip("./"))
+
+            if not Path(cover_src).is_absolute():
+                try:
+                    row = await fetch_one(
+                        "SELECT username FROM users WHERE user_id = $1", user_id
+                    )
+                    username = row["username"] if row else user_id
+                    user_base = upload_dir / "Users" / username
+                    potential_paths.append(user_base / cover_src.lstrip("./"))
+                except Exception:
+                    pass
+
+                global_base = upload_dir / "Global"
+                potential_paths.append(global_base / cover_src.lstrip("./"))
+                potential_paths.append(upload_dir / cover_src.lstrip("./"))
+            else:
+                potential_paths.append(Path(cover_src))
+
+            for path in potential_paths:
+                if path.exists() and path.is_file():
+                    image_bytes = path.read_bytes()
+                    ext = path.suffix.lower()
+                    media_type = ext_to_media.get(ext, "image/jpeg")
                     cover_href = f"images/cover{ext or '.jpg'}"
                     return image_bytes, media_type, cover_href
-            
-            # If no file found, return None
+
             return None, None, None
             
         except Exception as e:

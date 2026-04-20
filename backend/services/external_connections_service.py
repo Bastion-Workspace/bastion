@@ -23,6 +23,10 @@ from services.database_manager.database_helpers import (
     fetch_one,
     fetch_value,
 )
+from services.m365_oauth_utils import (
+    DEFAULT_M365_ENABLED_SERVICES,
+    normalize_m365_services,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +189,7 @@ class ExternalConnectionsService:
         if not row:
             return None
         provider = row.get("provider") or ""
-        if provider in ("imap_smtp", "caldav"):
+        if provider in ("imap_smtp", "caldav", "github"):
             return self._decrypt_token_safe(row["encrypted_access_token"])
         expires_at = row["token_expires_at"]
         if expires_at is not None and expires_at.tzinfo is None:
@@ -194,10 +198,13 @@ class ExternalConnectionsService:
         now_utc = datetime.now(timezone.utc)
         if expires_at and (expires_at - timedelta(seconds=buffer_seconds)) > now_utc:
             return self._decrypt_token_safe(row["encrypted_access_token"])
-        refreshed = await self.refresh_access_token(connection_id, rls_context=rls_context)
-        if not refreshed:
-            await asyncio.sleep(2)
+        refreshed = False
+        for attempt in range(3):
             refreshed = await self.refresh_access_token(connection_id, rls_context=rls_context)
+            if refreshed:
+                break
+            if attempt < 2:
+                await asyncio.sleep(2 * (attempt + 1))
         if not refreshed:
             return None
         row2 = await fetch_one(
@@ -264,6 +271,9 @@ class ExternalConnectionsService:
                 connection_id, access_token, new_refresh, expires_in, rls_context=rls_context
             )
             return True
+        if provider == "github":
+            logger.info("GitHub OAuth tokens do not refresh via standard flow; re-authorize if invalid")
+            return False
         logger.warning("Token refresh not implemented for provider=%s", provider)
         await self._set_connection_status(
             connection_id, "token_error", rls_context=rls_context
@@ -541,6 +551,103 @@ class ExternalConnectionsService:
             metadata_str,
             rls_context=ctx,
         )
+
+    def get_enabled_services_from_metadata(self, provider_metadata: Any) -> List[str]:
+        """Read enabled_services from provider_metadata JSON; default for legacy Microsoft rows."""
+        meta = self._parse_provider_metadata(provider_metadata)
+        raw = meta.get("enabled_services")
+        if isinstance(raw, list) and raw:
+            return normalize_m365_services([str(x) for x in raw])
+        return list(DEFAULT_M365_ENABLED_SERVICES)
+
+    async def get_enabled_services(
+        self,
+        connection_id: int,
+        rls_context: Optional[Dict[str, str]] = None,
+    ) -> List[str]:
+        row = await self.get_connection_by_id(connection_id, rls_context=rls_context)
+        if not row:
+            return list(DEFAULT_M365_ENABLED_SERVICES)
+        return self.get_enabled_services_from_metadata(row.get("provider_metadata"))
+
+    async def update_enabled_services_only(
+        self,
+        connection_id: int,
+        services: List[str],
+        user_id: str,
+        rls_context: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """Set provider_metadata.enabled_services without changing tokens. Owner check via user_id."""
+        ctx = rls_context or {"user_id": user_id}
+        row = await fetch_one(
+            """
+            SELECT id, provider_metadata FROM external_connections
+            WHERE id = $1 AND user_id = $2 AND is_active = true
+            """,
+            connection_id,
+            user_id,
+            rls_context=ctx,
+        )
+        if not row:
+            return False
+        meta = self._parse_provider_metadata(row.get("provider_metadata"))
+        meta["enabled_services"] = normalize_m365_services(services)
+        await execute(
+            """
+            UPDATE external_connections
+            SET provider_metadata = $2::jsonb, updated_at = NOW()
+            WHERE id = $1 AND user_id = $3
+            """,
+            connection_id,
+            json.dumps(meta),
+            user_id,
+            rls_context=ctx,
+        )
+        return True
+
+    async def update_oauth_tokens_and_metadata(
+        self,
+        connection_id: int,
+        access_token: str,
+        refresh_token: str,
+        expires_in: int,
+        scopes: List[str],
+        provider_metadata_updates: Dict[str, Any],
+        rls_context: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """Replace OAuth tokens and merge provider_metadata keys (e.g. after incremental consent)."""
+        row = await fetch_one(
+            """
+            SELECT id, provider_metadata FROM external_connections
+            WHERE id = $1 AND is_active = true
+            """,
+            connection_id,
+            rls_context=rls_context,
+        )
+        if not row:
+            return False
+        meta = self._parse_provider_metadata(row.get("provider_metadata"))
+        meta.update(provider_metadata_updates)
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+        enc_access = self._encrypt_token(access_token)
+        enc_refresh = self._encrypt_token(refresh_token)
+        await execute(
+            """
+            UPDATE external_connections
+            SET encrypted_access_token = $2, encrypted_refresh_token = $3,
+                token_expires_at = $4, scopes = $5, provider_metadata = $6::jsonb,
+                connection_status = 'active', updated_at = NOW()
+            WHERE id = $1
+            """,
+            connection_id,
+            enc_access,
+            enc_refresh,
+            expires_at,
+            scopes,
+            json.dumps(meta),
+            rls_context=rls_context,
+        )
+        return True
 
     SYSTEM_EMAIL_KEY = "system_email_connection_id"
 

@@ -1,15 +1,11 @@
 """
-Roosevelt's Messaging Services
-User-to-user communication cavalry!
+Messaging services (user-to-user communication).
 """
 
-from .encryption_service import encryption_service, encrypt_message_content, decrypt_message_content
+from .encryption_service import encryption_service
 from .messaging_service import messaging_service
 
 __all__ = [
-    'encryption_service',
-    'encrypt_message_content',
-    'decrypt_message_content',
-    'messaging_service',
+    "encryption_service",
+    "messaging_service",
 ]
-

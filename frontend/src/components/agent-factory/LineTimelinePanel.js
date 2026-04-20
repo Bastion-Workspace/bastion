@@ -1,5 +1,5 @@
 /**
- * Team timeline page: chronological feed of inter-agent messages with filters and live updates.
+ * Line timeline: chronological feed of inter-agent messages with filters and live updates.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
@@ -229,7 +229,7 @@ export default function LineTimelinePanel({ lineId }) {
   if (!team) {
     return (
       <Box sx={{ p: 4 }}>
-        <Typography color="text.secondary">Team not found.</Typography>
+        <Typography color="text.secondary">Line not found.</Typography>
       </Box>
     );
   }
@@ -282,7 +282,7 @@ export default function LineTimelinePanel({ lineId }) {
       <Dialog open={clearConfirmOpen} onClose={() => !clearLoading && setClearConfirmOpen(false)}>
         <DialogTitle>Clear timeline</DialogTitle>
         <DialogContent>
-          <Typography>Remove all messages from this team&apos;s timeline? This cannot be undone.</Typography>
+          <Typography>Remove all messages from this line&apos;s timeline? This cannot be undone.</Typography>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setClearConfirmOpen(false)} disabled={clearLoading}>Cancel</Button>
@@ -297,7 +297,7 @@ export default function LineTimelinePanel({ lineId }) {
             <TextField
               fullWidth
               size="small"
-              placeholder="Post a message to the team timeline…"
+              placeholder="Post a message to the line timeline…"
               value={userMessage}
               onChange={(e) => setUserMessage(e.target.value)}
               multiline

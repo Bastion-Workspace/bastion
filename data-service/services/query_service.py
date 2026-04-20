@@ -12,14 +12,26 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 
 import sqlparse
-from sqlparse.sql import Statement, IdentifierList, Identifier
+from sqlparse import tokens as T
+from sqlparse.sql import IdentifierList, Identifier
 from sqlparse.tokens import Keyword, DML
 
 from db.connection_manager import DatabaseConnectionManager
 from services.table_service import TableService
 from services.database_service import DatabaseService
+from services.sql_workspace_identifier_rewrite import (
+    rewrite_workspace_table_identifiers_in_sql,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _sqlparse_skip_trivia(tok) -> bool:
+    """Whitespace and comments (flattened tokens have no is_comment attribute)."""
+    if getattr(tok, "is_whitespace", False):
+        return True
+    ttype = getattr(tok, "ttype", None)
+    return ttype in T.Comment if ttype is not None else False
 
 
 class QueryService:
@@ -72,18 +84,43 @@ class QueryService:
             
             # Also check for UPDATE and INSERT statements
             for statement in parsed:
-                tokens = statement.tokens
-                for i, token in enumerate(tokens):
+                last_dml = None
+                expect_after_into = False
+                expect_after_delete_from = False
+                for token in statement.flatten():
+                    if _sqlparse_skip_trivia(token):
+                        continue
                     if token.ttype is DML:
-                        dml_type = token.value.upper()
-                        if dml_type in ('UPDATE', 'INSERT', 'DELETE'):
-                            # Next identifier should be table name
-                            if i + 1 < len(tokens):
-                                next_token = tokens[i + 1]
-                                if isinstance(next_token, Identifier):
-                                    table_name = next_token.get_real_name()
-                                    if table_name:
-                                        table_names.append(table_name.lower())
+                        last_dml = (token.value or "").upper()
+                        expect_after_into = False
+                        expect_after_delete_from = False
+                        continue
+                    if token.ttype is Keyword:
+                        v = (token.value or "").upper()
+                        if last_dml == "INSERT" and v == "INTO":
+                            expect_after_into = True
+                            continue
+                        if last_dml == "DELETE" and v == "FROM":
+                            expect_after_delete_from = True
+                            continue
+                    if isinstance(token, Identifier):
+                        table_name = token.get_real_name()
+                        if not table_name:
+                            continue
+                        if last_dml == "UPDATE":
+                            table_names.append(table_name.lower())
+                            last_dml = None
+                            continue
+                        if last_dml == "INSERT" and expect_after_into:
+                            table_names.append(table_name.lower())
+                            last_dml = None
+                            expect_after_into = False
+                            continue
+                        if last_dml == "DELETE" and expect_after_delete_from:
+                            table_names.append(table_name.lower())
+                            last_dml = None
+                            expect_after_delete_from = False
+                            continue
             
             # Remove duplicates and return
             return list(set(table_names))
@@ -116,6 +153,11 @@ class QueryService:
         insert_pattern = r'\bINSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)'
         matches = re.findall(insert_pattern, sql, re.IGNORECASE)
         table_names.extend([m.lower() for m in matches])
+
+        # Pattern for DELETE FROM table_name
+        delete_pattern = r'\bDELETE\s+FROM\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+        matches = re.findall(delete_pattern, sql, re.IGNORECASE)
+        table_names.extend([m.lower() for m in matches])
         
         return list(set(table_names))
     
@@ -126,15 +168,35 @@ class QueryService:
     
     @staticmethod
     def _get_statement_type(sql: str) -> str:
-        """Return SELECT, INSERT, UPDATE, DELETE, or DDL (CREATE/ALTER/DROP) from first token."""
-        stripped = sql.strip().upper()
-        for token in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
-            if stripped.startswith(token):
-                return token
-        for token in ('CREATE', 'ALTER', 'DROP'):
-            if stripped.startswith(token):
-                return token
-        return 'SELECT'
+        """
+        Classify statement by scanning parsed tokens for the first DML/DDL keyword.
+
+        This correctly handles leading comments/whitespace and CTEs (WITH ... SELECT/INSERT/...).
+        """
+        if not sql or not sql.strip():
+            return "SELECT"
+        try:
+            parsed = sqlparse.parse(sql)
+            if not parsed:
+                return "SELECT"
+            ddl_kw = {"CREATE", "ALTER", "DROP", "TRUNCATE", "MERGE", "COPY"}
+            for statement in parsed:
+                for tok in statement.flatten():
+                    if _sqlparse_skip_trivia(tok):
+                        continue
+                    if tok.ttype is DML:
+                        v = (tok.value or "").upper()
+                        return v if v in ("SELECT", "INSERT", "UPDATE", "DELETE") else "SELECT"
+                    if tok.ttype is Keyword:
+                        v = (tok.value or "").upper()
+                        if v in ddl_kw:
+                            return v
+                        if v in ("SELECT", "INSERT", "UPDATE", "DELETE"):
+                            return v
+            return "SELECT"
+        except Exception:
+            # Fallback to a conservative read classification
+            return "SELECT"
 
     @staticmethod
     def _looks_like_sql(text: str) -> bool:
@@ -174,49 +236,43 @@ class QueryService:
         table_names: List[str],
         user_id: Optional[str] = None,
         user_team_ids: Optional[List[str]] = None
-    ) -> bool:
+    ) -> Dict[str, str]:
         """
-        Verify all referenced tables belong to the workspace
-        
-        Args:
-            workspace_id: Workspace to check against
-            table_names: List of table names referenced in query
-            user_id: User ID for RLS context
-            user_team_ids: Team IDs for RLS context
-            
+        Verify all referenced tables belong to the workspace.
+
         Returns:
-            True if all tables are accessible
-            
+            Mapping of lowercased table name to catalog (view) name for SQL rewriting.
+
         Raises:
             ValueError: If any table is not accessible
         """
         if not table_names:
-            return True
-        
-        # Get all databases in workspace
+            return {}
+
         databases = await self.database_service.list_databases(
             workspace_id,
             user_id=user_id,
-            user_team_ids=user_team_ids
+            user_team_ids=user_team_ids,
         )
-        
-        # Get all tables in all databases
-        all_table_names = set()
+
+        lower_to_exact: Dict[str, str] = {}
         for database in databases:
             tables = await self.table_service.list_tables(
-                database['database_id'],
+                database["database_id"],
                 user_id=user_id,
-                user_team_ids=user_team_ids
+                user_team_ids=user_team_ids,
             )
             for table in tables:
-                all_table_names.add(table['name'].lower())
-        
-        # Check if all referenced tables exist
+                n = table["name"]
+                lower_to_exact[n.lower()] = n
+
         for table_name in table_names:
-            if table_name not in all_table_names:
-                raise ValueError(f"Access denied: Table '{table_name}' not found in workspace")
-        
-        return True
+            if table_name not in lower_to_exact:
+                raise ValueError(
+                    f"Access denied: Table '{table_name}' not found in workspace"
+                )
+
+        return lower_to_exact
     
     async def execute_sql_query(
         self,
@@ -277,13 +333,20 @@ class QueryService:
                     "arrow_results": b"",
                 }
             
+            lower_to_exact: Dict[str, str] = {}
             if not is_ddl:
-                await self._validate_table_access(
+                lower_to_exact = await self._validate_table_access(
                     workspace_id,
                     table_names,
                     user_id=user_id,
-                    user_team_ids=user_team_ids
+                    user_team_ids=user_team_ids,
                 )
+                if lower_to_exact and table_names:
+                    sql_query = rewrite_workspace_table_identifiers_in_sql(
+                        sql_query,
+                        lower_to_exact,
+                        table_names,
+                    )
             
             if table_names or is_ddl:
                 await self.table_service._ensure_workspace_schema_exists(

@@ -37,7 +37,7 @@ router = APIRouter()
 @router.get("/api/conversations/{conversation_id}/checkpoints")
 async def list_conversation_checkpoints(conversation_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     try:
-        logger.info(f"🧭 Listing checkpoints for conversation: {conversation_id}")
+        logger.debug(f"🧭 Listing checkpoints for conversation: {conversation_id}")
         from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
         checkpointer = await get_postgres_checkpointer()
         if not checkpointer.is_initialized:
@@ -78,7 +78,7 @@ async def list_conversation_checkpoints(conversation_id: str, current_user: Auth
 @router.get("/api/conversations", response_model=ConversationListResponse)
 async def list_conversations(skip: int = 0, limit: int = 50, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     try:
-        logger.info(f"💬 Listing conversations from database (skip={skip}, limit={limit})")
+        logger.debug(f"💬 Listing conversations from database (skip={skip}, limit={limit})")
         conversations = []
         try:
             import asyncpg
@@ -210,7 +210,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
-        logger.info(f"💬 Getting conversation: {conversation_id}")
+        logger.debug(f"💬 Getting conversation: {conversation_id}")
         conversation_dict = None
 
         # Fast path: for just-created conversations, skip checkpoint lookup and use DB only
@@ -238,7 +238,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                     "updated_at": db_conversation.get("updated_at", datetime.now(timezone.utc)),
                     "messages": [],
                 }
-                logger.info(f"✅ Conversation {conversation_id} found in DB (recent), skipping checkpoint")
+                logger.debug(f"✅ Conversation {conversation_id} found in DB (recent), skipping checkpoint")
 
         if not conversation_dict:
             from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
@@ -295,7 +295,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                             "updated_at": channel_values.get('conversation_updated_at', datetime.now().isoformat()),
                             "messages": []
                         }
-                        logger.info(f"✅ Found conversation in LangGraph checkpoint: {conversation_id}")
+                        logger.debug(f"✅ Found conversation in LangGraph checkpoint: {conversation_id}")
                         
                         # CRITICAL FIX: Always check database for title, even when checkpoint exists
                         try:
@@ -307,7 +307,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                                 db_title = db_conversation.get("title")
                                 if db_title and db_title != "New Conversation" and db_title != "Untitled Conversation":
                                     conversation_dict["title"] = db_title
-                                    logger.info(f"✅ Using database title for conversation {conversation_id}: {db_title}")
+                                    logger.debug(f"✅ Using database title for conversation {conversation_id}: {db_title}")
                                 if db_conversation.get("is_pinned") is not None:
                                     conversation_dict["is_pinned"] = db_conversation.get("is_pinned", False)
                                 if db_conversation.get("is_archived") is not None:
@@ -323,15 +323,15 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                         except Exception as db_title_error:
                             logger.warning(f"⚠️ Failed to fetch database title for conversation {conversation_id}: {db_title_error}")
                     else:
-                        logger.info(f"💬 Conversation {conversation_id} not found in LangGraph checkpoints")
+                        logger.debug(f"💬 Conversation {conversation_id} not found in LangGraph checkpoints")
                 finally:
                     await conn.close()
             except Exception as e:
                 logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation {conversation_id}: {e}")
         
-        # ROOSEVELT'S DUAL SOURCE FIX: Fall back to conversation database if not found in checkpoints
+        # Fall back to conversation DB if checkpoint load misses messages
         if not conversation_dict:
-            logger.info(f"📚 Conversation not found in checkpoint, falling back to conversation database for {conversation_id}")
+            logger.debug(f"📚 Conversation not found in checkpoint, falling back to conversation database for {conversation_id}")
             try:
                 from services.conversation_service import ConversationService
                 conversation_service = ConversationService()
@@ -369,11 +369,11 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                             "updated_at": db_conversation.get("updated_at", datetime.now().isoformat()),
                             "messages": []
                         }
-                        logger.info(f"✅ Found conversation in database: {conversation_id}")
+                        logger.debug(f"✅ Found conversation in database: {conversation_id}")
                     else:
                         logger.warning(f"⚠️ User {current_user.user_id} does not own conversation {conversation_id}")
                 else:
-                    logger.info(f"💬 Conversation {conversation_id} not found in database either")
+                    logger.debug(f"💬 Conversation {conversation_id} not found in database either")
             except Exception as db_error:
                 logger.warning(f"⚠️ Fallback to conversation database failed: {db_error}")
         
@@ -418,7 +418,7 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have permission to edit this conversation")
         
-        logger.info(f"💬 Updating conversation: {conversation_id} for user: {current_user.user_id}")
+        logger.debug(f"💬 Updating conversation: {conversation_id} for user: {current_user.user_id}")
         import asyncpg
         from config import settings
         from services.orchestrator_utils import normalize_thread_id
@@ -577,7 +577,7 @@ async def update_conversation_metadata(
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have permission to edit this conversation")
         
-        logger.info(f"💬 Updating metadata for conversation: {conversation_id} for user: {current_user.user_id}")
+        logger.debug(f"💬 Updating metadata for conversation: {conversation_id} for user: {current_user.user_id}")
         
         # Get conversation service
         conversation_service = await _get_conversation_service()
@@ -616,7 +616,7 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
     from services.database_manager.database_helpers import fetch_all
     
     try:
-        logger.info(f"🖼️ Extracting image URLs from conversation: {conversation_id}")
+        logger.debug(f"🖼️ Extracting image URLs from conversation: {conversation_id}")
         
         # Get all messages from the conversation before deletion
         messages = await fetch_all(
@@ -630,13 +630,13 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
         )
         
         if not messages:
-            logger.info(f"📭 No messages found for conversation {conversation_id}")
+            logger.debug(f"📭 No messages found for conversation {conversation_id}")
             return
         
-        # Extract generated image basenames from message content (/api/images/ or /static/images/)
+        # Extract generated image basenames from message content (web_sources image URLs)
         filenames_seen = set()
         image_pattern = re.compile(
-            r'(?:/static/images/|/api/images/)(gen_[a-fA-F0-9]+\.(?:png|jpg|jpeg|webp))',
+            r'(?:/api/web-sources/images/|/static/images/|/api/images/)(gen_[a-fA-F0-9]+\.(?:png|jpg|jpeg|webp))',
             re.IGNORECASE,
         )
 
@@ -647,13 +647,13 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
                     filenames_seen.add(fn.lower())
 
         if not filenames_seen:
-            logger.info(f"📭 No generated images found in conversation {conversation_id}")
+            logger.debug(f"📭 No generated images found in conversation {conversation_id}")
             return
 
-        logger.info(f"🖼️ Found {len(filenames_seen)} unique generated image(s) in conversation")
+        logger.debug(f"🖼️ Found {len(filenames_seen)} unique generated image(s) in conversation")
 
         # Skip deletion when a document record exists for this filename (imported or auto-promoted)
-        images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
+        images_path = Path(settings.WEB_SOURCES_ROOT) / "images"
         imported_filenames = set()
 
         for filename in filenames_seen:
@@ -670,10 +670,10 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
             )
 
             if imported_docs:
-                logger.info(f"✅ Image {filename} has a document record - skipping deletion")
+                logger.debug(f"✅ Image {filename} has a document record - skipping deletion")
                 imported_filenames.add(filename)
             else:
-                logger.info(f"🗑️ Image {filename} has no document record - will be deleted")
+                logger.debug(f"🗑️ Image {filename} has no document record - will be deleted")
 
         deleted_count = 0
         for filename in filenames_seen:
@@ -700,13 +700,13 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
                 if image_file_path.exists():
                     image_file_path.unlink()
                     deleted_count += 1
-                    logger.info(f"🗑️ Deleted image file: {image_file_path}")
+                    logger.debug(f"🗑️ Deleted image file: {image_file_path}")
                     # Delete sidecar .metadata.json if present (stem: image.jpg -> image.metadata.json)
                     sidecar_path = image_file_path.parent / f"{image_file_path.stem}.metadata.json"
                     if sidecar_path.exists():
                         try:
                             sidecar_path.unlink()
-                            logger.info(f"🗑️ Deleted image metadata sidecar: {sidecar_path}")
+                            logger.debug(f"🗑️ Deleted image metadata sidecar: {sidecar_path}")
                         except Exception as sidecar_e:
                             logger.warning(f"⚠️ Failed to delete sidecar {sidecar_path}: {sidecar_e}")
             except Exception as e:
@@ -724,7 +724,7 @@ async def create_conversation(request: CreateConversationRequest, current_user: 
     """Create a new conversation"""
     conversation_service = await _get_conversation_service()
     try:
-        logger.info(f"💬 Creating new conversation: {request.title}")
+        logger.debug(f"💬 Creating new conversation: {request.title}")
         
         # Set the current user for this operation
         conversation_service.set_current_user(current_user.user_id)
@@ -808,7 +808,7 @@ async def get_conversation_messages(
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
-        logger.info(f"💬 Getting messages for conversation: {conversation_id}")
+        logger.debug(f"💬 Getting messages for conversation: {conversation_id}")
         
         messages = []
         messages_from_checkpoint = False  # Track if we got messages from checkpoint
@@ -833,16 +833,14 @@ async def get_conversation_messages(
             )
             
             # ConversationService returns dict with "messages" key
-            logger.info(f"🔍 get_conversation_messages result keys: {list(db_messages_result.keys()) if db_messages_result else 'None'}")
+            logger.debug(f"🔍 get_conversation_messages result keys: {list(db_messages_result.keys()) if db_messages_result else 'None'}")
             if db_messages_result and "messages" in db_messages_result:
                 db_messages = db_messages_result.get("messages", [])
                 db_total_count = db_messages_result.get("total_count", len(db_messages))
                 db_has_more = db_messages_result.get("has_more", False)
                 db_current_node_message_id = db_messages_result.get("current_node_message_id")
-                logger.info(f"🔍 get_conversation_messages returned {len(db_messages)} messages")
+                logger.debug(f"🔍 get_conversation_messages returned {len(db_messages)} messages")
                 if db_messages:
-                    logger.info(f"✅ Retrieved {len(db_messages)} messages from conversation database (primary source)")
-                    
                     # Convert database messages to API format
                     for msg in db_messages:
                         metadata_json = msg.get("metadata_json") or msg.get("metadata") or {}
@@ -882,7 +880,7 @@ async def get_conversation_messages(
                         messages.append(message_obj)
                     messages_from_database = True
                 else:
-                    logger.info(f"📚 No messages in conversation database, will try checkpoints as fallback")
+                    logger.debug(f"📚 No messages in conversation database, will try checkpoints as fallback")
             else:
                 logger.debug(f"📚 Conversation database query returned no messages")
         except Exception as db_error:
@@ -894,7 +892,7 @@ async def get_conversation_messages(
             and not (skip_checkpoint and len(messages) == 0)
             and not include_tree
         ):
-            logger.info(f"📚 Falling back to LangGraph checkpoints for conversation {conversation_id}")
+            logger.debug(f"📚 Falling back to LangGraph checkpoints for conversation {conversation_id}")
             try:
                 from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
                 checkpointer = await get_postgres_checkpointer()
@@ -902,7 +900,7 @@ async def get_conversation_messages(
                 if not checkpointer.is_initialized:
                     logger.warning("⚠️ LangGraph checkpointer not initialized, skipping checkpoint fallback")
                 else:
-                    # ROOSEVELT'S THREAD_ID FIX: Use normalized thread_id for proper conversation lookup
+                    # Use normalized thread_id for conversation lookup
                     from services.orchestrator_utils import normalize_thread_id
                     normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
                     
@@ -921,7 +919,7 @@ async def get_conversation_messages(
                         if checkpoint_tuple and checkpoint_tuple.checkpoint:
                             # Extract messages from checkpoint state
                             checkpoint_state = checkpoint_tuple.checkpoint
-                            # ROOSEVELT'S POSTGRESQL JSON FIX: Handle both dict and JSON string formats
+                            # Accept dict or JSON string for PostgreSQL JSON columns
                             if isinstance(checkpoint_state, str):
                                 import json
                                 try:
@@ -933,14 +931,14 @@ async def get_conversation_messages(
                                 checkpoint_state = {}
                             
                             state_data = checkpoint_state.get("channel_values", {})
-                            logger.info(f"🔍 Checkpoint state keys: {list(state_data.keys())}")
-                            logger.info(f"🔍 Checkpoint state data: {state_data}")
+                            logger.debug(f"🔍 Checkpoint state keys: {list(state_data.keys())}")
+                            logger.debug(f"🔍 Checkpoint state data: {state_data}")
                             
                             if "messages" in state_data:
                                 langgraph_messages = state_data["messages"]
-                                logger.info(f"✅ Found {len(langgraph_messages)} messages in LangGraph checkpoint")
+                                logger.debug(f"✅ Found {len(langgraph_messages)} messages in LangGraph checkpoint")
                                 
-                                # ROOSEVELT'S DEBUG LOGGING: Log message types for debugging
+                                # Log message types for debugging
                                 for i, msg in enumerate(langgraph_messages):
                                     msg_type = "unknown"
                                     if hasattr(msg, '__class__'):
@@ -952,7 +950,7 @@ async def get_conversation_messages(
                                 # Convert LangGraph messages to API format
                                 for i, msg in enumerate(langgraph_messages):
                                     if hasattr(msg, 'content'):
-                                        # ROOSEVELT'S MESSAGE TYPE FIX: Proper LangGraph message type detection
+                                        # LangGraph message type detection
                                         message_type = "user"
                                         role = "user"
                                         
@@ -973,12 +971,12 @@ async def get_conversation_messages(
                                                 message_type = "assistant"
                                                 role = "assistant"
                                         
-                                        # ROOSEVELT'S CITATION FIX: Extract citations from THIS MESSAGE's additional_kwargs
+                                        # Extract citations from this message additional_kwargs
                                         citations = []
                                         if hasattr(msg, 'additional_kwargs') and isinstance(msg.additional_kwargs, dict):
                                             citations = msg.additional_kwargs.get("citations", [])
                                             if citations:
-                                                logger.info(f"🔗 EXTRACTED {len(citations)} CITATIONS from message {i} additional_kwargs")
+                                                logger.debug(f"🔗 EXTRACTED {len(citations)} CITATIONS from message {i} additional_kwargs")
                                         
                                         # Build metadata from additional_kwargs
                                         metadata_json = {}
@@ -1004,9 +1002,9 @@ async def get_conversation_messages(
                                         })
                                 messages_from_checkpoint = True  # Mark that we got messages from checkpoint
                             else:
-                                logger.info(f"⚠️ No messages found in checkpoint state for {conversation_id}")
+                                logger.debug(f"⚠️ No messages found in checkpoint state for {conversation_id}")
                         else:
-                            logger.info(f"⚠️ No checkpoint found for conversation {conversation_id}")
+                            logger.debug(f"⚠️ No checkpoint found for conversation {conversation_id}")
                     else:
                         logger.warning("⚠️ aget_tuple method not available on checkpointer")
             except Exception as checkpoint_error:
@@ -1059,7 +1057,7 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have permission to add messages to this conversation")
         
-        logger.info(f"💬 Adding message to conversation: {conversation_id}")
+        logger.debug(f"💬 Adding message to conversation: {conversation_id}")
         
         # Set the current user for this operation
         conversation_service.set_current_user(current_user.user_id)
@@ -1241,7 +1239,7 @@ async def react_to_message(conversation_id: str, message_id: str, request: React
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
-        logger.info(f"💬 Adding reaction to message: {message_id} in conversation: {conversation_id}")
+        logger.debug(f"💬 Adding reaction to message: {message_id} in conversation: {conversation_id}")
         
         # Set the current user for this operation
         conversation_service.set_current_user(current_user.user_id)
@@ -1276,7 +1274,7 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
     """Delete a conversation and all its messages (LangGraph + legacy)"""
     conversation_service = await _get_conversation_service()
     try:
-        logger.info(f"💬 Deleting conversation: {conversation_id} for user: {current_user.user_id}")
+        logger.debug(f"💬 Deleting conversation: {conversation_id} for user: {current_user.user_id}")
         
         # Post-session memory before delete: pass transcript so analysis survives row removal
         try:
@@ -1322,7 +1320,7 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
         await chat_attachment_service.initialize()
         await chat_attachment_service.cleanup_conversation_attachments(conversation_id)
         
-        # ROOSEVELT'S DUAL DELETION: Delete from both LangGraph checkpoints AND legacy tables
+        # Delete from LangGraph checkpoints and legacy tables
         
         # Step 1: Delete from LangGraph checkpoints
         import asyncpg
@@ -1350,7 +1348,7 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
                 WHERE thread_id = $1
             """, conversation_id)
             
-            logger.info(f"🗑️ Deleted LangGraph checkpoints: {deleted_checkpoints}")
+            logger.debug(f"🗑️ Deleted LangGraph checkpoints: {deleted_checkpoints}")
             
         finally:
             await conn.close()
@@ -1359,7 +1357,7 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
         conversation_service.set_current_user(current_user.user_id)
         legacy_success = await conversation_service.delete_conversation(conversation_id)
         
-        logger.info(f"🔍 Legacy delete result: {legacy_success}")
+        logger.debug(f"🔍 Legacy delete result: {legacy_success}")
         logger.info(f"✅ Conversation deleted from both LangGraph and legacy systems: {conversation_id}")
         return {"status": "success", "message": f"Conversation {conversation_id} deleted"}
         
@@ -1375,9 +1373,9 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
     """Delete ALL conversations for the current user (LangGraph + legacy)"""
     conversation_service = await _get_conversation_service()
     try:
-        logger.info(f"💬 Deleting ALL conversations for user: {current_user.user_id}")
+        logger.debug(f"💬 Deleting ALL conversations for user: {current_user.user_id}")
         
-        # ROOSEVELT'S MASS DELETION: Delete from both LangGraph checkpoints AND legacy tables
+        # Mass delete from LangGraph checkpoints and legacy tables
         
         # Step 0: Clean up generated images from all conversations before deletion
         from services.database_manager.database_helpers import fetch_all
@@ -1432,7 +1430,7 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
                     WHERE thread_id = ANY($1)
                 """, thread_ids)
             
-            logger.info(f"🗑️ Deleted LangGraph checkpoints for user: {deleted_checkpoints}")
+            logger.debug(f"🗑️ Deleted LangGraph checkpoints for user: {deleted_checkpoints}")
             
         finally:
             await conn.close()
@@ -1483,7 +1481,7 @@ async def upload_chat_attachment(
         if not has_access:
             raise HTTPException(status_code=403, detail="You do not have permission to add attachments to this conversation")
         
-        logger.info(f"📎 Uploading attachment for message {message_id} in conversation {conversation_id}")
+        logger.debug(f"📎 Uploading attachment for message {message_id} in conversation {conversation_id}")
         
         # Initialize attachment service if needed
         await chat_attachment_service.initialize()

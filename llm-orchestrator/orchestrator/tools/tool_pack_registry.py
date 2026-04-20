@@ -1,13 +1,47 @@
 """
-Tool Pack Registry - Planner-oriented groupings of tools for plan step augmentation.
+Tool Pack Registry - DEPRECATED.
 
-Tool packs are named groups of tool function names. The planner can attach pack names
-to plan steps; the automation engine merges pack tools with the skill's tools at execution.
+Skills are now the single unit of capability assignment (Skills-First Architecture).
+This registry is retained for backward compatibility with stored playbooks that still
+reference tool_packs. New code should use skill_ids exclusively.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field
+
+# GitHub OAuth tools (registry names). Keep in sync with backend/api/agent_factory_api.py _GITHUB_TOOL_ROWS.
+GITHUB_PACK_WRITE_TOOLS: frozenset = frozenset(
+    {
+        "github_create_issue",
+        "github_create_issue_comment",
+        "github_create_pr_review",
+    }
+)
+GITHUB_PACK_ALL_TOOLS: Tuple[str, ...] = (
+    "github_list_repos",
+    "github_get_repo",
+    "github_list_issues",
+    "github_get_issue",
+    "github_list_issue_comments",
+    "github_list_pulls",
+    "github_get_pull",
+    "github_get_pull_diff",
+    "github_list_pull_reviews",
+    "github_list_pull_comments",
+    "github_list_commits",
+    "github_get_commit",
+    "github_compare_refs",
+    "github_get_file_content",
+    "github_list_branches",
+    "github_search_code",
+    "github_create_issue",
+    "github_create_issue_comment",
+    "github_create_pr_review",
+)
+GITHUB_PACK_READ_TOOLS: Tuple[str, ...] = tuple(
+    t for t in GITHUB_PACK_ALL_TOOLS if t not in GITHUB_PACK_WRITE_TOOLS
+)
 
 
 # Tool function names that were renamed in the Action I/O Registry for list/get consistency
@@ -114,7 +148,6 @@ TOOL_PACKS: Dict[str, ToolPack] = {
             "search_images_tool",
             "search_web_tool",
             "enhance_query_tool",
-            "search_conversation_cache_tool",
         ],
         read_tools=[
             "search_documents_tool",
@@ -122,7 +155,6 @@ TOOL_PACKS: Dict[str, ToolPack] = {
             "search_images_tool",
             "search_web_tool",
             "enhance_query_tool",
-            "search_conversation_cache_tool",
         ],
     ),
     "knowledge": ToolPack(
@@ -326,6 +358,83 @@ TOOL_PACKS: Dict[str, ToolPack] = {
         ],
         read_tools=["list_calendars_tool", "get_calendar_events_tool", "get_event_by_id_tool"],
     ),
+    "todo": ToolPack(
+        name="todo",
+        description="Microsoft To Do (Graph). Use the same Microsoft 365 email connection as other M365 packs; "
+                    "list_todo_lists first, then pass each list's id (from the response) to get_todo_tasks and mutations—not display titles.",
+        tools=[
+            "list_todo_lists_tool",
+            "get_todo_tasks_tool",
+            "create_todo_task_tool",
+            "update_todo_task_tool",
+            "delete_todo_task_tool",
+        ],
+        read_tools=["list_todo_lists_tool", "get_todo_tasks_tool"],
+    ),
+    "files": ToolPack(
+        name="files",
+        description="OneDrive: browse, search, upload, and manage files. list_drive_items for root or folder; "
+                    "get_onedrive_file_content returns base64 for small files.",
+        tools=[
+            "list_drive_items_tool",
+            "get_drive_item_tool",
+            "search_drive_tool",
+            "get_onedrive_file_content_tool",
+            "upload_onedrive_file_tool",
+            "create_drive_folder_tool",
+            "move_drive_item_tool",
+            "delete_drive_item_tool",
+        ],
+        read_tools=[
+            "list_drive_items_tool",
+            "get_drive_item_tool",
+            "search_drive_tool",
+            "get_onedrive_file_content_tool",
+        ],
+    ),
+    "onenote": ToolPack(
+        name="onenote",
+        description="OneNote: list notebooks, sections, pages; read or create pages (HTML).",
+        tools=[
+            "list_onenote_notebooks_tool",
+            "list_onenote_sections_tool",
+            "list_onenote_pages_tool",
+            "get_onenote_page_content_tool",
+            "create_onenote_page_tool",
+        ],
+        read_tools=[
+            "list_onenote_notebooks_tool",
+            "list_onenote_sections_tool",
+            "list_onenote_pages_tool",
+            "get_onenote_page_content_tool",
+        ],
+    ),
+    "planner": ToolPack(
+        name="planner",
+        description="Microsoft Planner: list plans, then tasks; create, update, or delete tasks.",
+        tools=[
+            "list_planner_plans_tool",
+            "get_planner_tasks_tool",
+            "create_planner_task_tool",
+            "update_planner_task_tool",
+            "delete_planner_task_tool",
+        ],
+        read_tools=["list_planner_plans_tool", "get_planner_tasks_tool"],
+    ),
+    "github": ToolPack(
+        name="github",
+        description="GitHub API via OAuth: repositories, issues, pull requests, diffs, commits, code search. "
+                    "Connect GitHub in Settings and bind accounts here; choose this pack on playbook steps with connection IDs.",
+        tools=list(GITHUB_PACK_ALL_TOOLS),
+        read_tools=list(GITHUB_PACK_READ_TOOLS),
+    ),
+    "gitea": ToolPack(
+        name="gitea",
+        description="Gitea API via personal access token (Settings → External connections). "
+                    "Same tools as the GitHub pack; bind Gitea connection IDs on playbook steps.",
+        tools=list(GITHUB_PACK_ALL_TOOLS),
+        read_tools=list(GITHUB_PACK_READ_TOOLS),
+    ),
     "navigation": ToolPack(
         name="navigation",
         description="Save and manage named locations; compute and save routes between them.",
@@ -347,11 +456,17 @@ TOOL_PACKS: Dict[str, ToolPack] = {
         tools=[
             "list_data_workspaces_tool",
             "get_workspace_schema_tool",
+            "resolve_workspace_link_tool",
             "query_data_workspace_tool",
+            "create_workspace_table_tool",
+            "insert_workspace_rows_tool",
+            "update_workspace_rows_tool",
+            "delete_workspace_rows_tool",
         ],
         read_tools=[
             "list_data_workspaces_tool",
             "get_workspace_schema_tool",
+            "resolve_workspace_link_tool",
             "query_data_workspace_tool",
         ],
     ),
@@ -455,6 +570,28 @@ TOOL_PACKS: Dict[str, ToolPack] = {
             "local_list_processes_tool",
         ],
     ),
+    "code_workspace": ToolPack(
+        name="code_workspace",
+        description="Coding workspace tools: file tree, content search, git info, and workspace root selection (local proxy-backed).",
+        tools=[
+            "code_open_workspace_tool",
+            "code_file_tree_tool",
+            "code_search_files_tool",
+            "code_git_info_tool",
+            "local_read_file_tool",
+            "local_write_file_tool",
+            "local_list_directory_tool",
+            "local_shell_execute_tool",
+        ],
+        read_tools=[
+            "code_open_workspace_tool",
+            "code_file_tree_tool",
+            "code_search_files_tool",
+            "code_git_info_tool",
+            "local_read_file_tool",
+            "local_list_directory_tool",
+        ],
+    ),
     "team_tools": ToolPack(
         name="team_tools",
         description="Autonomous agent line tools: messaging, tasks, goals, governance. Auto-injected when the agent runs in a team context.",
@@ -477,6 +614,9 @@ TOOL_PACKS: Dict[str, ToolPack] = {
             "propose_hire",
             "propose_strategy_change",
             "get_agent_run_history",
+            "propose_action",
+            "vote_on_proposal",
+            "tally_proposals",
         ],
         read_tools=[
             "read_team_timeline",
@@ -486,6 +626,7 @@ TOOL_PACKS: Dict[str, ToolPack] = {
             "check_my_tasks",
             "list_team_goals",
             "get_agent_run_history",
+            "tally_proposals",
         ],
     ),
 }

@@ -116,6 +116,10 @@ class Route(BaseModel):
         default=False,
         description="If True, inject the user's fact store into the system context for this route.",
     )
+    use_themed_memory: bool = Field(
+        default=True,
+        description="When user facts are injected, use theme-first adaptive retrieval (vs full fact list).",
+    )
 
     @field_validator("name")
     @classmethod

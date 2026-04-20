@@ -270,7 +270,7 @@ async def read_team_timeline_tool(
         items = result.get("items") or []
         total = result.get("total") or 0
         lines = []
-        for m in items[:15]:
+        for m in items:
             from_name = m.get("from_agent_name") or m.get("from_agent_handle") or "Agent"
             to_name = m.get("to_agent_name") or m.get("to_agent_handle") or "team"
             content = (m.get("content") or "")[:150]
@@ -278,7 +278,11 @@ async def read_team_timeline_tool(
                 content += "..."
             created = m.get("created_at") or ""
             lines.append(f"- {from_name} -> {to_name}: \"{content}\" ({created})")
-        formatted = f"Recent team messages ({len(items)} shown, {total} total):\n" + "\n".join(lines) if lines else f"No messages in the requested window (total={total})."
+        formatted = (
+            f"Recent team messages ({len(items)} in this response, {total} total matching filter):\n" + "\n".join(lines)
+            if lines
+            else f"No messages in the requested window (total={total})."
+        )
         return {"formatted": formatted, "items": items, "total": total}
     except Exception as e:
         logger.warning("read_team_timeline failed: %s", e)
@@ -343,7 +347,7 @@ async def read_my_messages_tool(
         items = result.get("items") or []
         total = result.get("total") or 0
         lines = []
-        for m in items[:15]:
+        for m in items:
             from_name = m.get("from_agent_name") or m.get("from_agent_handle") or "Agent"
             to_name = m.get("to_agent_name") or m.get("to_agent_handle") or "team"
             content = (m.get("content") or "")[:150]
@@ -352,7 +356,11 @@ async def read_my_messages_tool(
             created = m.get("created_at") or ""
             direction = "to me" if m.get("to_agent_id") == agent_profile_id else "from me"
             lines.append(f"- [{direction}] {from_name} -> {to_name}: \"{content}\" ({created})")
-        formatted = f"Messages to/from you ({len(items)} shown, {total} total):\n" + "\n".join(lines) if lines else f"No messages (total={total})."
+        formatted = (
+            f"Messages to/from you ({len(items)} in this response, {total} total matching filter):\n" + "\n".join(lines)
+            if lines
+            else f"No messages (total={total})."
+        )
         return {"formatted": formatted, "items": items, "total": total}
     except Exception as e:
         logger.warning("read_my_messages failed: %s", e)

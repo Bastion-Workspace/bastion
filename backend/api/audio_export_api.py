@@ -119,7 +119,7 @@ async def audio_export_download(
         raise HTTPException(status_code=404, detail="Export file missing")
 
     path = Path(file_path).resolve()
-    root = (Path(settings.UPLOAD_DIR).resolve() / "audio_exports")
+    root = (Path(settings.EXPORTS_DIR).resolve() / "audio_exports")
     try:
         path.relative_to(root)
     except ValueError:

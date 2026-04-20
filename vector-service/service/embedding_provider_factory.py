@@ -42,6 +42,7 @@ class EmbeddingProviderFactory:
                 max_retries=settings.OPENAI_MAX_RETRIES,
                 provider_label="openai",
                 max_text_length=settings.MAX_TEXT_LENGTH,
+                embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
             )
 
         if provider_type == "openrouter":
@@ -60,6 +61,7 @@ class EmbeddingProviderFactory:
                 max_retries=settings.OPENAI_MAX_RETRIES,
                 provider_label="openrouter",
                 max_text_length=settings.MAX_TEXT_LENGTH,
+                embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
             )
 
         if provider_type == "vllm":
@@ -80,6 +82,7 @@ class EmbeddingProviderFactory:
                 max_retries=settings.OPENAI_MAX_RETRIES,
                 provider_label="vllm",
                 max_text_length=settings.MAX_TEXT_LENGTH,
+                embedding_dimensions=settings.EMBEDDING_DIMENSIONS,
             )
 
         if provider_type == "ollama":

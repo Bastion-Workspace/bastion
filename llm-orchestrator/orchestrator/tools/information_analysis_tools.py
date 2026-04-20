@@ -222,7 +222,7 @@ Return ONLY valid JSON:
             if json_match:
                 try:
                     result_dict = json.loads(json_match.group(0))
-                except:
+                except (json.JSONDecodeError, TypeError):
                     result_dict = {}
             else:
                 result_dict = {}

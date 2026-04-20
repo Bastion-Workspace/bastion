@@ -148,7 +148,7 @@ async def list_agent_memories_tool(
     return {
         "memory_keys": keys,
         "count": len(keys),
-        "formatted": f"Found {len(keys)} key(s): {', '.join(keys[:10])}{'...' if len(keys) > 10 else ''}",
+        "formatted": f"Found {len(keys)} key(s): {', '.join(keys)}",
     }
 
 

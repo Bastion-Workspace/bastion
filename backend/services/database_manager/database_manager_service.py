@@ -1,9 +1,6 @@
 """
 Database Manager Service
-Centralized database connection and transaction management
-
-**BULLY!** This service provides a single, robust connection pool for all database operations!
-Following Roosevelt's "Trust-Busting" principles - one manager to rule them all!
+Centralized database connection and transaction management for the application.
 """
 
 import asyncio
@@ -27,10 +24,7 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     """
-    Centralized Database Manager Service
-    
-    **BULLY!** The single source of truth for all database operations!
-    No more connection pool chaos - everything goes through here!
+    Centralized asyncpg pool, query execution, retries, and health monitoring.
     """
     
     def __init__(self, config: Optional[DatabaseConfig] = None):
@@ -50,8 +44,8 @@ class DatabaseManager:
         """Create default database configuration"""
         return DatabaseConfig(
             database_url=os.getenv("DATABASE_URL", "postgresql://plato_user:plato_secure_password@localhost:5432/plato_knowledge_base"),
-            min_pool_size=5,
-            max_pool_size=20,
+            min_pool_size=2,
+            max_pool_size=15,
             command_timeout=60,
             max_queries=50000,
             max_inactive_connection_lifetime=300,
@@ -81,9 +75,7 @@ class DatabaseManager:
     
     async def initialize(self) -> None:
         """
-        Initialize the database connection pool
-        
-        **BULLY!** Start up the cavalry charge with a robust connection pool!
+        Initialize the database connection pool.
         """
         if self._initialized:
             logger.warning("⚠️ DatabaseManager already initialized")
@@ -100,10 +92,6 @@ class DatabaseManager:
                 command_timeout=self.config.command_timeout,
                 max_queries=self.config.max_queries,
                 max_inactive_connection_lifetime=self.config.max_inactive_connection_lifetime,
-                server_settings={
-                    'application_name': 'plato_database_manager',
-                    'search_path': 'public'
-                }
             )
             
             # Test the connection
@@ -128,9 +116,7 @@ class DatabaseManager:
     
     async def close(self) -> None:
         """
-        Close the database connection pool and cleanup resources
-        
-        **By George!** Proper cleanup when the cavalry retreats!
+        Close the connection pool and stop background health checks.
         """
         logger.info("🔄 Shutting down DatabaseManager...")
         
@@ -160,9 +146,7 @@ class DatabaseManager:
     @asynccontextmanager
     async def get_connection(self) -> AsyncContextManager[Connection]:
         """
-        Get a database connection from the pool
-        
-        **BULLY!** The single, reliable way to get a database connection!
+        Acquire a connection from the pool (async context manager).
         """
         if not self._initialized or not self._pool:
             raise RuntimeError("DatabaseManager not initialized")
@@ -188,6 +172,10 @@ class DatabaseManager:
             # Always return connection to pool
             if connection:
                 try:
+                    # Clear RLS session vars so pooled connections never leak user identity
+                    # between requests (set_config(..., false) is session-scoped).
+                    await connection.execute("SELECT set_config('app.current_user_id', '', false)")
+                    await connection.execute("SELECT set_config('app.current_user_role', '', false)")
                     await self._pool.release(connection)
                     self._stats.active_connections -= 1
                     execution_time = time.time() - start_time
@@ -197,9 +185,7 @@ class DatabaseManager:
     
     async def execute_query(self, query: str, *args, **kwargs) -> QueryResult:
         """
-        Execute a database query with automatic retry and monitoring
-        
-        **By George!** The robust way to execute any database query!
+        Execute a query with retries, optional RLS session variables, and metrics.
         """
         start_time = time.time()
         query_hash = hashlib.md5(query.encode()).hexdigest()[:8]
@@ -210,9 +196,8 @@ class DatabaseManager:
                     if self.config.enable_query_logging:
                         logger.debug(f"🔍 Executing query [{query_hash}]: {query[:100]}...")
                     
-                    # ROOSEVELT FIX: Set RLS context on this connection before executing query
-                    # This ensures RLS context persists for the duration of this query
-                    # CRITICAL: Use false (session-level) not true (transaction-local)!
+                    # Set RLS GUCs on this connection for the duration of the query.
+                    # Use false (session-level), not true (transaction-local).
                     rls_context = kwargs.get('rls_context', {})
                     if rls_context:
                         user_id = rls_context.get('user_id', '')
@@ -283,9 +268,7 @@ class DatabaseManager:
     
     async def execute_transaction(self, operations: List[Callable]) -> QueryResult:
         """
-        Execute multiple operations in a database transaction
-        
-        **BULLY!** Atomic operations for data integrity!
+        Run multiple async callables inside a single database transaction.
         """
         transaction_id = f"tx_{int(time.time())}_{len(self._active_transactions)}"
         start_time = time.time()
@@ -468,10 +451,7 @@ _database_manager_instance: Optional[DatabaseManager] = None
 
 async def get_database_manager(config: Optional[DatabaseConfig] = None) -> DatabaseManager:
     """
-    Get the global database manager instance
-    
-    **BULLY!** The single point of access to the database manager!
-    Handles both main app and Celery worker environments!
+    Return the process-wide DatabaseManager, creating and initializing it if needed.
     """
     global _database_manager_instance
     
@@ -479,18 +459,16 @@ async def get_database_manager(config: Optional[DatabaseConfig] = None) -> Datab
     import os
     is_celery_worker = os.getenv('CELERY_WORKER_RUNNING', 'false').lower() == 'true'
     
-    if _database_manager_instance is None or (is_celery_worker and not _database_manager_instance.is_initialized):
-        # Create fresh instance for Celery workers or if not initialized
+    if _database_manager_instance is None or not _database_manager_instance.is_initialized:
+        # Create fresh instance and initialize
         _database_manager_instance = DatabaseManager(config)
         try:
             await _database_manager_instance.initialize()
         except Exception as e:
             logger.error(f"❌ Failed to initialize DatabaseManager: {e}")
-            # For Celery workers, try a simpler approach
-            if is_celery_worker:
-                logger.warning("⚠️ Celery worker detected - using simplified database manager")
-                # Create a basic instance without full initialization
-                _database_manager_instance = DatabaseManager(config)
+            # Reset to None so the next caller retries rather than getting a broken instance
+            _database_manager_instance = None
+            raise
     
     return _database_manager_instance
 

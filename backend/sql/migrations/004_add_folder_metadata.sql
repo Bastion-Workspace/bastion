@@ -1,5 +1,5 @@
 -- Migration: Add category and tags to document folders
--- **ROOSEVELT'S FOLDER TAGGING DOCTRINE**: Folders organize, tags follow!
+-- Add folder category and tags for inheritance to uploaded documents
 
 -- Add category and tags columns to document_folders
 ALTER TABLE document_folders 
@@ -22,7 +22,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON document_folders TO plato_user;
 -- Log migration
 DO $$
 BEGIN
-    RAISE NOTICE '✅ BULLY! Folder metadata migration complete - folders can now be tagged!';
+    RAISE NOTICE 'Folder metadata migration complete - folders can now be tagged';
 END $$;
 
 

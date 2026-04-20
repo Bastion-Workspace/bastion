@@ -8,10 +8,12 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException
 
 from models.api_models import AuthenticatedUserResponse
+from config import settings
 from services.user_voice_provider_service import (
     SETTING_USE_ADMIN_STT,
     SETTING_USE_ADMIN_TTS,
     SETTING_USER_ADMIN_ELEVENLABS_TTS_MODEL_ID,
+    SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID,
     SETTING_USER_ADMIN_TTS_PROVIDER,
     SETTING_USER_ADMIN_TTS_VOICE_ID,
     SETTING_USER_ADMIN_TTS_VOICE_PIPER,
@@ -19,12 +21,17 @@ from services.user_voice_provider_service import (
     SETTING_USER_BYOK_TTS_ENGINE,
     SETTING_USER_BYOK_TTS_VOICE_PIPER,
     SETTING_USER_ELEVENLABS_TTS_MODEL_ID,
+    SETTING_USER_HEDRA_TTS_MODEL_ID,
     SETTING_USER_STT_PROVIDER_ID,
     SETTING_USER_TTS_PROVIDER_ID,
     SETTING_USER_TTS_VOICE_ID,
     user_voice_provider_service,
 )
 from utils.elevenlabs_tts_model import validated_elevenlabs_model_id
+from utils.hedra_tts_model import (
+    fetch_hedra_text_to_speech_models,
+    validated_hedra_tts_model_id,
+)
 from services.user_settings_kv_service import get_user_setting, set_user_setting
 from utils.auth_middleware import get_current_user
 
@@ -194,6 +201,12 @@ async def _voice_settings_payload(user_id: str) -> Dict[str, Any]:
     admin_el_model = (
         await get_user_setting(user_id, SETTING_USER_ADMIN_ELEVENLABS_TTS_MODEL_ID) or ""
     ).strip()
+    user_hedra_model = (
+        await get_user_setting(user_id, SETTING_USER_HEDRA_TTS_MODEL_ID) or ""
+    ).strip()
+    admin_hedra_model = (
+        await get_user_setting(user_id, SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID) or ""
+    ).strip()
 
     return {
         "use_admin_tts": use_admin_tts,
@@ -215,7 +228,49 @@ async def _voice_settings_payload(user_id: str) -> Dict[str, Any]:
         "effective_server_provider": effective_provider,
         "user_elevenlabs_tts_model_id": user_el_model,
         "user_admin_elevenlabs_tts_model_id": admin_el_model,
+        "user_hedra_tts_model_id": user_hedra_model,
+        "user_admin_hedra_tts_model_id": admin_hedra_model,
     }
+
+
+@router.get("/hedra-tts-models")
+async def list_hedra_tts_models(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List Hedra text-to-speech engines (e.g. ElevenLabs vs Minimax) for the user's API key context."""
+    uid = current_user.user_id
+    try:
+        use_admin = _truthy(await get_user_setting(uid, SETTING_USE_ADMIN_TTS))
+        api_key = ""
+        if use_admin:
+            api_key = (getattr(settings, "HEDRA_API_KEY", "") or "").strip()
+            if not api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Set HEDRA_API_KEY on the backend (same value as voice-service) to list Hedra TTS engines.",
+                )
+        else:
+            ctx = await user_voice_provider_service.get_voice_context(uid, "tts")
+            if not ctx or str(ctx.get("provider_type") or "").lower() != "hedra":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Select a Hedra cloud TTS provider to list engines.",
+                )
+            api_key = (ctx.get("api_key") or "").strip()
+            if not api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Hedra API key is missing for this provider.",
+                )
+        models = await fetch_hedra_text_to_speech_models(api_key)
+        return {"success": True, "models": models}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("list_hedra_tts_models failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/voice-settings")
@@ -339,6 +394,30 @@ async def put_voice_settings(
             await set_user_setting(
                 uid,
                 SETTING_USER_ADMIN_ELEVENLABS_TTS_MODEL_ID,
+                v,
+                "string",
+            )
+        if "user_hedra_tts_model_id" in request:
+            v = str(request["user_hedra_tts_model_id"] or "").strip()
+            try:
+                validated_hedra_tts_model_id(v)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            await set_user_setting(
+                uid,
+                SETTING_USER_HEDRA_TTS_MODEL_ID,
+                v,
+                "string",
+            )
+        if "user_admin_hedra_tts_model_id" in request:
+            v = str(request["user_admin_hedra_tts_model_id"] or "").strip()
+            try:
+                validated_hedra_tts_model_id(v)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            await set_user_setting(
+                uid,
+                SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID,
                 v,
                 "string",
             )

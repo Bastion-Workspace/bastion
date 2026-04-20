@@ -366,41 +366,25 @@ Dedicated microservice for AI agent orchestration:
 **Port:** `50053:50053` (gRPC)
 
 **Purpose:**
-Dedicated microservice for embedding generation:
-- Generate text embeddings via OpenAI API
-- Intelligent caching (3-hour TTL, content-hash based)
-- Batch processing with parallel workers
-- Text truncation and token counting
+Microservice for **embedding generation** (OpenAI, OpenRouter, Ollama, vLLM, etc.) and **vector storage/search** behind a pluggable backend. The backend and other callers use gRPC; they do not talk to the vector database directly.
 
 **Key Features:**
-- **Pure Embedding Service:** Only generates embeddings, does NOT store in Qdrant
-- **Intelligent Caching:** SHA256 content hashing, 3-hour TTL
-- **Batch Processing:** Parallel embedding generation for multiple texts
-- **Performance Optimized:** Configurable workers and batch sizes
+- **Embeddings:** Pluggable providers, SHA256 content-hash cache (default 3-hour TTL), parallel batch generation, truncation limits
+- **Vector store:** One active backend at a time — **Qdrant** (default), **Milvus**, or **Elasticsearch / OpenSearch** (`VECTOR_DB_BACKEND`). Exposes create/list/search/scroll/count/upsert/delete/metadata RPCs used by the Bastion backend.
 
-**What It Does NOT Do:**
-- Does NOT store vectors in Qdrant (caller's responsibility)
-- Does NOT search Qdrant (caller's responsibility)
-- Does NOT handle metadata (caller's responsibility)
+**Environment variables (summary):**
+- **Embeddings:** `EMBEDDING_PROVIDER`, `EMBEDDING_DIMENSIONS`, provider keys/URLs (`OPENAI_API_KEY`, `OPENROUTER_*`, `OLLAMA_*`, `VLLM_*`), `EMBEDDING_CACHE_*`, `PARALLEL_WORKERS`, `BATCH_SIZE`, `MAX_TEXT_LENGTH`
+- **Vector backend:** `VECTOR_DB_BACKEND` plus `QDRANT_*`, `MILVUS_*`, or `ES_*` as documented in **[`docs/VECTOR_STORE_BACKENDS.md`](VECTOR_STORE_BACKENDS.md)**
 
-**Environment Variables:**
-- `GRPC_PORT=50053`
-- `OPENAI_API_KEY` - Required for embeddings
-- `OPENAI_EMBEDDING_MODEL=text-embedding-3-large`
-- `PARALLEL_WORKERS=4` - Concurrent processing
-- `BATCH_SIZE=100` - Batch processing size
-- `MAX_TEXT_LENGTH=8000` - Text truncation limit
-- `EMBEDDING_CACHE_ENABLED=true`
-- `EMBEDDING_CACHE_TTL=10800` (3 hours)
+**Docker examples:** [`docker/README.md`](../docker/README.md) — merge fragments such as `docker/compose.vector-milvus.yml` with `docker-compose.example.yml` and the appropriate Compose **profiles** (`milvus`, `elasticsearch`) where needed.
 
-**gRPC Methods:**
-- `GenerateEmbedding` - Single embedding generation
-- `GenerateBatchEmbeddings` - Batch embedding generation
-- `ClearEmbeddingCache` - Cache management
-- `GetCacheStats` - Cache statistics
-- `HealthCheck` - Service health
+**gRPC surface (high level):**
+- Embeddings: `GenerateEmbedding`, `GenerateBatchEmbeddings`, cache helpers, `HealthCheck`
+- Vector store: collection CRUD, upsert, search (dense / hybrid where supported), scroll, count, delete by filter, metadata updates (see `protos/vector_service.proto`)
 
 **Related Documentation:**
+- **Administrator guide (backends & env):** [`docs/VECTOR_STORE_BACKENDS.md`](VECTOR_STORE_BACKENDS.md)
+- Engineering / parity notes: [`docs/dev-notes/VECTOR_DB_BACKEND_PLAN.md`](dev-notes/VECTOR_DB_BACKEND_PLAN.md)
 - Service README: `vector-service/README.md`
 - Proto definition: `protos/vector_service.proto`
 - Hotfix notes: `docs/VECTOR_SERVICE_HOTFIX.md`

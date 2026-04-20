@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useRef, useEffect, useCallback } from 'react';
 import apiService from '../services/apiService';
+import { devLog } from '../utils/devConsole';
 
 const MusicContext = createContext(null);
 
@@ -192,7 +193,7 @@ export const MusicProvider = ({ children }) => {
       // "Empty src attribute" happens during blob URL cleanup, ignore it
       if (error && error.code === 4 && error.message === 'MEDIA_ELEMENT_ERROR: Empty src attribute') {
         // Just log, don't clear shouldPlayRef for cleanup-related errors
-        console.log('Audio src cleared during track change (expected)');
+        devLog('Audio src cleared during track change (expected)');
       } else {
         console.error('Audio error:', errorMsg, e);
         setIsPlaying(false);
@@ -201,17 +202,17 @@ export const MusicProvider = ({ children }) => {
       }
     };
     const handleCanPlay = () => {
-      console.log('Audio can play event fired');
+      devLog('Audio can play event fired');
       // Update duration when audio can play
       if (audio && !isNaN(audio.duration) && isFinite(audio.duration)) {
         setDuration(audio.duration);
-        console.log('Duration set to:', audio.duration);
+        devLog('Duration set to:', audio.duration);
       }
       // Audio is ready to play - if we're supposed to be playing, start playback
       if (shouldPlayRef.current && currentTrack) {
-        console.log('Attempting to play audio (shouldPlayRef is true)');
+        devLog('Attempting to play audio (shouldPlayRef is true)');
         audio.play().then(() => {
-          console.log('Audio play() promise resolved');
+          devLog('Audio play() promise resolved');
         }).catch(err => {
           console.error('Failed to play audio:', err);
           setIsPlaying(false);
@@ -220,7 +221,7 @@ export const MusicProvider = ({ children }) => {
       }
     };
     const handlePlay = () => {
-      console.log('Audio play event fired');
+      devLog('Audio play event fired');
       setIsPlaying(true);
       shouldPlayRef.current = false; // Clear flag once playing
       isLoadingTrackRef.current = false; // Track loading is complete
@@ -230,7 +231,7 @@ export const MusicProvider = ({ children }) => {
       }
     };
     const handlePause = () => {
-      console.log('Audio pause event fired, isLoadingTrack:', isLoadingTrackRef.current);
+      devLog('Audio pause event fired, isLoadingTrack:', isLoadingTrackRef.current);
       setIsPlaying(false);
       // Don't clear shouldPlayRef if we're loading a track - it's just a pause during transition
       if (!isLoadingTrackRef.current) {
@@ -238,10 +239,10 @@ export const MusicProvider = ({ children }) => {
       }
     };
     const handleEnded = () => {
-      console.log('Audio ended event fired, currentTrack:', currentTrack?.id, 'isPlaying:', isPlaying);
+      devLog('Audio ended event fired, currentTrack:', currentTrack?.id, 'isPlaying:', isPlaying);
       // Handle ended event - don't check isPlaying because it might be false when track ends naturally
       if (currentTrack && handleTrackEndRef.current) {
-        console.log('Calling handleTrackEnd callback');
+        devLog('Calling handleTrackEnd callback');
         handleTrackEndRef.current();
       }
     };
@@ -280,38 +281,38 @@ export const MusicProvider = ({ children }) => {
     const audio = audioRef.current;
     
     const handleCanPlay = () => {
-      console.log('canplay event fired for track:', currentTrack?.id);
+      devLog('canplay event fired for track:', currentTrack?.id);
       // Update duration when audio can play
       if (audio && !isNaN(audio.duration) && isFinite(audio.duration)) {
         setDuration(audio.duration);
-        console.log('Duration set to:', audio.duration);
+        devLog('Duration set to:', audio.duration);
       }
       // Audio is ready to play - if we're supposed to be playing, start playback
       if (shouldPlayRef.current && currentTrack) {
-        console.log('Attempting to play audio (shouldPlayRef is true)');
+        devLog('Attempting to play audio (shouldPlayRef is true)');
         audio.play().then(() => {
-          console.log('Audio play() promise resolved');
+          devLog('Audio play() promise resolved');
         }).catch(err => {
           console.error('Failed to play audio:', err);
           setIsPlaying(false);
           shouldPlayRef.current = false;
         });
       } else {
-        console.log('Not playing - shouldPlayRef:', shouldPlayRef.current, 'currentTrack:', currentTrack?.id);
+        devLog('Not playing - shouldPlayRef:', shouldPlayRef.current, 'currentTrack:', currentTrack?.id);
       }
     };
     
     const handleEnded = () => {
-      console.log('Audio ended event fired (track change handler), currentTrack:', currentTrack?.id);
+      devLog('Audio ended event fired (track change handler), currentTrack:', currentTrack?.id);
       // Handle ended event - don't check isPlaying because it might be false when track ends naturally
       if (currentTrack && handleTrackEndRef.current) {
-        console.log('Calling handleTrackEnd callback (track change handler)');
+        devLog('Calling handleTrackEnd callback (track change handler)');
         handleTrackEndRef.current();
       }
     };
     
     const handlePlay = () => {
-      console.log('play event fired');
+      devLog('play event fired');
       // Immediately update currentTime when playback starts
       if (audio && !isNaN(audio.currentTime)) {
         setCurrentTime(audio.currentTime);
@@ -319,10 +320,10 @@ export const MusicProvider = ({ children }) => {
     };
     
     const handleLoadedData = () => {
-      console.log('loadeddata event fired, readyState:', audio.readyState);
+      devLog('loadeddata event fired, readyState:', audio.readyState);
       // Check if we should play when data is loaded
       if (shouldPlayRef.current && currentTrack && audio.readyState >= 2) {
-        console.log('Audio has data, attempting to play');
+        devLog('Audio has data, attempting to play');
         audio.play().catch(err => {
           console.error('Failed to play after loadeddata:', err);
         });
@@ -337,7 +338,7 @@ export const MusicProvider = ({ children }) => {
 
     // Check if audio is already ready to play (might have loaded before listener was added)
     if (shouldPlayRef.current && currentTrack && audio.readyState >= 3) {
-      console.log('Audio already ready (readyState >= 3), attempting immediate play');
+      devLog('Audio already ready (readyState >= 3), attempting immediate play');
       setTimeout(() => {
         if (audioRef.current && shouldPlayRef.current && currentTrack) {
           audioRef.current.play().catch(err => {
@@ -780,7 +781,7 @@ export const MusicProvider = ({ children }) => {
   // Media Session API integration for hardware media keys
   useEffect(() => {
     if (!('mediaSession' in navigator)) {
-      console.log('Media Session API not supported');
+      devLog('Media Session API not supported');
       return;
     }
 
@@ -800,28 +801,28 @@ export const MusicProvider = ({ children }) => {
 
     // Register action handlers for hardware media keys
     navigator.mediaSession.setActionHandler('play', () => {
-      console.log('Media Session: play action');
+      devLog('Media Session: play action');
       if (!isPlaying && audioRef.current && currentTrack) {
         togglePlayPause();
       }
     });
 
     navigator.mediaSession.setActionHandler('pause', () => {
-      console.log('Media Session: pause action');
+      devLog('Media Session: pause action');
       if (isPlaying && audioRef.current) {
         togglePlayPause();
       }
     });
 
     navigator.mediaSession.setActionHandler('previoustrack', () => {
-      console.log('Media Session: previoustrack action');
+      devLog('Media Session: previoustrack action');
       if (queue.length > 0) {
         handlePrevious();
       }
     });
 
     navigator.mediaSession.setActionHandler('nexttrack', () => {
-      console.log('Media Session: nexttrack action');
+      devLog('Media Session: nexttrack action');
       if (queue.length > 0) {
         handleNext();
       }
@@ -829,7 +830,7 @@ export const MusicProvider = ({ children }) => {
 
     // Optional: seek forward/backward (if you want to support these later)
     navigator.mediaSession.setActionHandler('seekbackward', (details) => {
-      console.log('Media Session: seekbackward action');
+      devLog('Media Session: seekbackward action');
       const skipTime = details.seekOffset || 10;
       if (audioRef.current) {
         audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - skipTime);
@@ -837,7 +838,7 @@ export const MusicProvider = ({ children }) => {
     });
 
     navigator.mediaSession.setActionHandler('seekforward', (details) => {
-      console.log('Media Session: seekforward action');
+      devLog('Media Session: seekforward action');
       const skipTime = details.seekOffset || 10;
       if (audioRef.current) {
         audioRef.current.currentTime = Math.min(duration, audioRef.current.currentTime + skipTime);

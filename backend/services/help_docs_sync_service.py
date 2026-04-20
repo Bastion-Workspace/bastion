@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from qdrant_client.models import PointStruct
+from models.vector_point import VectorPoint
 
 from config import settings
 from clients.vector_service_client import get_vector_service_client
@@ -33,7 +33,7 @@ if not _HELP_DOCS_DIR.exists():
 
 def _persistent_manifest_path() -> Path:
     """Manifest on the uploads volume so it survives container recreation."""
-    return Path(settings.UPLOAD_DIR) / "help_docs_sync_manifest.json"
+    return Path(settings.DATA_IMPORT_DIR) / "help_docs_sync_manifest.json"
 
 
 def _legacy_manifest_path() -> Path:
@@ -139,7 +139,27 @@ class HelpDocsSyncService:
             logger.warning("Vector service unavailable, skipping help docs sync")
             return
 
-        await vector_store.ensure_collection_exists(HELP_DOCS_COLLECTION)
+        ok, recreated = await vector_store.ensure_collection_exists(HELP_DOCS_COLLECTION)
+        if not ok:
+            logger.warning("Help docs sync: could not ensure collection %s", HELP_DOCS_COLLECTION)
+            return
+        if recreated:
+            self._write_manifest({})
+            manifest = {}
+            logger.info(
+                "Help docs collection was created or migrated; cleared sync manifest for full re-index"
+            )
+
+        if manifest and not recreated:
+            count_result = await vector_client.count_vectors(HELP_DOCS_COLLECTION)
+            if count_result.get("success") and count_result.get("count", 0) == 0:
+                logger.warning(
+                    "help_docs collection is empty but manifest has %d entries; "
+                    "clearing manifest to force full re-index",
+                    len(manifest),
+                )
+                manifest = {}
+                self._write_manifest({})
 
         current_files: Dict[str, str] = {}
         for path in sorted(_HELP_DOCS_DIR.rglob("*.md")):
@@ -207,6 +227,20 @@ class HelpDocsSyncService:
             logger.warning("Embedding count mismatch for %s", topic_id)
             return
 
+        # BM25 sparse vectors when hybrid search is enabled
+        sparse_vectors_list = None
+        if getattr(settings, "HYBRID_SEARCH_ENABLED", False):
+            try:
+                from services.bm25_encoder import get_default_bm25_encoder
+                encoder = get_default_bm25_encoder()
+                sparse_vectors_list = []
+                for text in chunks:
+                    sv = encoder.encode(text)
+                    sparse_vectors_list.append(sv if sv and sv.get("indices") else None)
+            except Exception as e:
+                logger.warning("BM25 encode failed for help topic %s: %s", topic_id, e)
+                sparse_vectors_list = None
+
         points = []
         for i, (text, embedding) in enumerate(zip(chunks, embeddings)):
             point_id = _point_id(topic_id, i)
@@ -221,12 +255,13 @@ class HelpDocsSyncService:
                 "source": "help_docs",
             }
             points.append(
-                PointStruct(id=point_id, vector=embedding, payload=payload)
+                VectorPoint(id=point_id, vector=embedding, payload=payload)
             )
 
         success = await vector_store.insert_points(
             points=points,
             collection_name=HELP_DOCS_COLLECTION,
+            sparse_vectors=sparse_vectors_list,
         )
         if success:
             logger.info("Indexed help topic %s (%d chunks)", topic_id, len(points))

@@ -1,5 +1,5 @@
 """
-Org Search Service - Roosevelt's Search Cavalry
+Org search service
 Parses and searches org-mode files with full-text and metadata support
 """
 
@@ -48,9 +48,11 @@ class OrgSearchService:
         try:
             org_files = await self._find_user_org_files(user_id, include_archives=include_archives)
             counter: Counter = Counter()
+            from services import ds_upload_library_fs as dsf
+
             for file_path in org_files:
                 try:
-                    content = file_path.read_text(encoding="utf-8")
+                    content = await dsf.read_text(user_id, file_path)
                 except Exception as e:
                     logger.warning("list_org_tags: skip %s: %s", file_path, e)
                     continue
@@ -128,6 +130,7 @@ class OrgSearchService:
             all_results = []
             for file_path in org_files:
                 file_results = await self._search_org_file(
+                    user_id=user_id,
                     file_path=file_path,
                     query=query,
                     tags=tags,
@@ -225,55 +228,36 @@ class OrgSearchService:
             org_files = []
             
             # Primary strategy: Recursively search ALL of user's directory
+            from services import ds_upload_library_fs as dsf
+
             user_base_dir = self.upload_dir / "Users" / username
-            
-            if user_base_dir.exists():
-                logger.debug("Recursively searching all of %s", user_base_dir)
-                
-                # Find all .org files under user's directory
-                all_org_files = list(user_base_dir.rglob("*.org"))
-                
-                # Filter out empty files and apply any exclusions
-                for org_file in all_org_files:
-                    # Skip files inside .versions directories (historical snapshots)
-                    if "/.versions/" in str(org_file) or "\\.versions\\" in str(org_file):
-                        logger.debug(f"⏭️  Skipping .versions file: {org_file}")
-                        continue
-                    
-                    # Skip empty files
-                    if org_file.stat().st_size == 0:
-                        logger.debug(f"⏭️  Skipping empty file: {org_file}")
-                        continue
-                    
-                    # Skip common system/backup files
-                    if org_file.name.startswith('.') or org_file.name.endswith('~'):
-                        logger.debug(f"⏭️  Skipping system/backup file: {org_file}")
-                        continue
-                    
-                    # Skip archive files unless explicitly requested
-                    if not include_archives and org_file.name.endswith('_archive.org'):
-                        logger.debug(f"⏭️  Skipping archive file: {org_file.name}")
-                        continue
-                    
-                    org_files.append(org_file)
-                
+
+            if await dsf.is_dir(user_id, user_base_dir):
+                logger.debug("Recursively searching all of %s (via document-service)", user_base_dir)
+                org_files = await dsf.walk_org_files(
+                    user_id, username, include_archives=include_archives
+                )
                 logger.debug("Found %d org files in user directory", len(org_files))
             else:
-                logger.warning(f"⚠️  User directory does not exist: {user_base_dir}")
-            
+                logger.warning("⚠️  User directory not found under library root: %s", user_base_dir)
+
             # Also check legacy locations (root-level org files for backward compatibility)
             legacy_locations = [
                 self.upload_dir / "inbox.org",
                 self.upload_dir / "Tasks.org",
-                self.upload_dir / "calendar.org"
+                self.upload_dir / "calendar.org",
             ]
-            
+
             for legacy_org in legacy_locations:
-                if legacy_org.exists() and legacy_org not in org_files:
-                    # Only include if it has content (non-empty)
-                    if legacy_org.stat().st_size > 0:
-                        org_files.append(legacy_org)
-                        logger.debug("Including legacy org file: %s", legacy_org.name)
+                try:
+                    body = await dsf.read_text(user_id, legacy_org)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    continue
+                if legacy_org not in org_files and body.strip():
+                    org_files.append(legacy_org)
+                    logger.debug("Including legacy org file: %s", legacy_org.name)
             
             # Sort for consistent ordering
             org_files.sort(key=lambda f: str(f))
@@ -290,6 +274,7 @@ class OrgSearchService:
     
     async def _search_org_file(
         self,
+        user_id: str,
         file_path: Path,
         query: str,
         tags: Optional[List[str]],
@@ -299,7 +284,9 @@ class OrgSearchService:
     ) -> List[Dict[str, Any]]:
         """Search a single org file and return matching headings"""
         try:
-            content = file_path.read_text(encoding='utf-8')
+            from services import ds_upload_library_fs as dsf
+
+            content = await dsf.read_text(user_id, file_path)
             
             # Parse org file structure
             headings = self._parse_org_headings(content)
@@ -611,7 +598,9 @@ class OrgSearchService:
                     continue
                 
                 try:
-                    content = file_path.read_text(encoding='utf-8')
+                    from services import ds_upload_library_fs as dsf
+
+                    content = await dsf.read_text(user_id, file_path)
                     
                     # Check if any link pattern matches
                     found_links = []

@@ -1,7 +1,5 @@
 """
-Org-Mode Archive Service - Roosevelt's "Clean Desk Policy"
-
-**BULLY!** Archive completed tasks to keep your active files lean and mean!
+Org-mode archive service.
 
 This service handles:
 - Archiving individual entries to {filename}_archive.org
@@ -24,6 +22,24 @@ class OrgArchiveService:
     
     def __init__(self):
         self.archive_suffix = "_archive.org"
+
+    @staticmethod
+    def _parse_file_archive_directive(file_content: str) -> Optional[str]:
+        """
+        Return the raw value from #+ARCHIVE: in-buffer setting (lines before first heading), or None.
+
+        Used by GET /api/org/archive-location and kept in sync with _get_archive_path parsing.
+        """
+        if not file_content or not str(file_content).strip():
+            return None
+        from utils.org_header_parser import parse_org_file_header
+
+        text = str(file_content)
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        header = parse_org_file_header(text)
+        raw = (header.archive or "").strip()
+        return raw if raw else None
     
     async def archive_entry(
         self,
@@ -35,7 +51,7 @@ class OrgArchiveService:
         """
         Archive a single org entry to the archive file
         
-        **ROOSEVELT DOCTRINE:** Move DONE tasks to the archive, keep active files clean!
+        Move DONE tasks to the archive file
         
         Args:
             user_id: User ID for file access
@@ -49,13 +65,14 @@ class OrgArchiveService:
         try:
             logger.info(f"📦 ARCHIVE: User {user_id} archiving entry from {source_file} line {line_number}")
             
-            # Get user's org directory
+            from services import ds_upload_library_fs as dsf
             from services.folder_service import FolderService
+
             folder_service = FolderService()
             
             # Resolve source file path
             source_path = await self._resolve_file_path(user_id, source_file, folder_service)
-            if not source_path.exists():
+            if not await dsf.exists(user_id, source_path):
                 raise FileNotFoundError(f"Source file not found: {source_file}")
             
             # Determine archive file path
@@ -70,8 +87,8 @@ class OrgArchiveService:
             logger.info(f"📦 Archive target: {archive_path}")
             
             # Read source file
-            with open(source_path, 'r', encoding='utf-8') as f:
-                source_lines = f.readlines()
+            source_text = await dsf.read_text(user_id, source_path)
+            source_lines = source_text.splitlines(True)
             
             # Extract the entry
             entry_info = self._extract_entry(source_lines, line_number)
@@ -86,13 +103,9 @@ class OrgArchiveService:
             # Add archive metadata
             archived_entry = self._add_archive_metadata(entry_lines, source_file)
             
-            # Ensure archive directory exists
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
-            
             # Read or create archive file
-            if archive_path.exists():
-                with open(archive_path, 'r', encoding='utf-8') as f:
-                    archive_content = f.read()
+            if await dsf.exists(user_id, archive_path):
+                archive_content = await dsf.read_text(user_id, archive_path)
             else:
                 # Create new archive with header
                 archive_content = f"# Archive of {source_path.name}\n\n"
@@ -104,8 +117,7 @@ class OrgArchiveService:
             archive_content += archived_entry
             
             # Write archive file
-            with open(archive_path, 'w', encoding='utf-8') as f:
-                f.write(archive_content)
+            await dsf.write_text(user_id, archive_path, archive_content)
             
             logger.info(f"✅ Entry appended to archive: {archive_path}")
             
@@ -115,8 +127,7 @@ class OrgArchiveService:
                 source_lines[entry_info['end_line']:]
             )
             
-            with open(source_path, 'w', encoding='utf-8') as f:
-                f.writelines(new_source_lines)
+            await dsf.write_text(user_id, source_path, "".join(new_source_lines))
             
             logger.info(f"✅ Entry removed from source: {source_path}")
             
@@ -144,15 +155,17 @@ class OrgArchiveService:
         try:
             logger.info("Bulk archive from %s", source_file)
 
+            from services import ds_upload_library_fs as dsf
             from services.folder_service import FolderService
+
             folder_service = FolderService()
 
             source_path = await self._resolve_file_path(user_id, source_file, folder_service)
-            if not source_path.exists():
+            if not await dsf.exists(user_id, source_path):
                 raise FileNotFoundError(f"Source file not found: {source_file}")
 
-            with open(source_path, 'r', encoding='utf-8') as f:
-                source_lines = f.readlines()
+            source_text = await dsf.read_text(user_id, source_path)
+            source_lines = source_text.splitlines(True)
 
             from services.org_todo_service import _resolve_done_states
             done_states = await _resolve_done_states(user_id)
@@ -172,11 +185,8 @@ class OrgArchiveService:
             else:
                 archive_path = await self._get_archive_path(user_id, source_file, source_path)
 
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
-
-            if archive_path.exists():
-                with open(archive_path, 'r', encoding='utf-8') as f:
-                    archive_content = f.read()
+            if await dsf.exists(user_id, archive_path):
+                archive_content = await dsf.read_text(user_id, archive_path)
             else:
                 archive_content = f"# Archive of {source_path.name}\n\n"
                 logger.info("Creating new archive file: %s", archive_path)
@@ -192,8 +202,7 @@ class OrgArchiveService:
 
                 archived_headings.append(entry_info['heading'])
 
-            with open(archive_path, 'w', encoding='utf-8') as f:
-                f.write(archive_content)
+            await dsf.write_text(user_id, archive_path, archive_content)
 
             logger.info("%s entries appended to archive", len(done_entries))
 
@@ -204,8 +213,7 @@ class OrgArchiveService:
                     new_source_lines[entry_info['end_line']:]
                 )
 
-            with open(source_path, 'w', encoding='utf-8') as f:
-                f.writelines(new_source_lines)
+            await dsf.write_text(user_id, source_path, "".join(new_source_lines))
 
             logger.info("%s entries removed from source", len(done_entries))
 
@@ -235,10 +243,13 @@ class OrgArchiveService:
         """
         # Priority 1: Check file-level #+ARCHIVE: directive (shared parser)
         try:
-            if source_path.exists():
+            from services import ds_upload_library_fs as dsf
+
+            if await dsf.exists(user_id, source_path):
                 from utils.org_header_parser import parse_org_file_header
-                with open(source_path, "r", encoding="utf-8-sig") as f:
-                    file_content = f.read()
+
+                raw = await dsf.read_text(user_id, source_path)
+                file_content = raw[1:] if raw.startswith("\ufeff") else raw
                 header = parse_org_file_header(file_content)
                 if header.archive:
                     file_archive = header.archive

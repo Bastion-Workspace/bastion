@@ -3,27 +3,20 @@ User Document Service - User-isolated document management
 Handles document operations with complete user isolation using separate vector collections
 """
 
-import asyncio
 import logging
-from datetime import datetime
 from typing import List, Optional, Dict, Any
-from uuid import uuid4
 
 from fastapi import UploadFile, HTTPException
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from config import settings
 from models.api_models import (
-    DocumentInfo, DocumentStatus, ProcessingStatus, DocumentType,
-    DocumentUploadResponse
+    DocumentInfo,
+    ProcessingStatus,
+    DocumentUploadResponse,
 )
-from services.document_service_v2 import DocumentService
+from clients.document_service_client import get_document_service_client
 from services.embedding_service_wrapper import get_embedding_service
-from utils.auth_middleware import get_current_user  # Assuming this exists
-
 logger = logging.getLogger(__name__)
-
-security = HTTPBearer()
 
 
 class UserDocumentService:
@@ -34,40 +27,35 @@ class UserDocumentService:
         self.embedding_manager = None
     
     async def initialize(self):
-        """Initialize the service"""
-        logger.info("🔧 Initializing User Document Service...")
-        
-        # Initialize base document service
-        self.document_service = DocumentService()
-        await self.document_service.initialize()
-        
-        # Initialize embedding service wrapper
+        """Bind to shared container document facade and embedding service."""
+        logger.info("Initializing User Document Service")
+        from services.service_container import get_service_container
+
+        container = await get_service_container()
+        self.document_service = container.document_service
         self.embedding_manager = await get_embedding_service()
-        
-        logger.info("✅ User Document Service initialized")
+        logger.info("User Document Service initialized")
     
     async def upload_user_document(self, file: UploadFile, user_id: str, doc_type: str = None) -> DocumentUploadResponse:
-        """Upload a document to user's private collection"""
+        """Upload a document to user's private collection via document-service."""
         try:
-            logger.info(f"📄 Uploading document for user {user_id}: {file.filename}")
-            
-            # Use the base document service for file processing
-            # But we'll modify the embedding storage to use user-specific collection
-            result = await self.document_service.upload_and_process(file, doc_type)
-            
-            # The document is processed normally, but embeddings will be stored
-            # in user-specific collection through the modified embedding manager
-            
-            # Update document metadata to include user_id
+            logger.info("Uploading document for user %s: %s", user_id, file.filename)
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            result = await dsc.upload_via_document_service(
+                file,
+                doc_type=doc_type,
+                user_id=user_id,
+                folder_id=None,
+                team_id=None,
+                collection_type="user",
+            )
             if result.document_id:
                 await self._associate_document_with_user(result.document_id, user_id)
-            
-            logger.info(f"✅ Document uploaded for user {user_id}: {result.document_id}")
             return result
-            
         except Exception as e:
-            logger.error(f"❌ Failed to upload document for user {user_id}: {e}")
-            raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+            logger.error("Failed to upload document for user %s: %s", user_id, e)
+            raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}") from e
     
     async def search_user_documents(
         self, 
@@ -132,8 +120,9 @@ class UserDocumentService:
             # Delete from vector database (user-specific collection)
             await self.embedding_manager.delete_document_chunks(document_id, user_id)
             
-            # Delete from main document repository
-            success = await self.document_service.delete_document(document_id)
+            success = await self.document_service.delete_document(
+                document_id, user_id=user_id
+            )
             
             if success:
                 # Remove user association
@@ -239,143 +228,37 @@ class UserDocumentService:
         except Exception as e:
             logger.error(f"Failed to remove document association: {e}")
     
-    async def store_text_document_for_user(self, doc_id: str, content: str, metadata: Dict[str, Any], user_id: str, filename: str = None) -> bool:
-        """Store text content directly as a document for a specific user"""
+    async def store_text_document_for_user(
+        self,
+        doc_id: str,
+        content: str,
+        metadata: Dict[str, Any],
+        user_id: str,
+        filename: str = None,
+    ) -> bool:
+        """Persist text via document-service StoreTextDocument JSON."""
         try:
-            logger.info(f"📥 Storing text document: {doc_id} for user {user_id}")
-            
-            # Generate filename if not provided
-            if not filename:
-                filename = f"{doc_id}.txt"
-            
-            # Create document info
-            document_info = DocumentInfo(
-                document_id=doc_id,
-                filename=filename,
-                title=metadata.get("title", filename),
-                content=content,
-                doc_type=DocumentType.TXT,
-                category=metadata.get("category", "web_search"),
-                tags=metadata.get("tags", []),
-                author=metadata.get("author"),
-                upload_date=datetime.utcnow(),
-                file_size=len(content.encode('utf-8')),
-                page_count=1,
-                chunk_count=0,
-                metadata=metadata,
-                status=ProcessingStatus.PROCESSING,
-                user_id=user_id  # Set the user_id for RLS policies
+            fn = filename or f"{doc_id}.txt"
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            ok, data, err = await dsc.store_text_document_json(
+                user_id,
+                {
+                    "doc_id": doc_id,
+                    "content": content,
+                    "metadata": metadata,
+                    "filename": fn,
+                    "user_id": user_id,
+                    "collection_type": "user",
+                },
+                timeout=600.0,
             )
-            
-            # Store in database with user_id
-            await self.document_service.document_repository.store_document_metadata(document_info, user_id)
-            
-            # Associate document with user
-            await self._associate_document_with_user(doc_id, user_id)
-            
-            # Process content into chunks
-            chunks = await self.document_service.document_processor.process_text_content(
-                content, doc_id, metadata
-            )
-            
-            # Store chunks in user-specific vector collection
-            # Note: Direct text storage may not have category/tags
-            if chunks:
-                await self.embedding_manager.embed_and_store_chunks(
-                    chunks, 
-                    user_id=user_id,
-                    document_category=None,
-                    document_tags=None
-                )
-                logger.info(f"📊 Stored {len(chunks)} chunks for user {user_id}")
-            
-            # Update document with chunk count
-            await self.document_service.document_repository.update_chunk_count(doc_id, len(chunks) if chunks else 0)
-            
-            # Update final status
-            await self.document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
-            
-            logger.info(f"✅ Successfully stored text document {doc_id} for user {user_id}")
-            return True
-            
+            if ok and data and data.get("success"):
+                await self._associate_document_with_user(doc_id, user_id)
+                return True
+            logger.error("store_text_document_json failed: %s", err or data)
+            return False
         except Exception as e:
-            logger.error(f"❌ Failed to store text document {doc_id} for user {user_id}: {e}")
-            try:
-                await self.document_service.document_repository.update_status(doc_id, ProcessingStatus.FAILED)
-            except:
-                pass  # Don't fail if status update fails
+            logger.error("Failed to store text document %s for user %s: %s", doc_id, user_id, e)
             return False
 
-
-# Updated Document Service to work with user isolation
-class DocumentServiceWithUserIsolation(DocumentService):
-    """Extended DocumentService with user isolation support"""
-    
-    async def upload_and_process_for_user(self, file: UploadFile, user_id: str, doc_type: str = None) -> DocumentUploadResponse:
-        """Upload and process document with user isolation"""
-        try:
-            # Call parent upload method
-            result = await super().upload_and_process(file, doc_type)
-            
-            if result.document_id:
-                # Start processing with user_id for embedding storage
-                asyncio.create_task(self._process_document_async_with_user(result.document_id, file, doc_type, user_id))
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Upload failed for user {user_id}: {e}")
-            raise
-    
-    async def _process_document_async_with_user(self, document_id: str, file, doc_type: str, user_id: str):
-        """Process document with user-specific embedding storage"""
-        try:
-            # Use the same processing logic but pass user_id to embedding storage
-            
-            # Process document normally
-            file_path = f"{settings.UPLOAD_DIR}/{document_id}_{file.filename}"
-            result = await self.document_service.document_processor.process_document(str(file_path), doc_type, document_id)
-            
-            # Update status
-            await self.document_service.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
-            
-            # Fetch document metadata for vector filtering
-            try:
-                doc_info = await self.document_service.document_repository.get_by_id(document_id)
-                document_category = doc_info.category.value if doc_info and doc_info.category else None
-                document_tags = doc_info.tags if doc_info else None
-                document_title = doc_info.title if doc_info else None
-                document_author = doc_info.author if doc_info else None
-                document_filename = doc_info.filename if doc_info else None
-            except Exception as e:
-                logger.debug(f"Could not fetch document metadata: {e}")
-                document_category = None
-                document_tags = None
-                document_title = None
-                document_author = None
-                document_filename = None
-            
-            # Store embeddings in user-specific collection with metadata
-            if result.chunks:
-                await self.embedding_manager.embed_and_store_chunks(
-                    result.chunks, 
-                    user_id=user_id,
-                    document_category=document_category,
-                    document_tags=document_tags,
-                    document_title=document_title,
-                    document_author=document_author,
-                    document_filename=document_filename
-                )
-                logger.info(f"📊 Stored {len(result.chunks)} chunks for user {user_id}")
-            
-            # Store entities in knowledge graph (if enabled)
-            if result.entities and self.kg_service:
-                await self.kg_service.store_entities(result.entities, document_id, result.chunks)
-            
-            # Update final status
-            await self.document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
-            
-        except Exception as e:
-            logger.error(f"❌ Processing failed for user {user_id}: {e}")
-            await self.document_service.document_repository.update_status(document_id, ProcessingStatus.FAILED)
-    

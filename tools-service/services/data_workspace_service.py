@@ -137,11 +137,21 @@ class DataWorkspaceService:
                         for col in schema_cols:
                             if not isinstance(col, dict):
                                 continue
+                            ctype = col.get('type', 'text')
+                            ref = col.get('ref') if isinstance(col.get('ref'), dict) else {}
+                            cref = ''
+                            if str(ctype).upper() == 'REFERENCE' and ref.get('target_table_id'):
+                                cref = json.dumps({
+                                    'target_table_id': ref.get('target_table_id'),
+                                    'target_key': ref.get('target_key') or 'row_id',
+                                    'label_field': ref.get('label_field') or 'name',
+                                })
                             columns.append({
                                 'name': col.get('name', ''),
-                                'type': col.get('type', 'text'),
+                                'type': ctype,
                                 'is_nullable': col.get('nullable', True),
-                                'description': col.get('description', '') or ''
+                                'description': col.get('description', '') or '',
+                                'column_ref_json': cref,
                             })
                         # Parse metadata_json for business context (agents)
                         metadata_json = table_details.get('metadata_json', '') or ''
@@ -176,6 +186,27 @@ class DataWorkspaceService:
         except Exception as e:
             logger.error(f"Failed to get workspace schema: {e}")
             raise
+
+    async def resolve_workspace_link(self, user_id: str, ref_json: str) -> Dict[str, Any]:
+        try:
+            await self._ensure_initialized()
+            payload = json.loads(ref_json) if ref_json and ref_json.strip() else {}
+            result = await self._data_client.resolve_workspace_link(
+                user_id=user_id,
+                ref_payload=payload,
+            )
+            return result
+        except Exception as e:
+            logger.error(f"Failed to resolve workspace link: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'label': '',
+                'preview': {},
+                'row_found': False,
+                'table_id': '',
+                'row_id': '',
+            }
     
     async def query_workspace(
         self,
@@ -274,6 +305,304 @@ class DataWorkspaceService:
                 'has_arrow_data': False,
                 'arrow_results': b'',
             }
+
+    async def create_table(
+        self,
+        *,
+        workspace_id: str,
+        database_id: str,
+        table_name: str,
+        user_id: str,
+        description: Optional[str] = None,
+        columns: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a native table in a workspace database."""
+        await self._ensure_initialized()
+        schema = {"columns": columns or []}
+        table = await self._data_client.create_table(
+            database_id=database_id,
+            name=table_name,
+            user_id=user_id,
+            description=description,
+            table_schema=schema,
+            metadata=metadata,
+        )
+        return {"success": True, "table": table}
+
+    async def insert_rows(
+        self,
+        *,
+        workspace_id: str,
+        table_id: str,
+        user_id: str,
+        rows: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Insert one or more rows into a table."""
+        await self._ensure_initialized()
+        inserted_ids: List[str] = []
+        for row in rows or []:
+            res = await self._data_client.insert_table_row(
+                table_id=table_id, row_data=row or {}, user_id=user_id
+            )
+            if res and res.get("row_id"):
+                inserted_ids.append(res["row_id"])
+        return {"success": True, "inserted_row_ids": inserted_ids, "rows_inserted": len(inserted_ids)}
+
+    async def update_rows(
+        self,
+        *,
+        workspace_id: str,
+        table_id: str,
+        user_id: str,
+        updates: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Update one or more rows by row_id."""
+        await self._ensure_initialized()
+        updated_ids: List[str] = []
+        for upd in updates or []:
+            if not isinstance(upd, dict):
+                continue
+            row_id = upd.get("row_id")
+            row_data = upd.get("row_data") or {}
+            if not row_id:
+                continue
+            res = await self._data_client.update_table_row(
+                table_id=table_id, row_id=row_id, row_data=row_data, user_id=user_id
+            )
+            if res and res.get("row_id"):
+                updated_ids.append(res["row_id"])
+        return {"success": True, "updated_row_ids": updated_ids, "rows_updated": len(updated_ids)}
+
+    async def delete_rows(
+        self,
+        *,
+        workspace_id: str,
+        table_id: str,
+        user_id: str,
+        row_ids: List[str],
+    ) -> Dict[str, Any]:
+        """Delete one or more rows by row_id."""
+        await self._ensure_initialized()
+        deleted_ids: List[str] = []
+        for rid in row_ids or []:
+            if not rid:
+                continue
+            ok = await self._data_client.delete_table_row(table_id=table_id, row_id=rid)
+            if ok:
+                deleted_ids.append(rid)
+        return {"success": True, "deleted_row_ids": deleted_ids, "rows_deleted": len(deleted_ids)}
+
+
+# --- gRPC mixin helpers (dict in/out; no protobuf) ---
+
+
+def parse_optional_json_list(raw: Optional[str]) -> Optional[List[Any]]:
+    """Parse request JSON string into a list for SQL params; None if empty/invalid."""
+    if not raw or not str(raw).strip():
+        return None
+    try:
+        params = json.loads(raw)
+        if not isinstance(params, list):
+            return [params]
+        return params
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_columns_json(raw: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw or not str(raw).strip():
+        return []
+    try:
+        columns = json.loads(raw)
+        return columns if isinstance(columns, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def parse_optional_metadata_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not raw or not str(raw).strip():
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+
+def parse_rows_json_for_insert(raw: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw or not str(raw).strip():
+        return []
+    try:
+        rows = json.loads(raw)
+        if isinstance(rows, dict):
+            return [rows]
+        return rows if isinstance(rows, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def parse_updates_json(raw: Optional[str]) -> List[Dict[str, Any]]:
+    if not raw or not str(raw).strip():
+        return []
+    try:
+        updates = json.loads(raw)
+        return updates if isinstance(updates, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def parse_row_ids_json(raw: Optional[str]) -> List[str]:
+    if not raw or not str(raw).strip():
+        return []
+    try:
+        row_ids = json.loads(raw)
+        return row_ids if isinstance(row_ids, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def list_workspaces_grpc_payload(workspaces: List[Dict[str, Any]]) -> Dict[str, Any]:
+    infos: List[Dict[str, Any]] = []
+    for ws in workspaces or []:
+        infos.append(
+            {
+                "workspace_id": ws.get("workspace_id", ""),
+                "name": ws.get("name", ""),
+                "description": ws.get("description", ""),
+                "icon": ws.get("icon", ""),
+                "color": ws.get("color", ""),
+                "is_pinned": ws.get("is_pinned", False),
+            }
+        )
+    return {"workspace_infos": infos, "total_count": len(infos)}
+
+
+def workspace_schema_grpc_payload(schema_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Build table/column dicts for GetWorkspaceSchemaResponse mapping."""
+    tables_out: List[Dict[str, Any]] = []
+    for table in schema_result.get("tables", []) or []:
+        columns: List[Dict[str, Any]] = []
+        for col in table.get("columns", []) or []:
+            columns.append(
+                {
+                    "name": col.get("name", ""),
+                    "type": col.get("type", "text"),
+                    "is_nullable": col.get("is_nullable", True),
+                    "description": col.get("description", "") or "",
+                    "column_ref_json": col.get("column_ref_json", "") or "",
+                }
+            )
+        meta = table.get("metadata_json")
+        metadata_json_str = json.dumps(meta) if isinstance(meta, dict) and meta else ""
+        tables_out.append(
+            {
+                "table_id": table.get("table_id", ""),
+                "name": table.get("name", ""),
+                "description": table.get("description", ""),
+                "database_id": table.get("database_id", ""),
+                "database_name": table.get("database_name", ""),
+                "columns": columns,
+                "row_count": table.get("row_count", 0),
+                "metadata_json": metadata_json_str or "",
+            }
+        )
+    return {
+        "workspace_id": schema_result.get("workspace_id", ""),
+        "tables": tables_out,
+        "total_tables": len(tables_out),
+    }
+
+
+def resolve_workspace_link_grpc_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    preview = result.get("preview") or {}
+    return {
+        "success": bool(result.get("success")),
+        "error": result.get("error") or "",
+        "label": result.get("label") or "",
+        "preview_json": json.dumps(preview),
+        "row_found": bool(result.get("row_found")),
+        "table_id": result.get("table_id") or "",
+        "row_id": result.get("row_id") or "",
+    }
+
+
+def query_workspace_grpc_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize query_workspace result for gRPC response fields."""
+    arrow_bytes = result.get("arrow_results") or b""
+    has_arrow = bool(result.get("has_arrow_data")) and bool(arrow_bytes)
+
+    if has_arrow:
+        results_json_str = "[]"
+    else:
+        results_json = result.get("results", [])
+        if isinstance(results_json, str):
+            results_json_str = results_json
+        else:
+            results_json_str = json.dumps(results_json)
+
+    returning = result.get("returning_rows") or result.get("returning_rows_json")
+    if isinstance(returning, str) and returning:
+        try:
+            returning = json.loads(returning)
+        except json.JSONDecodeError:
+            returning = []
+    elif not isinstance(returning, list):
+        returning = []
+
+    out: Dict[str, Any] = {
+        "success": result.get("success", False),
+        "column_names": result.get("column_names", []),
+        "results_json": results_json_str,
+        "result_count": result.get("result_count", 0),
+        "execution_time_ms": result.get("execution_time_ms", 0),
+        "generated_sql": result.get("generated_sql", ""),
+        "rows_affected": result.get("rows_affected", 0),
+        "returning_rows_json": json.dumps(returning),
+        "arrow_results": arrow_bytes,
+        "has_arrow_data": has_arrow,
+        "error_message": result.get("error_message"),
+    }
+    return out
+
+
+def create_table_grpc_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    table = result.get("table") or {}
+    return {
+        "success": True,
+        "table_id": table.get("table_id", ""),
+        "table_json": json.dumps(table) if table else "{}",
+        "error_message": "",
+    }
+
+
+def insert_rows_grpc_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    ids = result.get("inserted_row_ids") or []
+    return {
+        "success": True,
+        "rows_inserted": int(result.get("rows_inserted", len(ids)) or 0),
+        "inserted_row_ids_json": json.dumps(ids),
+        "error_message": "",
+    }
+
+
+def update_rows_grpc_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    ids = result.get("updated_row_ids") or []
+    return {
+        "success": True,
+        "rows_updated": int(result.get("rows_updated", len(ids)) or 0),
+        "updated_row_ids_json": json.dumps(ids),
+        "error_message": "",
+    }
+
+
+def delete_rows_grpc_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    ids = result.get("deleted_row_ids") or []
+    return {
+        "success": True,
+        "rows_deleted": int(result.get("rows_deleted", len(ids)) or 0),
+        "deleted_row_ids_json": json.dumps(ids),
+        "error_message": "",
+    }
 
 
 async def get_data_workspace_service() -> DataWorkspaceService:

@@ -18,7 +18,14 @@ function escapeForArticleIdSelector(id) {
     return String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
-const RSSArticleViewer = ({ feedId, feedIds, viewerTitle, onClose }) => {
+const RSSArticleViewer = ({
+    feedId,
+    feedIds,
+    viewerTitle,
+    onClose,
+    initialArticleId = null,
+    onInitialArticleConsumed,
+}) => {
     const { darkMode } = useTheme();
 
     const { data: userTimeFormatData } = useQuery(
@@ -52,6 +59,11 @@ const RSSArticleViewer = ({ feedId, feedIds, viewerTitle, onClose }) => {
     const articlesContainerRef = useRef(null);
     /** After collapsing a read article in Unread Only, scroll this article id to top of list viewport */
     const scrollAnchorAfterCollapseRef = useRef(null);
+    const consumedInitialArticleRef = useRef(false);
+
+    useEffect(() => {
+        consumedInitialArticleRef.current = false;
+    }, [initialArticleId]);
 
     const resolvedFeedIds = useMemo(() => {
         if (Array.isArray(feedIds) && feedIds.length > 0) return feedIds;
@@ -116,6 +128,32 @@ const RSSArticleViewer = ({ feedId, feedIds, viewerTitle, onClose }) => {
             el.scrollIntoView({ block: 'start', behavior: 'smooth' });
         }
     }, [filteredArticles]);
+
+    // Deep link: expand and scroll to initialArticleId (e.g. home dashboard headline)
+    useEffect(() => {
+        if (!initialArticleId || loading || articles.length === 0) return;
+        const article = articles.find((a) => a.article_id === initialArticleId);
+        if (!article) {
+            onInitialArticleConsumed?.();
+            return;
+        }
+        setFilter('all');
+        setExpandedDescriptions((prev) => new Set(prev).add(initialArticleId));
+    }, [articles, initialArticleId, loading, onInitialArticleConsumed]);
+
+    useLayoutEffect(() => {
+        if (!initialArticleId || consumedInitialArticleRef.current) return;
+        const inFiltered = filteredArticles.some((a) => a.article_id === initialArticleId);
+        if (!inFiltered) return;
+        const el = articlesContainerRef.current?.querySelector(
+            `[data-article-id="${escapeForArticleIdSelector(initialArticleId)}"]`
+        );
+        if (el) {
+            el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+        consumedInitialArticleRef.current = true;
+        onInitialArticleConsumed?.();
+    }, [filteredArticles, initialArticleId, onInitialArticleConsumed]);
 
     const loadFeedArticles = async () => {
         try {

@@ -1,17 +1,16 @@
 /**
- * Roosevelt's Messaging Service
- * Frontend API wrapper for user-to-user messaging
- * 
- * BULLY! A well-organized messaging service is like a well-organized cavalry charge!
+ * Frontend API wrapper for user-to-user messaging and WebSocket routing.
  */
 
 import apiService from './apiService';
+import { devLog } from '../utils/devConsole';
 
 class MessagingService {
   constructor() {
     this.wsConnections = new Map(); // room_id -> WebSocket
     this.messageHandlers = new Map(); // room_id -> callback
     this.presenceHandlers = new Set(); // Set of presence callbacks
+    this.federatedPresenceHandlers = new Set();
     this.roomUpdateHandlers = new Set(); // Set of room update callbacks
     this.newRoomHandlers = new Set(); // Set of new room callbacks
     this.reconnectTimeouts = new Map(); // room_id -> timeout
@@ -132,18 +131,48 @@ class MessagingService {
     }
   }
 
-  async sendMessage(roomId, content, messageType = 'text', metadata = null) {
+  async sendMessage(roomId, content, messageType = 'text', metadata = null, mentions = null, replyToMessageId = null) {
     try {
-      const response = await apiService.post(`/api/messaging/rooms/${roomId}/messages`, {
-        content,
-        message_type: messageType,
-        metadata
-      });
-      // ApiServiceBase returns JSON directly, not wrapped in .data
+      const body = { content, message_type: messageType, metadata };
+      if (mentions && mentions.length > 0) body.mentions = mentions;
+      if (replyToMessageId) body.reply_to_message_id = replyToMessageId;
+      const response = await apiService.post(`/api/messaging/rooms/${roomId}/messages`, body);
       return response;
     } catch (error) {
-      console.error('❌ Failed to send message:', error);
+      console.error('Failed to send message:', error);
       throw error;
+    }
+  }
+
+  async editMessage(roomId, messageId, content) {
+    try {
+      const response = await apiService.put(`/api/messaging/rooms/${roomId}/messages/${messageId}`, { content });
+      return response;
+    } catch (error) {
+      console.error('Failed to edit message:', error);
+      throw error;
+    }
+  }
+
+  async searchMessages(roomId, query, limit = 20) {
+    try {
+      const response = await apiService.get(`/api/messaging/rooms/${roomId}/messages/search`, {
+        params: { q: query, limit }
+      });
+      return response;
+    } catch (error) {
+      console.error('Failed to search messages:', error);
+      throw error;
+    }
+  }
+
+  async getMentionables(roomId) {
+    try {
+      const response = await apiService.get(`/api/messaging/rooms/${roomId}/mentionables`);
+      return response.mentionables || [];
+    } catch (error) {
+      console.error('Failed to get mentionables:', error);
+      return [];
     }
   }
 
@@ -303,22 +332,18 @@ class MessagingService {
   // WEBSOCKET OPERATIONS
   // =====================
 
-  connectToRoom(roomId, onMessage, onPresenceUpdate) {
-    // Don't connect if roomId is null or invalid
+  connectToRoom(roomId, onMessage, onPresenceUpdate, onTyping) {
     if (!roomId || roomId === 'null') {
-      console.log('💬 Skipping WebSocket connection for invalid roomId');
       return;
     }
     
-    // Don't reconnect if already connected
     if (this.wsConnections.has(roomId)) {
-      console.log(`💬 Already connected to room ${roomId}`);
       return;
     }
 
     const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
     if (!token) {
-      console.error('❌ No auth token available for WebSocket');
+      console.error('No auth token available for WebSocket');
       return;
     }
 
@@ -328,10 +353,8 @@ class MessagingService {
       const ws = new WebSocket(wsUrl);
       
       ws.onopen = () => {
-        console.log(`Connected to room ${roomId}`);
+        devLog(`Connected to room ${roomId}`);
         this.wsConnections.set(roomId, ws);
-        
-        // Start heartbeat
         this.startHeartbeat(roomId);
       };
       
@@ -340,57 +363,37 @@ class MessagingService {
           const data = JSON.parse(event.data);
           
           if (data.type === 'new_message') {
-            if (onMessage) {
-              onMessage(data.message);
-            }
+            if (onMessage) onMessage(data.message);
           } else if (data.type === 'presence_update') {
-            if (onPresenceUpdate) {
-              onPresenceUpdate(data);
-            }
-            
-            // Call global presence handlers
-            this.presenceHandlers.forEach(handler => {
-              handler(data);
-            });
-          } else if (data.type === 'room_updated') {
-            // Call room update handlers
-            this.roomUpdateHandlers.forEach(handler => {
-              handler(data);
-            });
+            if (onPresenceUpdate) onPresenceUpdate(data);
+            this.presenceHandlers.forEach(handler => handler(data));
+          } else if (data.type === 'room_updated' || data.type === 'message_edited') {
+            this.roomUpdateHandlers.forEach(handler => handler(data));
           } else if (data.type === 'participant_added') {
-            // Call room update handlers (participants are part of room state)
-            this.roomUpdateHandlers.forEach(handler => {
-              handler(data);
-            });
+            this.roomUpdateHandlers.forEach(handler => handler(data));
           } else if (data.type === 'typing') {
-            // Handle typing indicators if needed
-            if (this.messageHandlers.has(roomId)) {
-              this.messageHandlers.get(roomId)(data);
-            }
+            if (onTyping) onTyping(data);
           }
         } catch (error) {
-          console.error('❌ Failed to parse WebSocket message:', error);
+          console.error('Failed to parse WebSocket message:', error);
         }
       };
       
       ws.onclose = () => {
-        console.log(`💬 Disconnected from room ${roomId}`);
         this.wsConnections.delete(roomId);
         
-        // Attempt reconnection after delay
         const timeout = setTimeout(() => {
-          console.log(`🔄 Attempting to reconnect to room ${roomId}...`);
-          this.connectToRoom(roomId, onMessage, onPresenceUpdate);
+          this.connectToRoom(roomId, onMessage, onPresenceUpdate, onTyping);
         }, 3000);
         
         this.reconnectTimeouts.set(roomId, timeout);
       };
       
       ws.onerror = (error) => {
-        console.error(`❌ WebSocket error for room ${roomId}:`, error);
+        console.error(`WebSocket error for room ${roomId}:`, error);
       };
     } catch (error) {
-      console.error(`❌ Failed to create WebSocket for room ${roomId}:`, error);
+      console.error(`Failed to create WebSocket for room ${roomId}:`, error);
     }
   }
 
@@ -406,7 +409,7 @@ class MessagingService {
       const ws = this.wsConnections.get(roomId);
       ws.close();
       this.wsConnections.delete(roomId);
-      console.log(`💬 Disconnected from room ${roomId}`);
+      devLog(`💬 Disconnected from room ${roomId}`);
     }
     
     // Remove message handler
@@ -449,6 +452,13 @@ class MessagingService {
     };
   }
 
+  registerFederatedPresenceHandler(callback) {
+    this.federatedPresenceHandlers.add(callback);
+    return () => {
+      this.federatedPresenceHandlers.delete(callback);
+    };
+  }
+
   registerRoomUpdateHandler(callback) {
     this.roomUpdateHandlers.add(callback);
     
@@ -470,7 +480,7 @@ class MessagingService {
   // User-level WebSocket for notifications across all rooms
   connectUserWebSocket() {
     if (this.userWebSocket) {
-      console.log('💬 User WebSocket already connected');
+      devLog('💬 User WebSocket already connected');
       return;
     }
 
@@ -483,11 +493,11 @@ class MessagingService {
 
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/messaging/ws/user?token=${token}`;
     
-    console.log('💬 Connecting user WebSocket...');
+    devLog('💬 Connecting user WebSocket...');
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      console.log('✅ User WebSocket connected');
+      devLog('✅ User WebSocket connected');
       this.userWebSocket = ws;
       this.userWebSocketReconnectAttempts = 0; // Reset on successful connection
       
@@ -504,31 +514,26 @@ class MessagingService {
       try {
         const data = JSON.parse(event.data);
         
-        if (data.type === 'new_message') {
-          // Notify all handlers about new message
-          this.roomUpdateHandlers.forEach(handler => {
-            handler(data);
-          });
+        if (data.type === 'new_message' || data.type === 'message_edited') {
+          this.roomUpdateHandlers.forEach(handler => handler(data));
         } else if (data.type === 'new_room') {
-          // Notify about new room
-          this.newRoomHandlers.forEach(handler => {
-            handler(data);
-          });
+          this.newRoomHandlers.forEach(handler => handler(data));
         } else if (data.type === 'room_updated') {
-          // Room name or details updated
-          this.roomUpdateHandlers.forEach(handler => {
-            handler(data);
-          });
+          this.roomUpdateHandlers.forEach(handler => handler(data));
         } else if (data.type === 'participant_added') {
-          // Participant added to room
-          this.roomUpdateHandlers.forEach(handler => {
-            handler(data);
-          });
+          this.roomUpdateHandlers.forEach(handler => handler(data));
         } else if (data.type === 'presence_update') {
-          // Presence update
-          this.presenceHandlers.forEach(handler => {
-            handler(data);
-          });
+          this.presenceHandlers.forEach(handler => handler(data));
+        } else if (data.type === 'federated_presence_batch') {
+          this.federatedPresenceHandlers.forEach(handler => handler(data));
+        } else if (
+          data.type === 'reaction_update' ||
+          data.type === 'attachment_added' ||
+          data.type === 'federated_read_receipt'
+        ) {
+          this.roomUpdateHandlers.forEach(handler => handler(data));
+        } else if (data.type === 'mention_notification') {
+          this.roomUpdateHandlers.forEach(handler => handler(data));
         }
       } catch (error) {
         console.error('❌ Failed to parse user WebSocket message:', error);
@@ -551,7 +556,7 @@ class MessagingService {
       this.userWebSocketReconnectAttempts++;
       
       // Only log reconnection attempts in development
-      console.log(`💬 User WebSocket disconnected, reconnecting in ${delay}ms (attempt ${this.userWebSocketReconnectAttempts})...`);
+      devLog(`💬 User WebSocket disconnected, reconnecting in ${delay}ms (attempt ${this.userWebSocketReconnectAttempts})...`);
       
       // Attempt reconnection after delay
       setTimeout(() => {
@@ -572,7 +577,7 @@ class MessagingService {
       }
       this.userWebSocket.close();
       this.userWebSocket = null;
-      console.log('💬 User WebSocket disconnected');
+      devLog('💬 User WebSocket disconnected');
     }
   }
 
@@ -603,7 +608,7 @@ class MessagingService {
     this.roomUpdateHandlers.clear();
     this.newRoomHandlers.clear();
     
-    console.log('💬 All messaging connections closed');
+    devLog('💬 All messaging connections closed');
   }
 }
 

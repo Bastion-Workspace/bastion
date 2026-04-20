@@ -52,7 +52,7 @@ async def create_rss_feed(
     """
     Create a new RSS feed
     
-    **BULLY!** Add a new RSS feed to monitor for articles!
+    Register a new RSS feed for the current user.
     """
     try:
         logger.info(f"📡 RSS API: Creating RSS feed for user {current_user.user_id}")
@@ -106,7 +106,7 @@ async def create_global_rss_feed(
     """
     Create a new global RSS feed (admin only)
     
-    **BULLY!** Add a new global RSS feed that all users can access!
+    Register a global RSS feed (admin only).
     """
     try:
         # Only admin users can create global feeds
@@ -152,7 +152,7 @@ async def get_rss_feeds(
     """
     Get all RSS feeds for the current user
     
-    **By George!** Retrieve all RSS feeds the user has access to!
+    List RSS feeds visible to the current user.
     """
     try:
         logger.info(f"📡 RSS API: Getting RSS feeds for user {current_user.user_id}")
@@ -176,7 +176,7 @@ async def get_categorized_rss_feeds(
     """
     Get RSS feeds categorized by user-specific vs global
     
-    **BULLY!** This separates "My Docs" feeds from "Global" feeds!
+    Response separates user-scoped feeds from global feeds.
     """
     try:
         logger.info(f"📡 RSS API: Getting categorized RSS feeds for user {current_user.user_id}")
@@ -297,7 +297,7 @@ async def delete_rss_feed(
     """
     Delete an RSS feed
     
-    **BULLY!** Remove an RSS feed from monitoring!
+    Remove an RSS feed from monitoring.
     """
     try:
         logger.info(f"📡 RSS API: Deleting RSS feed {feed_id} for user {current_user.user_id}")
@@ -328,7 +328,7 @@ async def update_rss_feed(
     """
     Update RSS feed metadata
     
-    **BULLY!** Update the feed's name, category, tags, and check interval!
+    Update feed metadata and polling interval.
     """
     try:
         logger.info(f"📡 RSS API: Updating RSS feed {feed_id} for user {current_user.user_id}")
@@ -370,18 +370,25 @@ async def update_rss_feed(
 async def get_feed_articles(
     feed_id: str,
     limit: int = 100,
+    read_filter: str = "all",
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Get articles for a specific RSS feed
-    
-    **By George!** Retrieve articles from the specified RSS feed!
+    Get articles for a specific RSS feed.
+
+    read_filter: ``all`` (default), ``unread``, or ``read``.
     """
     try:
         logger.info(f"📡 RSS API: Getting articles for feed {feed_id}, user {current_user.user_id}")
         
+        rf = (read_filter or "all").strip().lower()
+        if rf not in ("all", "unread", "read"):
+            rf = "all"
+
         rss_service = await get_rss_service()
-        articles = await rss_service.get_feed_articles(feed_id, current_user.user_id, limit)
+        articles = await rss_service.get_feed_articles(
+            feed_id, current_user.user_id, limit, read_filter=rf
+        )
         
         logger.info(f"✅ RSS API: Retrieved {len(articles)} articles for feed {feed_id}")
         return articles
@@ -400,6 +407,20 @@ async def _require_feed_access(
     is_admin = current_user.role == "admin"
     if not is_admin and feed.user_id and feed.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied to this RSS feed")
+
+
+@router.post("/api/rss/mark-all-read", response_model=RSSBulkCountResponse)
+async def mark_all_rss_articles_read_for_user(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Mark all unread RSS articles for the current user as read."""
+    try:
+        rss_service = await get_rss_service()
+        n = await rss_service.mark_all_user_articles_read(current_user.user_id)
+        return RSSBulkCountResponse(count=n)
+    except Exception as e:
+        logger.error("RSS API: mark-all-read (user) failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to mark articles read")
 
 
 @router.post("/api/rss/feeds/{feed_id}/mark-all-read", response_model=RSSBulkCountResponse)
@@ -500,7 +521,7 @@ async def import_rss_article(
     """
     Import an RSS article for full processing
     
-    **BULLY!** Download and process the full article content!
+    Fetch and persist full article HTML for an RSS item.
     """
     try:
         logger.info(f"📡 RSS API: Importing article {article_id} for user {current_user.user_id}")
@@ -558,7 +579,7 @@ async def mark_article_read(
     """
     Mark an RSS article as read
     
-    **By George!** Mark this article as read by the user!
+    Mark an article as read for the current user.
     """
     try:
         logger.info(f"📡 RSS API: Marking article {article_id} as read for user {current_user.user_id}")
@@ -643,7 +664,7 @@ async def poll_rss_feed(
     """
     Poll a specific RSS feed for new articles
     
-    **BULLY!** Force a poll of the specified RSS feed!
+    Trigger an immediate poll of one feed.
     """
     try:
         logger.info(f"📡 RSS API: Polling feed {feed_id} for user {current_user.user_id}")
@@ -676,7 +697,7 @@ async def get_unread_count(
     """
     Get unread article count per feed
     
-    **By George!** Get the count of unread articles for each RSS feed!
+    Return unread counts per feed for the current user.
     """
     try:
         logger.info(f"📡 RSS API: Getting unread count for user {current_user.user_id}")
@@ -700,7 +721,7 @@ async def subscribe_to_feed(
     """
     Subscribe to an RSS feed
     
-    **BULLY!** Subscribe the user to receive articles from this feed!
+    Subscribe the current user to a feed.
     """
     try:
         logger.info(f"📡 RSS API: Subscribing user {current_user.user_id} to feed {feed_id}")
@@ -729,7 +750,7 @@ async def unsubscribe_from_feed(
     """
     Unsubscribe from an RSS feed
     
-    **By George!** Unsubscribe the user from this RSS feed!
+    Unsubscribe the current user from a feed.
     """
     try:
         logger.info(f"📡 RSS API: Unsubscribing user {current_user.user_id} from feed {feed_id}")

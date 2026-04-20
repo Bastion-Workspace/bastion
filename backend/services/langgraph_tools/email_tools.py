@@ -270,24 +270,3 @@ async def get_email_statistics(
     except Exception as e:
         logger.exception("get_email_statistics failed: %s", e)
         return f"Error: {e}"
-
-
-async def summarize_unread_emails(user_id: str) -> str:
-    """Fetch unread emails and return a short summary for the LLM."""
-    try:
-        client = await _get_email_client()
-        result = await client.get_emails(
-            user_id=user_id,
-            folder_id="inbox",
-            top=20,
-            unread_only=True,
-        )
-        if result.get("error") and not result.get("messages"):
-            return f"Error: {result.get('error')}. Ensure an email connection is configured."
-        messages = result.get("messages", [])
-        if not messages:
-            return "No unread emails."
-        return _format_emails(messages, max_preview=150)
-    except Exception as e:
-        logger.exception("summarize_unread_emails failed: %s", e)
-        return f"Error: {e}"

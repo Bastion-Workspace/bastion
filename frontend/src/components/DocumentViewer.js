@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Box,
   Typography,
@@ -18,6 +18,7 @@ import {
   ListItemIcon,
   ListItemText
 } from '@mui/material';
+import { alpha } from '@mui/material/styles';
 import {
   Description,
   CalendarToday,
@@ -40,19 +41,26 @@ import {
   Restore,
   VolumeUp,
   Stop,
-  AudioFile
+  AudioFile,
+  Lock,
+  LockOpen,
+  HelpOutline,
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import apiService from '../services/apiService';
+import orgService from '../services/org/OrgService';
+import { devLog } from '../utils/devConsole';
 import exportService from '../services/exportService';
 import settingsService from '../services/settings/SettingsService';
-import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover, Drawer, FormLabel, RadioGroup, Radio } from '@mui/material';
+import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover, Drawer, FormLabel, RadioGroup, Radio, Snackbar } from '@mui/material';
 import OrgRenderer from './OrgRenderer';
 import OrgCMEditor from './OrgCMEditor';
 import MarkdownCMEditor from './MarkdownCMEditor';
+import { markdownPreviewContainerSx, MarkdownPreWithCopy } from './markdown/markdownDocumentPreview';
 import OrgRefileDialog from './OrgRefileDialog';
 import OrgArchiveDialog from './OrgArchiveDialog';
 import OrgTagDialog from './OrgTagDialog';
@@ -63,7 +71,7 @@ import PptxViewer from './PptxViewer';
 import EMLViewer from './EMLViewer';
 import { useEditor } from '../contexts/EditorContext';
 import { useChatSidebar } from '../contexts/ChatSidebarContext';
-import { parseFrontmatter } from '../utils/frontmatterUtils';
+import { parseFrontmatter, markdownPreviewBody } from '../utils/frontmatterUtils';
 import { useTheme } from '../contexts/ThemeContext';
 // Correct import path for documentDiffStore
 import { documentDiffStore } from '../services/documentDiffStore';
@@ -74,6 +82,19 @@ import { useAuth } from '../contexts/AuthContext';
 import { stripTextForSpeech } from '../utils/textForSpeech';
 import { useTTS } from '../hooks/useTTS';
 import AudioExportDialog from './AudioExportDialog';
+import { createCollabSession, destroyCollabSession, updateCollabAuthToken } from '../services/collabService';
+import EncryptedDocumentDialog from './EncryptedDocumentDialog';
+import {
+  set as setEncryptionSession,
+  get as getEncryptionSession,
+  clear as clearEncryptionSession,
+  ENCRYPTION_SESSION_LOST_EVENT,
+} from '../services/encryptionSessionRegistry';
+import {
+  HELP_TOPIC_DOCUMENT_ENCRYPTION,
+  openHelpTopic,
+} from '../constants/helpTopics';
+import FindInDocumentBar from './FindInDocumentBar';
 
 // Normalize bbox from face or object (supports bbox_x/bbox_y/bbox_width/bbox_height or left/top/right/bottom)
 const getBbox = (item) => {
@@ -157,17 +178,17 @@ const ImageViewer = ({ documentId, filename, title, onDownload }) => {
         // Check if user has vision features enabled
         const visionEnabledResponse = await settingsService.getVisionFeaturesEnabled();
         const enabled = visionEnabledResponse?.enabled === true;
-        console.log('Vision features enabled:', enabled, visionEnabledResponse);
+        devLog('Vision features enabled:', enabled, visionEnabledResponse);
         setVisionEnabled(enabled);
 
         // Check if vision service is available
         const serviceStatusResponse = await settingsService.getVisionServiceStatus();
         const available = serviceStatusResponse?.available === true;
-        console.log('Vision service available:', available, serviceStatusResponse);
+        devLog('Vision service available:', available, serviceStatusResponse);
         setVisionServiceAvailable(available);
         setVisionStatusChecked(true);
         
-        console.log('Button visibility check:', {
+        devLog('Button visibility check:', {
           visionServiceAvailable: available,
           isAdmin,
           visionEnabled: enabled,
@@ -304,7 +325,17 @@ const ImageViewer = ({ documentId, filename, title, onDownload }) => {
           </Tooltip>
         </Box>
       </Box>
-      <Box sx={{ flex: 1, p: 3, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', bgcolor: 'background.default' }}>
+      <Box
+        sx={{
+          flex: 1,
+          p: 3,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          overflow: 'auto',
+          bgcolor: (theme) => alpha(theme.palette.background.default, 0.55),
+        }}
+      >
         {loading && (
           <CircularProgress />
         )}
@@ -471,15 +502,57 @@ const ImageViewer = ({ documentId, filename, title, onDownload }) => {
   );
 };
 
+/** Whether the current user may enter edit mode (file type, sharing can_write, lock not held by another). */
+function computeDocumentEditEligibility(docData, sharingContext, documentLock, user, isAdmin) {
+  if (!docData) return false;
+  const fname = (docData.filename || '').toLowerCase();
+  const isEditableType =
+    fname.endsWith('.md') || fname.endsWith('.txt') || fname.endsWith('.org');
+  if (!isEditableType) return false;
+
+  if (!sharingContext) {
+    const collectionType = docData.collection_type || 'user';
+    const docUserId = docData.user_id;
+    const currentUserId = user?.user_id;
+    if (isAdmin && collectionType === 'global') return true;
+    if (collectionType === 'user' && docUserId === currentUserId) return true;
+    return false;
+  }
+
+  if (!sharingContext.can_write) return false;
+
+  if (sharingContext.collab_eligible && fname.endsWith('.md')) {
+    return true;
+  }
+
+  if (
+    documentLock?.active &&
+    documentLock.locked_by_user_id &&
+    documentLock.locked_by_user_id !== user?.user_id
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 // Memoize DocumentViewer to prevent re-renders from parent context updates
-const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }) => {
+const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange, onOpenDocument }) => {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const [sharingContext, setSharingContext] = useState(null);
+  const [documentLock, setDocumentLock] = useState(null);
+  const [holdsEditLock, setHoldsEditLock] = useState(false);
+  const holdsEditLockRef = React.useRef(false);
   const [document, setDocument] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
+  const isEditingRef = React.useRef(false);
+  isEditingRef.current = isEditing;
   const [editContent, setEditContent] = useState('');
+  /** Plain text from PDF/Docx viewers for read-only {editor} context */
+  const [viewerExtractedText, setViewerExtractedText] = useState(null);
   // Track actual server content to detect REAL changes
   const [serverContent, setServerContent] = useState('');
   // Ref to track latest editContent for cleanup (avoids stale closure issues)
@@ -538,8 +611,129 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [indentParagraphs, setIndentParagraphs] = useState(true);
   const [noIndentFirstParagraph, setNoIndentFirstParagraph] = useState(true);
   const contentBoxRef = React.useRef(null);
+  const readonlyFindRootRef = React.useRef(null);
+  const readonlyViewerShellRef = React.useRef(null);
+  const [readonlyFindOpen, setReadonlyFindOpen] = useState(false);
   const [backlinks, setBacklinks] = useState([]);
   const [loadingBacklinks, setLoadingBacklinks] = useState(false);
+  const [orgLinkNotice, setOrgLinkNotice] = useState({ open: false, message: '', severity: 'info' });
+
+  const handleOrgPreviewNavigate = useCallback(
+    async (navInfo) => {
+      if (navInfo.type === 'file') {
+        const raw = navInfo.path || '';
+        const basename = raw.split(/[/\\]/).pop() || raw;
+        if (!basename?.trim()) {
+          setOrgLinkNotice({ open: true, message: 'Invalid file link', severity: 'warning' });
+          return;
+        }
+        if (!onOpenDocument) {
+          setOrgLinkNotice({
+            open: true,
+            message: 'Opening linked documents from this view is not available.',
+            severity: 'info',
+          });
+          return;
+        }
+        try {
+          const response = await orgService.lookupDocument(basename);
+          if (response?.success && response.document?.document_id) {
+            const doc = response.document;
+            onOpenDocument(String(doc.document_id), doc.title || doc.filename || basename);
+          } else {
+            setOrgLinkNotice({
+              open: true,
+              message: `No document found for "${basename}"`,
+              severity: 'warning',
+            });
+          }
+        } catch (err) {
+          console.error('Failed to open linked org file:', err);
+          const msg =
+            err?.response?.data?.detail ||
+            err?.message ||
+            'Document lookup failed';
+          setOrgLinkNotice({ open: true, message: typeof msg === 'string' ? msg : 'Document lookup failed', severity: 'error' });
+        }
+      } else if (navInfo.type === 'id') {
+        setOrgLinkNotice({
+          open: true,
+          message:
+            'Jumping to a heading by org property ID from preview is not supported yet. Switch to edit mode and use the outline.',
+          severity: 'info',
+        });
+      }
+    },
+    [onOpenDocument]
+  );
+
+  const openOrgFileByFilename = useCallback(
+    async (filename) => {
+      const raw = filename || '';
+      const basename = raw.split(/[/\\]/).pop() || raw;
+      if (!basename?.trim()) {
+        setOrgLinkNotice({ open: true, message: 'Invalid file reference', severity: 'warning' });
+        return;
+      }
+      if (!onOpenDocument) {
+        setOrgLinkNotice({
+          open: true,
+          message: 'Opening linked documents from this view is not available.',
+          severity: 'info',
+        });
+        return;
+      }
+      try {
+        const response = await orgService.lookupDocument(basename);
+        if (response?.success && response.document?.document_id) {
+          const doc = response.document;
+          onOpenDocument(String(doc.document_id), doc.title || doc.filename || basename);
+        } else {
+          setOrgLinkNotice({
+            open: true,
+            message: `No document found for "${basename}"`,
+            severity: 'warning',
+          });
+        }
+      } catch (err) {
+        console.error('Failed to open org file from backlink:', err);
+        const msg =
+          err?.response?.data?.detail ||
+          err?.message ||
+          'Document lookup failed';
+        setOrgLinkNotice({ open: true, message: typeof msg === 'string' ? msg : 'Document lookup failed', severity: 'error' });
+      }
+    },
+    [onOpenDocument]
+  );
+
+  useEffect(() => {
+    if (isEditing) setReadonlyFindOpen(false);
+  }, [isEditing]);
+
+  useEffect(() => {
+    setReadonlyFindOpen(false);
+  }, [documentId]);
+
+  useEffect(() => {
+    const fname = (document?.filename || '').toLowerCase();
+    const eligible =
+      !!document?.filename &&
+      !isEditing &&
+      (fname.endsWith('.md') || fname.endsWith('.txt') || fname.endsWith('.org'));
+    if (!eligible) return undefined;
+    const onKeyDown = (e) => {
+      const root = readonlyViewerShellRef.current;
+      const t = e.target;
+      if (!root || !(t instanceof Node) || !root.contains(t)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setReadonlyFindOpen(true);
+      }
+    };
+    window.document.addEventListener('keydown', onKeyDown, true);
+    return () => window.document.removeEventListener('keydown', onKeyDown, true);
+  }, [isEditing, document?.filename]);
   const [refileDialogOpen, setRefileDialogOpen] = useState(false);
   const [refileSourceFile, setRefileSourceFile] = useState('');
   const [refileSourceLine, setRefileSourceLine] = useState(null);
@@ -555,6 +749,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [tagSourceHeading, setTagSourceHeading] = useState('');
   const orgEditorRef = React.useRef(null);
   const markdownEditorRef = React.useRef(null);
+  const collabPendingDraftRef = React.useRef(null);
+  const collabSessionRef = React.useRef(null);
   // Scroll position to restore after a refresh (editor remount). Set before fetchDocument so we have it when the new editor mounts.
   const pendingScrollAfterRefreshRef = React.useRef(null);
   // Proposal IDs recently accepted/rejected/terminal-failed; skip re-injecting from DB for TTL window.
@@ -573,7 +769,15 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [editedFilename, setEditedFilename] = useState('');
   const [updatingMetadata, setUpdatingMetadata] = useState(false);
   const [externalUpdateNotification, setExternalUpdateNotification] = useState(null);
+  const [collabSession, setCollabSession] = useState(null);
+  const [collabConnectionStatus, setCollabConnectionStatus] = useState('disconnected');
+  const [collabSynced, setCollabSynced] = useState(false);
+  const [collabAwarenessEpoch, setCollabAwarenessEpoch] = useState(0);
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
+  const encryptionSessionTokenRef = useRef(null);
+  const [encryptionDialogOpen, setEncryptionDialogOpen] = useState(false);
+  const [encryptionDialogMode, setEncryptionDialogMode] = useState('unlock');
+  const [encryptionSessionActive, setEncryptionSessionActive] = useState(false);
   // Scroll position to restore after a full-document refresh (e.g. Accept All). Cleared after editor applies it.
   const [restoreScrollAfterRefresh, setRestoreScrollAfterRefresh] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -617,25 +821,108 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     }
   };
 
-  // Check if user can edit this document
-  const canUserEditDocument = (docData) => {
-    if (!docData) return false;
-    const fname = (docData.filename || '').toLowerCase();
-    const isEditableType = fname.endsWith('.md') || fname.endsWith('.txt') || fname.endsWith('.org');
-    if (!isEditableType) return false;
-    
-    const collectionType = docData.collection_type || 'user';
-    const docUserId = docData.user_id;
-    const currentUserId = user?.user_id;
-    
-    // Admin can edit global documents
-    if (isAdmin && collectionType === 'global') return true;
-    
-    // Users can edit their own documents
-    if (collectionType === 'user' && docUserId === currentUserId) return true;
-    
-    return false;
-  };
+  React.useEffect(() => {
+    holdsEditLockRef.current = holdsEditLock;
+  }, [holdsEditLock]);
+
+  React.useEffect(() => {
+    collabSessionRef.current = collabSession;
+  }, [collabSession]);
+
+  const isMarkdownCollaborative =
+    !!sharingContext?.collab_eligible &&
+    !!(document?.filename || '').toLowerCase().endsWith('.md') &&
+    !document?.is_encrypted;
+
+  React.useEffect(() => {
+    const id = documentId;
+    return () => {
+      if (id && holdsEditLockRef.current) {
+        apiService.releaseDocumentLock(id).catch(() => {});
+        holdsEditLockRef.current = false;
+      }
+      if (id && encryptionSessionTokenRef.current) {
+        const tok = encryptionSessionTokenRef.current;
+        const park =
+          typeof window !== 'undefined' &&
+          window.tabbedContentManagerRef?.shouldParkEncryptionSession?.(id);
+        if (park) {
+          setEncryptionSession(id, tok);
+        }
+        encryptionSessionTokenRef.current = null;
+      }
+    };
+  }, [documentId]);
+
+  React.useEffect(() => {
+    if (!documentId) return;
+    const parked = getEncryptionSession(documentId);
+    encryptionSessionTokenRef.current = parked || null;
+    if (parked) {
+      setEncryptionSessionActive(true);
+      setEncryptionDialogOpen(false);
+    } else {
+      setEncryptionSessionActive(false);
+      setEncryptionDialogOpen(false);
+    }
+  }, [documentId]);
+
+  React.useEffect(() => {
+    const onSessionLost = (ev) => {
+      if (ev.detail?.document_id !== documentId) return;
+      encryptionSessionTokenRef.current = null;
+      clearEncryptionSession(documentId);
+      setEncryptionSessionActive(false);
+      setEncryptionDialogMode('unlock');
+      setEncryptionDialogOpen(true);
+      setEditContent('');
+      setServerContent('');
+      setIsEditing(false);
+    };
+    window.addEventListener(ENCRYPTION_SESSION_LOST_EVENT, onSessionLost);
+    return () => window.removeEventListener(ENCRYPTION_SESSION_LOST_EVENT, onSessionLost);
+  }, [documentId]);
+
+  React.useEffect(() => {
+    const onLockChanged = (ev) => {
+      if (ev.detail?.document_id !== documentId) return;
+      apiService
+        .getDocumentLock(documentId)
+        .then((lock) => {
+          setDocumentLock(lock);
+          if (isMarkdownCollaborative) return;
+          if (
+            lock?.active &&
+            lock.locked_by_user_id &&
+            lock.locked_by_user_id !== user?.user_id
+          ) {
+            setIsEditing(false);
+            setHoldsEditLock(false);
+            alert('Another user holds the edit lock.');
+          }
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('bastion-document-lock-changed', onLockChanged);
+    return () => window.removeEventListener('bastion-document-lock-changed', onLockChanged);
+  }, [documentId, user?.user_id, isMarkdownCollaborative]);
+
+  React.useEffect(() => {
+    if (!documentId || !isEditing || !holdsEditLock || isMarkdownCollaborative) return undefined;
+    const intervalId = setInterval(() => {
+      apiService
+        .heartbeatDocumentLock(documentId)
+        .then((lock) => setDocumentLock(lock))
+        .catch(() => {});
+    }, 120000);
+    return () => clearInterval(intervalId);
+  }, [documentId, isEditing, holdsEditLock, isMarkdownCollaborative]);
+
+  const canUserEditDocument = React.useCallback(
+    (docData) =>
+      computeDocumentEditEligibility(docData, sharingContext, documentLock, user, isAdmin),
+    [sharingContext, documentLock, user, isAdmin]
+  );
 
   const readAloudFilenameLower = (document?.filename || '').toLowerCase();
   const isReadableTextDocument =
@@ -700,105 +987,233 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   };
 
   // Fetch document content (can be called multiple times for refresh)
-  const fetchDocument = React.useCallback(async (forceRefresh = false, preserveEditMode = false) => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      // Check for unsaved content first (unless forcing refresh)
-      if (!forceRefresh) {
-        const unsavedContent = getUnsavedContent(documentId);
-        if (unsavedContent !== null) {
-          // We have unsaved content, but we still need document metadata
-          // Fetch metadata only, then use unsaved content
-          const response = await apiService.getDocumentContent(documentId);
-          const docData = {
-            ...response.metadata,
-            content: unsavedContent, // Use unsaved content for display
-            chunk_count: response.chunk_count,
-            total_length: response.total_length
-          };
-          setDocument(docData);
-          setEditContent(unsavedContent);
-          // Store the actual server content separately
-          setServerContent(response.content || '');
-          
-          // Determine if we should enter edit mode (for unsaved content path)
-          const canEdit = canUserEditDocument(docData);
-          
-          if (preserveEditMode && isEditing) {
-            // Preserve current edit mode
-            setIsEditing(true);
-          } else if (manuallyEditingRef.current && isEditing) {
-            // User manually entered edit mode - preserve it
-            setIsEditing(true);
+  const fetchDocument = React.useCallback(
+    async (forceRefresh = false, preserveEditMode = false) => {
+      if (!documentId) return;
+      try {
+        // Avoid full-screen loading (and unmounting the editor tree) on background refresh after save or WS sync.
+        // fetchDocument(true, true) is used for those paths; initial open uses fetchDocument(false) or fetchDocument(true) without preserve.
+        const showFullScreenLoading = !(forceRefresh && preserveEditMode);
+        if (showFullScreenLoading) {
+          setLoading(true);
+        }
+        setError(null);
+        setHoldsEditLock(false);
+
+        const loadSharingAndLock = async () => {
+          const [ctx, lock] = await Promise.all([
+            apiService.getDocumentSharingContext(documentId).catch(() => null),
+            apiService.getDocumentLock(documentId).catch(() => null),
+          ]);
+          return { ctx, lock };
+        };
+
+        const loadContent = () => {
+          const tok = encryptionSessionTokenRef.current;
+          return apiService.getDocumentContent(
+            documentId,
+            tok ? { encryptionSessionToken: tok } : {}
+          );
+        };
+
+        const exitOnEncryptedLocked = (response, ctx, lock) => {
+          if (!response?.is_encrypted || !response?.requires_password) return false;
+          encryptionSessionTokenRef.current = null;
+          clearEncryptionSession(documentId);
+          setSharingContext(ctx);
+          setDocumentLock(lock);
+          const meta = response.metadata || {};
+          setDocument({
+            ...meta,
+            content: '',
+            document_id: meta.document_id || documentId,
+            is_encrypted: true,
+          });
+          setEditContent('');
+          setServerContent('');
+          setIsEditing(false);
+          manuallyEditingRef.current = false;
+          setEncryptionDialogMode('unlock');
+          setEncryptionDialogOpen(true);
+          setEncryptionSessionActive(false);
+          setLoading(false);
+          return true;
+        };
+
+        const tryAcquireLockForEdit = async (ctx, docData) => {
+          const fnameLower = (docData?.filename || '').toLowerCase();
+          if (ctx?.collab_eligible && fnameLower.endsWith('.md')) {
+            setHoldsEditLock(false);
+            return true;
+          }
+          const res = await apiService.acquireDocumentLock(documentId);
+          if (res.lock) setDocumentLock(res.lock);
+          if (res.success) {
+            setHoldsEditLock(true);
+            return true;
+          }
+          setHoldsEditLock(false);
+          if (res.message) alert(res.message);
+          return false;
+        };
+
+        const finishFetchWithEditMode = async (docData, ctx, lock) => {
+          const canEdit = computeDocumentEditEligibility(docData, ctx, lock, user, isAdmin);
+          if (preserveEditMode && isEditingRef.current) {
+            if (!canEdit) {
+              setIsEditing(false);
+              setHoldsEditLock(false);
+            } else {
+              const ok = await tryAcquireLockForEdit(ctx, docData);
+              if (!ok) setIsEditing(false);
+            }
+          } else if (manuallyEditingRef.current && isEditingRef.current) {
+            if (!canEdit) {
+              setIsEditing(false);
+              manuallyEditingRef.current = false;
+              setHoldsEditLock(false);
+            } else {
+              const ok = await tryAcquireLockForEdit(ctx, docData);
+              if (!ok) {
+                setIsEditing(false);
+                manuallyEditingRef.current = false;
+              }
+            }
           } else if (canEdit) {
-            // User can edit - always open in edit mode
-            setIsEditing(true);
-            setViewMode('edit');
-            manuallyEditingRef.current = false;
-            setEditModePreference(true); // Remember preference
+            const ok = await tryAcquireLockForEdit(ctx, docData);
+            if (ok) {
+              setIsEditing(true);
+              setViewMode('edit');
+              manuallyEditingRef.current = false;
+              setEditModePreference(true);
+            } else {
+              setIsEditing(false);
+              manuallyEditingRef.current = false;
+            }
           } else {
-            // User cannot edit - preview mode
             setIsEditing(false);
             manuallyEditingRef.current = false;
           }
-          
-          setLoading(false);
+        };
+
+        if (!forceRefresh) {
+          const unsavedContent = getUnsavedContent(documentId);
+          if (unsavedContent !== null) {
+            const [response, { ctx, lock }] = await Promise.all([
+              loadContent(),
+              loadSharingAndLock(),
+            ]);
+            if (exitOnEncryptedLocked(response, ctx, lock)) {
+              clearUnsavedContent(documentId);
+              return;
+            }
+            const fname = (response.metadata?.filename || '').toLowerCase();
+            const isEnc = response.metadata?.is_encrypted || response.is_encrypted;
+            if (isEnc) {
+              clearUnsavedContent(documentId);
+            }
+            const mdCollabDraft = ctx?.collab_eligible && fname.endsWith('.md');
+            if (!mdCollabDraft) {
+              setSharingContext(ctx);
+              setDocumentLock(lock);
+              const docData = {
+                ...response.metadata,
+                content: unsavedContent,
+                chunk_count: response.chunk_count,
+                total_length: response.total_length,
+                is_encrypted: response.metadata?.is_encrypted || response.is_encrypted,
+              };
+              setDocument(docData);
+              setEditContent(unsavedContent);
+              setServerContent(response.content || '');
+              setEncryptionDialogOpen(false);
+              setEncryptionSessionActive(
+                !!(response.is_encrypted || docData.is_encrypted) &&
+                  !!encryptionSessionTokenRef.current
+              );
+              await finishFetchWithEditMode(docData, ctx, lock);
+              setLoading(false);
+              return;
+            }
+            if (
+              unsavedContent !== (response.content || '') &&
+              String(unsavedContent).trim().length > 0
+            ) {
+              const applyDraft = window.confirm(
+                'You have unsaved local changes from a previous session. Apply them to the collaborative document? They will sync to all collaborators.'
+              );
+              if (applyDraft) {
+                collabPendingDraftRef.current = unsavedContent;
+              } else {
+                clearUnsavedContent(documentId);
+              }
+            } else {
+              clearUnsavedContent(documentId);
+            }
+            setSharingContext(ctx);
+            setDocumentLock(lock);
+            const serverDocData = {
+              ...response.metadata,
+              content: response.content,
+              chunk_count: response.chunk_count,
+              total_length: response.total_length,
+              is_encrypted: response.metadata?.is_encrypted || response.is_encrypted,
+            };
+            setDocument(serverDocData);
+            setEditContent(response.content || '');
+            setServerContent(response.content || '');
+            setEncryptionDialogOpen(false);
+            setEncryptionSessionActive(
+              !!(response.is_encrypted || serverDocData.is_encrypted) &&
+                !!encryptionSessionTokenRef.current
+            );
+            await finishFetchWithEditMode(serverDocData, ctx, lock);
+            setLoading(false);
+            return;
+          }
+        }
+
+        const [response, { ctx, lock }] = await Promise.all([
+          loadContent(),
+          loadSharingAndLock(),
+        ]);
+        if (exitOnEncryptedLocked(response, ctx, lock)) {
+          if (forceRefresh) clearUnsavedContent(documentId);
           return;
         }
+        setSharingContext(ctx);
+        setDocumentLock(lock);
+        const docData = {
+          ...response.metadata,
+          content: response.content,
+          chunk_count: response.chunk_count,
+          total_length: response.total_length,
+          is_encrypted: response.metadata?.is_encrypted || response.is_encrypted,
+        };
+        setDocument(docData);
+        setEditContent(response.content || '');
+        setServerContent(response.content || '');
+        setEncryptionDialogOpen(false);
+        setEncryptionSessionActive(
+          !!(response.is_encrypted || docData.is_encrypted) &&
+            !!encryptionSessionTokenRef.current
+        );
+
+        if (forceRefresh) {
+          clearUnsavedContent(documentId);
+        }
+
+        await finishFetchWithEditMode(docData, ctx, lock);
+      } catch (err) {
+        console.error('Failed to fetch document:', err);
+        setError('Failed to load document content');
+        setHoldsEditLock(false);
+      } finally {
+        setLoading(false);
       }
-      
-      // No unsaved content or forcing refresh - fetch from API
-      const response = await apiService.getDocumentContent(documentId);
-      
-      const docData = {
-        ...response.metadata,
-        content: response.content,
-        chunk_count: response.chunk_count,
-        total_length: response.total_length
-      };
-      setDocument(docData);
-      setEditContent(response.content || '');
-      setServerContent(response.content || '');
-      
-      // Clear any stale unsaved content when we fetch fresh content
-      if (forceRefresh) {
-        clearUnsavedContent(documentId);
-      }
-      
-      // Determine if we should enter edit mode
-      const canEdit = canUserEditDocument(docData);
-      
-      if (preserveEditMode && isEditing) {
-        // Preserve current edit mode when force refreshing (don't change isEditing state)
-        console.log('🔄 Preserving edit mode during force refresh');
-        // isEditing state will remain unchanged
-      } else if (manuallyEditingRef.current && isEditing) {
-        // User manually entered edit mode - preserve it
-        console.log('🔄 Preserving manually entered edit mode');
-        // isEditing state will remain unchanged
-      } else if (canEdit) {
-        // User can edit - always open in edit mode
-        console.log('✅ Opening document in edit mode (user has permission)');
-        setIsEditing(true);
-        setViewMode('edit');
-        manuallyEditingRef.current = false; // Auto-entered
-        setEditModePreference(true); // Remember preference
-      } else {
-        // User cannot edit this document - always preview mode
-        console.log('📖 Opening document in preview mode (user cannot edit)');
-        setIsEditing(false);
-        manuallyEditingRef.current = false;
-      }
-      
-    } catch (err) {
-      console.error('Failed to fetch document:', err);
-      setError('Failed to load document content');
-    } finally {
-      setLoading(false);
-    }
-  }, [documentId, isEditing]);
+    },
+    [documentId, user, isAdmin]
+  );
 
   // Initial document load
   useEffect(() => {
@@ -832,7 +1247,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
 
   // Save unsaved content whenever editContent changes (debounced)
   useEffect(() => {
-    if (!documentId || !isEditing || !editContent) return;
+    if (!documentId || !isEditing || !editContent || isMarkdownCollaborative || document?.is_encrypted) return;
     
     // Update ref with latest content
     editContentRef.current = editContent;
@@ -873,11 +1288,149 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           return;
         }
         
-        console.log('Saving unsaved content on unmount for document:', documentId);
+        devLog('Saving unsaved content on unmount for document:', documentId);
         saveUnsavedContent(documentId, latestContent);
       }
     };
-  }, [documentId, isEditing, editContent, serverContent]);
+  }, [documentId, isEditing, editContent, serverContent, isMarkdownCollaborative, document?.is_encrypted]);
+
+  const handleCollabDocChange = React.useCallback((text) => {
+    const t = text ?? '';
+    setEditContent(t);
+    editContentRef.current = t;
+  }, []);
+
+  const collabPresenceList = React.useMemo(() => {
+    if (!collabSession?.awareness) return [];
+    const states = collabSession.awareness.getStates();
+    const out = [];
+    states.forEach((state) => {
+      const u = state?.user;
+      if (u?.name) {
+        out.push({
+          name: String(u.name),
+          color: u.color || '#888888',
+        });
+      }
+    });
+    return out;
+  }, [collabSession, collabAwarenessEpoch]);
+
+  React.useEffect(() => {
+    if (!documentId || !isEditing || !isMarkdownCollaborative || document?.is_encrypted) {
+      const cur = collabSessionRef.current;
+      if (cur) {
+        destroyCollabSession(cur);
+        collabSessionRef.current = null;
+        setCollabSession(null);
+      }
+      setCollabConnectionStatus('disconnected');
+      setCollabSynced(false);
+      return undefined;
+    }
+    let cancelled = false;
+    let session;
+    try {
+      session = createCollabSession(documentId, user, {
+        onStatus: (s) => {
+          if (!cancelled) setCollabConnectionStatus(s);
+        },
+        onSynced: (synced) => {
+          if (!cancelled) setCollabSynced(!!synced);
+        },
+      });
+    } catch (e) {
+      console.error('Collaboration session failed:', e);
+      setCollabConnectionStatus('disconnected');
+      return undefined;
+    }
+    collabSessionRef.current = session;
+    setCollabSession(session);
+    const onAw = () => {
+      if (!cancelled) setCollabAwarenessEpoch((x) => x + 1);
+    };
+    session.awareness.on('change', onAw);
+
+    const applyPendingCollaborativeDraft = () => {
+      if (!session?.ytext || cancelled) return;
+      const body = collabPendingDraftRef.current;
+      if (!body) return;
+      collabPendingDraftRef.current = null;
+      try {
+        session.ydoc.transact(() => {
+          session.ytext.delete(0, session.ytext.length);
+          session.ytext.insert(0, body);
+        });
+      } catch (err) {
+        console.error('Failed to apply collaborative draft:', err);
+      }
+    };
+
+    if (collabPendingDraftRef.current) {
+      if (session.provider?.synced) {
+        applyPendingCollaborativeDraft();
+      } else {
+        const onceSynced = () => {
+          applyPendingCollaborativeDraft();
+          try {
+            session.provider.off('synced', onceSynced);
+          } catch (_) {
+            /* ignore */
+          }
+        };
+        session.provider.on('synced', onceSynced);
+      }
+    }
+
+    return () => {
+      cancelled = true;
+      try {
+        session.awareness.off('change', onAw);
+      } catch (_) {
+        /* ignore */
+      }
+      destroyCollabSession(session);
+      if (collabSessionRef.current === session) {
+        collabSessionRef.current = null;
+      }
+      setCollabSession(null);
+    };
+  }, [documentId, isEditing, isMarkdownCollaborative, document?.is_encrypted, user?.user_id, user?.display_name, user?.username]);
+
+  React.useEffect(() => {
+    if (!documentId || !isEditing || !isMarkdownCollaborative) return undefined;
+    const intervalId = setInterval(async () => {
+      try {
+        const ctx = await apiService.getDocumentSharingContext(documentId);
+        if (!ctx?.collab_eligible) {
+          const s = collabSessionRef.current;
+          if (s) destroyCollabSession(s);
+          collabSessionRef.current = null;
+          setCollabSession(null);
+          setIsEditing(false);
+          alert('Collaboration is no longer available for this document.');
+          return;
+        }
+        updateCollabAuthToken(collabSessionRef.current);
+      } catch {
+        /* ignore */
+      }
+    }, 60000);
+    return () => clearInterval(intervalId);
+  }, [documentId, isEditing, isMarkdownCollaborative]);
+
+  React.useEffect(() => {
+    const onProposalInvalidated = (ev) => {
+      if (ev.detail?.documentId !== documentId) return;
+      setExternalUpdateNotification({
+        message:
+          'A collaborative edit overlapped with a pending proposal. That proposal was cleared from the editor.',
+      });
+      setTimeout(() => setExternalUpdateNotification(null), 8000);
+    };
+    window.addEventListener('proposalInvalidatedByCollab', onProposalInvalidated);
+    return () => window.removeEventListener('proposalInvalidatedByCollab', onProposalInvalidated);
+  }, [documentId]);
 
   // Track unmounting state. Define this AFTER the save effect
   // so its cleanup runs BEFORE the save effect's cleanup!
@@ -891,12 +1444,21 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const docViewerReconnectAttemptsRef = useRef(0);
   const docViewerReconnectTimeoutRef = useRef(null);
   const acceptShieldUntilRef = useRef(0);
+  /** After a user save, skip embedding/pipeline "completed" GET refreshes — they can race and fetch stale content. */
+  const pipelineRefreshSuppressUntilRef = useRef(0);
   const refreshCooldownUntilRef = useRef(0);
   const acceptAllInProgressRef = useRef(false);
   const rejectAllInProgressRef = useRef(false);
   const syncPendingProposalsAbortRef = useRef(null);
+  const syncDebounceRef = useRef(null);
+  const lastSyncTimestampRef = useRef(0);
+  const processedProposalFingerprintsRef = useRef(new Map());
   const documentIdRef = useRef(documentId);
   documentIdRef.current = documentId;
+
+  const noteUserPersistedContentToDisk = React.useCallback(() => {
+    pipelineRefreshSuppressUntilRef.current = Date.now() + 45000;
+  }, []);
 
   // Centralized: capture scroll and do a single refresh (guards against duplicate refresh bursts).
   const refreshWithScrollCapture = React.useCallback(() => {
@@ -922,6 +1484,14 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     try {
       const currentContent = editContentRef.current || editContent || document?.content || '';
       const proposalId = proposal.proposal_id ?? proposal.id ?? `proposal-${Date.now()}`;
+
+      const opsRaw = proposal.operations ?? proposal.editor_operations ?? proposal.content_edit;
+      const fingerprint = typeof opsRaw === 'string' ? opsRaw : JSON.stringify(opsRaw);
+      if (processedProposalFingerprintsRef.current.get(proposalId) === fingerprint) {
+        return;
+      }
+      processedProposalFingerprintsRef.current.set(proposalId, fingerprint);
+
       let ops = [];
 
       const parseOperations = (raw) => {
@@ -973,19 +1543,6 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           return base;
         });
         documentDiffStore.mergeProposalDiff(documentId, taggedOps, proposalId, currentContent);
-        if (isEditing) {
-          window.dispatchEvent(
-            new CustomEvent('editorOperationsLive', {
-              detail: {
-                operations: taggedOps,
-                messageId: proposalId,
-                documentId,
-                filename: document?.filename,
-                preserveExisting: true,
-              },
-            })
-          );
-        }
       } else if (proposal.edit_type === 'operations' || proposal.operations != null || proposal.editor_operations != null) {
         console.warn('handleEditProposal: no ops after parse', {
           documentId,
@@ -998,39 +1555,55 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     } catch (err) {
       console.error('Error handling edit proposal:', err);
     }
-  }, [documentId, isEditing, editContent, document]);
+  }, [documentId, editContent, document]);
 
   const handleEditProposalRef = React.useRef(handleEditProposal);
   handleEditProposalRef.current = handleEditProposal;
 
   const syncPendingProposalsFromDb = React.useCallback((reason) => {
     if (!documentId) return;
-    const now = Date.now();
-    const resolved = resolvedProposalIdsRef.current;
-    for (const [id, exp] of resolved.entries()) {
-      if (exp <= now) resolved.delete(id);
-    }
-    const fetchedForDocId = documentId;
-    syncPendingProposalsAbortRef.current?.abort();
-    const controller = new AbortController();
-    syncPendingProposalsAbortRef.current = controller;
+    if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
+    syncDebounceRef.current = setTimeout(() => {
+      syncDebounceRef.current = null;
+      const now = Date.now();
+      const resolved = resolvedProposalIdsRef.current;
+      for (const [id, exp] of resolved.entries()) {
+        if (exp <= now) resolved.delete(id);
+      }
+      const fetchedForDocId = documentId;
+      syncPendingProposalsAbortRef.current?.abort();
+      const controller = new AbortController();
+      syncPendingProposalsAbortRef.current = controller;
 
-    apiService.getPendingProposals(documentId, { signal: controller.signal })
-      .then((proposals) => {
-        if (controller.signal.aborted) return;
-        if (documentIdRef.current !== fetchedForDocId) return;
-        if (!Array.isArray(proposals)) return;
-        const handler = handleEditProposalRef.current;
-        if (!handler) return;
-        for (const p of proposals) {
-          const pid = p.proposal_id ?? p.id;
-          if (pid && resolved.has(pid) && resolved.get(pid) > now) continue;
-          handler(p);
-        }
-      })
-      .catch((err) => {
-        if (err?.name === 'AbortError') return;
-      });
+      apiService.getPendingProposals(documentId, { signal: controller.signal })
+        .then((result) => {
+          if (controller.signal.aborted) return;
+          if (documentIdRef.current !== fetchedForDocId) return;
+          const proposals = Array.isArray(result)
+            ? result
+            : (Array.isArray(result?.proposals) ? result.proposals : []);
+          const staleCleaned = Array.isArray(result) ? 0 : (Number(result?.stale_cleaned) || 0);
+          lastSyncTimestampRef.current = Date.now();
+
+          if (staleCleaned > 0 && proposals.length === 0) {
+            setExternalUpdateNotification({
+              message: `${staleCleaned} proposal(s) removed — the document changed since they were created.`,
+            });
+            setTimeout(() => setExternalUpdateNotification(null), 6000);
+          }
+
+          const handler = handleEditProposalRef.current;
+          if (!handler) return;
+          for (const p of proposals) {
+            const pid = p.proposal_id ?? p.id;
+            if (pid && resolved.has(pid) && resolved.get(pid) > now) continue;
+            handler(p);
+          }
+        })
+        .catch((err) => {
+          if (err?.name === 'AbortError') return;
+        });
+    }, 300);
   }, [documentId]);
 
   // WebSocket listener for real-time document updates
@@ -1057,9 +1630,11 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       }
 
       ws.onopen = () => {
-        console.log('📡 DocumentViewer: Connected to updates WebSocket');
+        devLog('DocumentViewer: Connected to updates WebSocket');
         docViewerReconnectAttemptsRef.current = 0;
-        syncPendingProposalsFromDb('ws_reconnect');
+        if (Date.now() - lastSyncTimestampRef.current > 5000) {
+          syncPendingProposalsFromDb('ws_reconnect');
+        }
       };
 
       ws.onmessage = (event) => {
@@ -1068,61 +1643,91 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           
           // Listen for updates to THIS document
           if (update.type === 'document_status_update' && update.document_id === documentId) {
-            console.log('🔄 Document updated, refreshing content:', update);
-            
-            // Always refresh when status is 'completed' (agent finished updating)
-            // This ensures users see agent changes in real-time, even if they have unsaved content
+            devLog('🔄 Document updated, refreshing content:', update);
+
+            if (update.updated_at) {
+              setDocument((prev) =>
+                prev ? { ...prev, updated_at: update.updated_at } : prev
+              );
+            }
+            if (update.status === 'library_saved') {
+              return;
+            }
+
+            // completed + content_source=agent: real agent/tool body write — takeover UX.
+            // completed without agent (embedding pipeline, legacy WS): refresh when safe, no false "agent" toast.
             if (update.status === 'completed') {
-              console.log('🔄 Auto-refreshing document content (status: completed - agent finished work)...');
-              const hasUnsaved = getUnsavedContent(documentId) !== null;
-              if (hasUnsaved) {
-                console.log('⚠️ Document has unsaved changes, but refreshing due to agent completion');
-                setExternalUpdateNotification({
-                  message: 'File was updated by agent. Your unsaved changes were overwritten.',
-                  timestamp: Date.now()
-                });
-                setTimeout(() => setExternalUpdateNotification(null), 5000);
-              }
-              clearUnsavedContent(documentId);
-              if (!acceptAllInProgressRef.current && !rejectAllInProgressRef.current) {
-                refreshWithScrollCapture();
+              const isAgentBodyWrite = update.content_source === 'agent';
+              if (isAgentBodyWrite) {
+                devLog('🔄 Auto-refreshing document content (status: completed, agent body write)...');
+                const hasUnsaved = getUnsavedContent(documentId) !== null;
+                if (hasUnsaved) {
+                  devLog('⚠️ Document has unsaved changes, but refreshing due to agent completion');
+                  setExternalUpdateNotification({
+                    message: 'File was updated by agent. Your unsaved changes were overwritten.',
+                    timestamp: Date.now()
+                  });
+                  setTimeout(() => setExternalUpdateNotification(null), 5000);
+                }
+                clearUnsavedContent(documentId);
+                if (!acceptAllInProgressRef.current && !rejectAllInProgressRef.current) {
+                  refreshWithScrollCapture();
+                }
+              } else {
+                const hasUnsaved = getUnsavedContent(documentId) !== null;
+                if (Date.now() < pipelineRefreshSuppressUntilRef.current) {
+                  devLog(
+                    '⏸️ Skipping embedding/pipeline auto-refresh (recent user save — avoids stale GET race)'
+                  );
+                } else if (
+                  !hasUnsaved &&
+                  !acceptAllInProgressRef.current &&
+                  !rejectAllInProgressRef.current
+                ) {
+                  devLog(
+                    '🔄 Auto-refreshing document content (status: completed, embedding/pipeline)...'
+                  );
+                  refreshWithScrollCapture();
+                }
               }
             } else if (update.status === 'processing') {
-              console.log('⏳ Document is being processed, waiting for completion...');
+              devLog('⏳ Document is being processed, waiting for completion...');
             } else if (update.status === 'edit_proposal_applied') {
               if (!acceptAllInProgressRef.current && !rejectAllInProgressRef.current) {
                 refreshWithScrollCapture();
               }
             } else if (update.status === 'edit_proposal_rejected') {
               // Skip refresh during bulk reject - single refresh happens in finally block
-              if (!rejectAllInProgressRef.current && !isEditing) {
+              if (!rejectAllInProgressRef.current && !isEditingRef.current) {
                 // Single reject when not editing: allow one refresh
                 if (Date.now() < acceptShieldUntilRef.current) {
-                  console.log('⏸️ Within accept shield window, skipping refresh');
+                  devLog('⏸️ Within accept shield window, skipping refresh');
                 } else {
-                  console.log('🔄 Auto-refreshing document content (proposal rejected, not editing)...');
+                  devLog('🔄 Auto-refreshing document content (proposal rejected, not editing)...');
                   fetchDocument(true);
                 }
               }
-            } else if (!isEditing) {
+            } else if (update.status === 'lock_changed') {
+              // Edit lock metadata only; file content unchanged.
+            } else if (!isEditingRef.current) {
               // If not editing and status changed, refresh (unless within accept shield or bulk operations)
               if (rejectAllInProgressRef.current || acceptAllInProgressRef.current) {
-                console.log('⏸️ Bulk operation in progress, skipping refresh');
+                devLog('⏸️ Bulk operation in progress, skipping refresh');
               } else if (Date.now() < acceptShieldUntilRef.current) {
-                console.log('⏸️ Within accept shield window, skipping refresh');
+                devLog('⏸️ Within accept shield window, skipping refresh');
               } else {
-                console.log('🔄 Auto-refreshing document content (not editing, status changed)...');
+                devLog('🔄 Auto-refreshing document content (not editing, status changed)...');
                 fetchDocument(true);
               }
             } else {
               // User is editing and status is not completed - don't interrupt them
-              console.log('⏸️ User is editing and status is not completed, skipping auto-refresh');
+              devLog('⏸️ User is editing and status is not completed, skipping auto-refresh');
             }
           }
           
           // Listen for document edit proposals (trigger-only: sync from DB as single source of truth)
           if (update.type === 'document_edit_proposal' && update.document_id === documentId) {
-            console.log('📝 Edit proposal signal for this document, syncing from DB');
+            devLog('📝 Edit proposal signal for this document, syncing from DB');
             syncPendingProposalsFromDb('ws_edit_proposal');
           }
         } catch (err) {
@@ -1135,7 +1740,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       };
 
       ws.onclose = () => {
-        console.log('📡 DocumentViewer: WebSocket connection closed');
+        devLog('📡 DocumentViewer: WebSocket connection closed');
         docViewerWsRef.current = null;
 
         const attempts = docViewerReconnectAttemptsRef.current;
@@ -1145,7 +1750,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         }
         docViewerReconnectAttemptsRef.current = attempts + 1;
         const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
-        console.log(`📡 DocumentViewer WebSocket: reconnecting in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+        devLog(`📡 DocumentViewer WebSocket: reconnecting in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
         docViewerReconnectTimeoutRef.current = setTimeout(connect, delay);
       };
     };
@@ -1154,6 +1759,10 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
 
     return () => {
       syncPendingProposalsAbortRef.current?.abort();
+      if (syncDebounceRef.current) {
+        clearTimeout(syncDebounceRef.current);
+        syncDebounceRef.current = null;
+      }
       if (docViewerReconnectTimeoutRef.current) {
         clearTimeout(docViewerReconnectTimeoutRef.current);
         docViewerReconnectTimeoutRef.current = null;
@@ -1163,7 +1772,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         docViewerWsRef.current = null;
       }
     };
-  }, [documentId, isEditing, fetchDocument, syncPendingProposalsFromDb, refreshWithScrollCapture]);
+  }, [documentId, fetchDocument, syncPendingProposalsFromDb, refreshWithScrollCapture]);
 
   // Listen for accept/reject from liveEditDiffExtension and call backend; dispatch Done so plugin can remove ops (proposal-level clear)
   useEffect(() => {
@@ -1182,20 +1791,27 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         proposalOperationIndex !== null &&
         !Number.isNaN(Number(proposalOperationIndex));
       const selectedIndices = hasOpIndex ? [Number(proposalOperationIndex)] : null;
+      // Clear diff store and decorations IMMEDIATELY (before await) to prevent the
+      // WebSocket-triggered remount from restoring the diff from localStorage.
+      // This mirrors the pattern used by onProposalReject / onProposalAcceptAll.
+      processedProposalFingerprintsRef.current.delete(proposalId);
+      if (hasOpIndex && operationId) {
+        documentDiffStore.removeDiff(documentId, operationId);
+        window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
+          detail: { documentId, operationIds: [operationId] },
+        }));
+      } else {
+        markResolved(proposalId);
+        documentDiffStore.removeProposalDiffs(documentId, proposalId);
+        window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
+          detail: { documentId, proposalId, clearAllForProposal: true },
+        }));
+      }
       try {
         await apiService.applyDocumentEditProposal(proposalId, selectedIndices);
-        if (hasOpIndex && operationId) {
-          window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
-            detail: { documentId, operationIds: [operationId] },
-          }));
+        if (hasOpIndex) {
           setTimeout(() => syncPendingProposalsFromDb('proposal_partial_apply'), 350);
-        } else {
-          markResolved(proposalId);
-          window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
-            detail: { documentId, proposalId, clearAllForProposal: true },
-          }));
         }
-        refreshWithScrollCapture();
       } catch (err) {
         console.error('Apply document edit proposal failed:', err);
       }
@@ -1203,7 +1819,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     const onProposalReject = async (e) => {
       const { documentId: evDocId, proposalId, operationId, operationIds } = e.detail || {};
       if (evDocId !== documentId || !proposalId) return;
-      // Clear diff decoration and store immediately (same race fix as accept)
+      processedProposalFingerprintsRef.current.delete(proposalId);
       markResolved(proposalId);
       window.dispatchEvent(new CustomEvent('proposalRejectDone', {
         detail: { documentId, proposalId, clearAllForProposal: true }
@@ -1310,13 +1926,14 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     return () => clearTimeout(timer);
   }, [documentId, isEditing, syncPendingProposalsFromDb]);
 
-  // Re-sync pending proposals when agent stream completes
+  // After agent SSE stream ends, sync pending proposals from DB. Required because tools-service runs in a
+  // separate process with no WebSocket clients; document_edit_proposal WS from that path does not reach the UI.
   useEffect(() => {
-    if (!documentId || !isEditing) return;
+    if (!documentId) return;
     const refetch = () => syncPendingProposalsFromDb('agent_stream_complete');
     window.addEventListener('agentStreamComplete', refetch);
     return () => window.removeEventListener('agentStreamComplete', refetch);
-  }, [documentId, isEditing, syncPendingProposalsFromDb]);
+  }, [documentId, syncPendingProposalsFromDb]);
 
   // Auto-save content to backend immediately when a proposal is accepted (avoids race with WebSocket refresh)
   useEffect(() => {
@@ -1327,7 +1944,21 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       acceptShieldUntilRef.current = Date.now() + 2000;
 
       try {
-        await apiService.updateDocumentContent(docId, content);
+        if (
+          sharingContext?.collab_eligible &&
+          (document?.filename || '').toLowerCase().endsWith('.md')
+        ) {
+          setServerContent(content);
+          clearUnsavedContent(docId);
+          return;
+        }
+        const et = encryptionSessionTokenRef.current;
+        await apiService.updateDocumentContent(
+          docId,
+          content,
+          et ? { encryptionSessionToken: et } : {}
+        );
+        noteUserPersistedContentToDisk();
         setServerContent(content);
         clearUnsavedContent(docId);
       } catch (err) {
@@ -1337,7 +1968,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     };
     window.addEventListener('liveEditApplied', handleApplied);
     return () => window.removeEventListener('liveEditApplied', handleApplied);
-  }, [documentId]);
+  }, [documentId, sharingContext?.collab_eligible, document?.filename, noteUserPersistedContentToDisk]);
 
   // Extract headers from document content for navigation dropdown
   const headers = React.useMemo(() => {
@@ -1351,8 +1982,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       const line = lines[i];
       
       if (fnameLower.endsWith('.md')) {
-        // Markdown headers: #, ##, ###
-        const match = line.match(/^(#{1,3})\s+(.+)$/);
+        // Markdown ATX headers: # … ######
+        const match = line.match(/^(#{1,6})\s+(.+)$/);
         if (match) {
           const level = match[1].length;
           const text = match[2].trim();
@@ -1363,8 +1994,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           });
         }
       } else if (fnameLower.endsWith('.org')) {
-        // Org headers: *, **, ***
-        const match = line.match(/^(\*{1,3})\s+(TODO|NEXT|STARTED|WAITING|HOLD|DONE|CANCELED|CANCELLED)?\s*(.+)$/i);
+        // Org headers (outline stars), up to six levels
+        const match = line.match(/^(\*{1,6})\s+(TODO|NEXT|STARTED|WAITING|HOLD|DONE|CANCELED|CANCELLED)?\s*(.+)$/i);
         if (match) {
           const level = match[1].length;
           const text = match[3]?.trim() || match[2]?.trim() || line.trim();
@@ -1397,7 +2028,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     }
   };
 
-  // Find current section based on cursor position
+  // Breadcrumb path of headings containing the cursor (outer → inner), joined for display
   const findCurrentSection = React.useCallback((content, cursorOffset, filename) => {
     if (!content || cursorOffset === null || cursorOffset === undefined || !filename) {
       return null;
@@ -1418,29 +2049,50 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       charCount += lineLength;
     }
 
-    // Search backwards from current line to find the most recent heading
-    let foundHeading = null;
+    // Walk upward: innermost heading first, then each ancestor (decreasing outline level)
+    const innerToOuter = [];
+    let nextMaxLevel = Infinity;
+
     for (let i = currentLine - 1; i >= 0; i--) {
       const line = lines[i];
       
       if (fnameLower.endsWith('.md')) {
-        // Markdown headers: #, ##, ###
-        const match = line.match(/^(#{1,3})\s+(.+)$/);
+        const match = line.match(/^(#{1,6})\s+(.+)$/);
         if (match) {
-          foundHeading = match[2].trim();
-          break;
+          const level = match[1].length;
+          const text = match[2].trim();
+          if (innerToOuter.length === 0) {
+            innerToOuter.push({ level, text });
+            nextMaxLevel = level;
+          } else if (level < nextMaxLevel) {
+            innerToOuter.push({ level, text });
+            nextMaxLevel = level;
+            if (level <= 1) break;
+          }
         }
       } else if (fnameLower.endsWith('.org')) {
-        // Org headers: *, **, ***
-        const match = line.match(/^(\*{1,3})\s+(TODO|NEXT|STARTED|WAITING|HOLD|DONE|CANCELED|CANCELLED)?\s*(.+)$/i);
+        const match = line.match(/^(\*{1,6})\s+(TODO|NEXT|STARTED|WAITING|HOLD|DONE|CANCELED|CANCELLED)?\s*(.+)$/i);
         if (match) {
-          foundHeading = match[3]?.trim() || match[2]?.trim() || line.trim();
-          break;
+          const level = match[1].length;
+          const text = match[3]?.trim() || match[2]?.trim() || line.trim();
+          if (innerToOuter.length === 0) {
+            innerToOuter.push({ level, text });
+            nextMaxLevel = level;
+          } else if (level < nextMaxLevel) {
+            innerToOuter.push({ level, text });
+            nextMaxLevel = level;
+            if (level <= 1) break;
+          }
         }
       }
     }
 
-    return foundHeading;
+    if (innerToOuter.length === 0) return null;
+    return innerToOuter
+      .slice()
+      .reverse()
+      .map((h) => h.text)
+      .join(' / ');
   }, []);
 
   // Callback to update current section from editors
@@ -1469,7 +2121,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       if (scrollToHeading && contentBoxRef.current) {
         // Scroll to heading in preview pane (for non-edit mode)
         // Edit mode scrolling is handled by OrgCMEditor
-        console.log('📍 Scrolling preview to heading:', scrollToHeading);
+        devLog('📍 Scrolling preview to heading:', scrollToHeading);
         try {
           const headingText = scrollToHeading.toLowerCase().trim();
           const allHeadings = contentBoxRef.current.querySelectorAll('[id^="org-heading-"]');
@@ -1493,7 +2145,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         }
       } else if (scrollToLine !== null && contentBoxRef.current) {
         // Scroll to specific line number (approximate)
-        console.log('📍 Scrolling to line:', scrollToLine);
+        devLog('📍 Scrolling to line:', scrollToLine);
         const contentBox = contentBoxRef.current;
         const lineHeight = 20; // Approximate line height
         const targetY = scrollToLine * lineHeight;
@@ -1514,13 +2166,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       
       try {
         setLoadingBacklinks(true);
-        console.log('🔗 Fetching backlinks for', document.filename);
+        devLog('🔗 Fetching backlinks for', document.filename);
         
         const response = await apiService.get(`/api/org/backlinks?filename=${encodeURIComponent(document.filename)}`);
         
         if (response.success && response.backlinks) {
           setBacklinks(response.backlinks);
-          console.log(`✅ Found ${response.backlinks.length} backlinks`);
+          devLog(`✅ Found ${response.backlinks.length} backlinks`);
         }
       } catch (err) {
         console.error('Failed to fetch backlinks:', err);
@@ -1544,13 +2196,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         if (!fname.endsWith('.org')) return;
         
         // Open refile dialog with current position
-        console.log('📦 Refile hotkey triggered');
+        devLog('📦 Refile hotkey triggered');
         
         // Get current cursor position from editor (dynamic!)
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
         
-        console.log('📦 Current cursor at line:', currentLine, 'heading:', currentHeading);
+        devLog('📦 Current cursor at line:', currentLine, 'heading:', currentHeading);
         
         // Get relative file path from document
         // Try to construct proper path with folder
@@ -1564,7 +2216,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           filePath = `OrgMode/${document.filename}`;
         }
         
-        console.log('📦 Refile source file path:', filePath);
+        devLog('📦 Refile source file path:', filePath);
         
         setRefileSourceFile(filePath);
         setRefileSourceLine(currentLine);
@@ -1590,13 +2242,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         if (!fname.endsWith('.org')) return;
         
         // Open archive dialog with current position
-        console.log('📦 Archive hotkey triggered');
+        devLog('📦 Archive hotkey triggered');
         
         // Get current cursor position from editor (dynamic!)
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
         
-        console.log('📦 Current cursor at line:', currentLine, 'heading:', currentHeading);
+        devLog('📦 Current cursor at line:', currentLine, 'heading:', currentHeading);
         
         // Get relative file path from document
         let filePath = document.filename;
@@ -1609,7 +2261,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           filePath = `OrgMode/${document.filename}`;
         }
         
-        console.log('📦 Archive source file path:', filePath);
+        devLog('📦 Archive source file path:', filePath);
         
         setArchiveSourceFile(filePath);
         setArchiveSourceLine(currentLine);
@@ -1634,7 +2286,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 'I') {
         event.preventDefault();
         
-        console.log('⏰ Clock in hotkey triggered');
+        devLog('⏰ Clock in hotkey triggered');
         
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
@@ -1654,7 +2306,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           });
           
           if (response.success) {
-            console.log('✅ Clocked in:', currentHeading);
+            devLog('✅ Clocked in:', currentHeading);
             alert(`⏰ Clocked in to:\n${currentHeading}`);
             setActiveClock(response);
           } else {
@@ -1670,13 +2322,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 'O') {
         event.preventDefault();
         
-        console.log('⏰ Clock out hotkey triggered');
+        devLog('⏰ Clock out hotkey triggered');
         
         try {
           const response = await apiService.post('/api/org/clock/out');
           
           if (response.success) {
-            console.log('✅ Clocked out:', response.duration_display);
+            devLog('✅ Clocked out:', response.duration_display);
             alert(`⏰ Clocked out!\n\nDuration: ${response.duration_display}\nTask: ${response.heading}`);
             setActiveClock(null);
             // Refresh file to show LOGBOOK entry
@@ -1725,13 +2377,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         const fname = (document?.filename || '').toLowerCase();
         if (!fname.endsWith('.org')) return;
         
-        console.log('🏷️ Tag hotkey triggered!');
+        devLog('🏷️ Tag hotkey triggered!');
         
         // Get current cursor position from editor
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
         
-        console.log('🏷️ Current cursor at line:', currentLine, 'heading:', currentHeading);
+        devLog('🏷️ Current cursor at line:', currentLine, 'heading:', currentHeading);
         
         setTagSourceLine(currentLine);
         setTagSourceHeading(currentHeading);
@@ -1751,7 +2403,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     
     if (result?.success) {
       // Refresh the document after successful refile
-      console.log('✅ Refile completed, refreshing...');
+      devLog('✅ Refile completed, refreshing...');
       fetchDocument();
     }
   };
@@ -1762,7 +2414,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     
     if (result?.success) {
       // Refresh the document after successful archive
-      console.log('✅ Archive completed, refreshing...');
+      devLog('✅ Archive completed, refreshing...');
       fetchDocument();
     }
   };
@@ -1772,6 +2424,11 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     setTagDialogOpen(false);
     // Note: Tag dialog handles refresh internally via window.location.reload()
   };
+
+  // Reset extracted text when switching documents (avoids stale PDF/Docx text)
+  useEffect(() => {
+    setViewerExtractedText(null);
+  }, [documentId]);
 
   // Publish editor context (must be declared before any early returns)
   useEffect(() => {
@@ -1796,6 +2453,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         cursorOffset: -1,
         selectionStart: -1,
         selectionEnd: -1,
+        isEncrypted: !!document?.is_encrypted,
+        encryptionSessionActive: !!encryptionSessionActive,
       };
       
       setEditorState((prev) => ({
@@ -1805,29 +2464,99 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       
       // Also write to localStorage for ChatSidebar to read (backup to MarkdownCMEditor)
       // This ensures frontmatter is correct even if MarkdownCMEditor hasn't mounted yet
-      try {
-        localStorage.setItem('editor_ctx_cache', JSON.stringify(editorStatePayload));
-      } catch (e) {
-        console.error('Failed to update editor_ctx_cache from DocumentViewer:', e);
+      if (!document?.is_encrypted) {
+        try {
+          localStorage.setItem('editor_ctx_cache', JSON.stringify(editorStatePayload));
+        } catch (e) {
+          console.error('Failed to update editor_ctx_cache from DocumentViewer:', e);
+        }
       }
     } else {
-      setEditorState({
-        isEditable: false,
-        filename: null,
-        language: null,
-        content: null,
-        contentLength: 0,
-        frontmatter: null,
-        cursorOffset: -1,
-        selectionStart: -1,
-        selectionEnd: -1,
-        canonicalPath: null,
-        documentId: null,
-        folderId: null
-      });
+      let readOnlyText = null;
+      let readOnlyLanguage = null;
+      if (
+        fname.endsWith('.txt') ||
+        fname.endsWith('.srt') ||
+        fname.endsWith('.vtt')
+      ) {
+        readOnlyText = isEditing ? (editContent ?? '') : (document?.content ?? '');
+        readOnlyLanguage = fname.endsWith('.srt')
+          ? 'srt'
+          : fname.endsWith('.vtt')
+            ? 'vtt'
+            : 'plaintext';
+      } else if (fname.endsWith('.pdf')) {
+        readOnlyText = viewerExtractedText != null ? String(viewerExtractedText) : null;
+        readOnlyLanguage = 'pdf';
+      } else if (fname.endsWith('.docx')) {
+        readOnlyText = viewerExtractedText != null ? String(viewerExtractedText) : null;
+        readOnlyLanguage = 'docx';
+      }
+
+      if (
+        readOnlyText &&
+        readOnlyText.trim().length > 0 &&
+        document?.document_id
+      ) {
+        const editorStatePayload = {
+          isEditable: false,
+          filename: document?.filename || null,
+          language: readOnlyLanguage,
+          content: readOnlyText,
+          contentLength: readOnlyText.length,
+          frontmatter: {},
+          canonicalPath: document?.canonical_path || null,
+          documentId: document?.document_id || null,
+          folderId: document?.folder_id || null,
+          cursorOffset: -1,
+          selectionStart: -1,
+          selectionEnd: -1,
+          isEncrypted: !!document?.is_encrypted,
+          encryptionSessionActive: !!encryptionSessionActive,
+        };
+        setEditorState((prev) => ({
+          ...prev,
+          ...editorStatePayload,
+        }));
+        if (!document?.is_encrypted) {
+          try {
+            localStorage.setItem('editor_ctx_cache', JSON.stringify(editorStatePayload));
+          } catch (e) {
+            console.error('Failed to update editor_ctx_cache from DocumentViewer:', e);
+          }
+        }
+      } else {
+        setEditorState({
+          isEditable: false,
+          filename: null,
+          language: null,
+          content: null,
+          contentLength: 0,
+          frontmatter: null,
+          cursorOffset: -1,
+          selectionStart: -1,
+          selectionEnd: -1,
+          canonicalPath: null,
+          documentId: null,
+          folderId: null,
+          isEncrypted: false,
+          encryptionSessionActive: false,
+        });
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing, editContent, document?.filename, document?.document_id]);
+  }, [
+    isEditing,
+    editContent,
+    document?.filename,
+    document?.document_id,
+    document?.is_encrypted,
+    document?.content,
+    document?.canonical_path,
+    document?.folder_id,
+    encryptionSessionActive,
+    viewerExtractedText,
+  ]);
 
   // Clear React editor state when this tab unmounts (e.g. user switched to another tab).
   // Do NOT clear localStorage editor_ctx_cache here: chat sends messages with the last
@@ -1850,6 +2579,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         canonicalPath: null,
         documentId: null,
         folderId: null,
+        isEncrypted: false,
+        encryptionSessionActive: false,
       });
     };
   }, [setEditorState]);
@@ -1899,7 +2630,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     try {
       setUpdatingMetadata(true);
       await apiService.updateDocumentMetadata(documentId, { title: editedTitle.trim() });
-      console.log('Updated document title');
+      devLog('Updated document title');
       
       // Refresh document to get updated data
       await fetchDocument();
@@ -2178,18 +2909,18 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const handleToggleFullscreen = async () => {
     if (!fullscreenContainerRef.current) return;
     
-    // Guard: ensure we're in a browser environment
-    if (typeof document === 'undefined' || !document) {
+    const rootDoc = typeof window !== 'undefined' ? window.document : null;
+    if (!rootDoc) {
       console.warn('Fullscreen API not available - not in browser environment');
       return;
     }
 
     const element = fullscreenContainerRef.current;
     const isCurrentlyFullscreen = !!(
-      document.fullscreenElement ||
-      document.webkitFullscreenElement ||
-      document.mozFullScreenElement ||
-      document.msFullscreenElement
+      rootDoc.fullscreenElement ||
+      rootDoc.webkitFullscreenElement ||
+      rootDoc.mozFullScreenElement ||
+      rootDoc.msFullscreenElement
     );
 
     try {
@@ -2210,14 +2941,14 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         setIsFullscreen(true);
       } else {
         // Exit fullscreen - try different vendor prefixes
-        if (document.exitFullscreen) {
-          await document.exitFullscreen();
-        } else if (document.webkitExitFullscreen) {
-          await document.webkitExitFullscreen();
-        } else if (document.mozCancelFullScreen) {
-          await document.mozCancelFullScreen();
-        } else if (document.msExitFullscreen) {
-          await document.msExitFullscreen();
+        if (rootDoc.exitFullscreen) {
+          await rootDoc.exitFullscreen();
+        } else if (rootDoc.webkitExitFullscreen) {
+          await rootDoc.webkitExitFullscreen();
+        } else if (rootDoc.mozCancelFullScreen) {
+          await rootDoc.mozCancelFullScreen();
+        } else if (rootDoc.msExitFullscreen) {
+          await rootDoc.msExitFullscreen();
         }
         setIsFullscreen(false);
       }
@@ -2229,33 +2960,31 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
 
   // Listen for fullscreen changes (user might exit via ESC key)
   useEffect(() => {
-    // Guard: ensure we're in a browser environment
-    if (typeof document === 'undefined' || !document) {
+    const rootDoc = typeof window !== 'undefined' ? window.document : null;
+    if (!rootDoc) {
       return;
     }
 
     const handleFullscreenChange = () => {
       const isCurrentlyFullscreen = !!(
-        document.fullscreenElement ||
-        document.webkitFullscreenElement ||
-        document.mozFullScreenElement ||
-        document.msFullscreenElement
+        rootDoc.fullscreenElement ||
+        rootDoc.webkitFullscreenElement ||
+        rootDoc.mozFullScreenElement ||
+        rootDoc.msFullscreenElement
       );
       setIsFullscreen(isCurrentlyFullscreen);
     };
 
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
-    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+    rootDoc.addEventListener('fullscreenchange', handleFullscreenChange);
+    rootDoc.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    rootDoc.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    rootDoc.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
     return () => {
-      if (typeof document !== 'undefined' && document) {
-        document.removeEventListener('fullscreenchange', handleFullscreenChange);
-        document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
-        document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
-        document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
-      }
+      rootDoc.removeEventListener('fullscreenchange', handleFullscreenChange);
+      rootDoc.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+      rootDoc.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+      rootDoc.removeEventListener('MSFullscreenChange', handleFullscreenChange);
     };
   }, []);
 
@@ -2357,6 +3086,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       <DocxViewer 
         documentId={documentId}
         filename={document.filename}
+        onTextExtracted={setViewerExtractedText}
       />
     );
   }
@@ -2387,6 +3117,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       <PDFDocumentViewer 
         documentId={documentId}
         filename={document.filename}
+        onTextExtracted={setViewerExtractedText}
       />
     );
   }
@@ -2426,9 +3157,10 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   }
 
   return (
-    <Box ref={fullscreenContainerRef} sx={{ height: '100%', overflow: 'hidden' }}>
+    <>
+    <Box ref={fullscreenContainerRef} sx={{ height: '100%', overflow: 'visible' }}>
       {/* Single scroll area inside the viewer */}
-      <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <Box ref={readonlyViewerShellRef} sx={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
         {/* External Update Notification */}
         {externalUpdateNotification && (
           <Alert 
@@ -2465,22 +3197,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
               />
             ) : (
               <>
-                {isEditing && currentSection ? (
-                  <Typography 
-                    variant="caption" 
-                    color="text.secondary" 
-                    sx={{ 
-                      whiteSpace: 'nowrap', 
-                      overflow: 'hidden', 
-                      textOverflow: 'ellipsis',
-                      fontWeight: 500,
-                      fontStyle: 'italic'
-                    }}
-                    title={`Current section: ${currentSection}`}
-                  >
-                    {currentSection}
-                  </Typography>
-                ) : (
+                {(!isEditing || headers.length === 0) && (
                   <Typography 
                     variant="caption" 
                     color="text.secondary" 
@@ -2491,6 +3208,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       textOverflow: 'ellipsis',
                       cursor: 'pointer',
                       fontWeight: 500,
+                      flexShrink: 0,
+                      maxWidth: 'min(40%, 240px)',
                       '&:hover': {
                         backgroundColor: 'action.hover',
                         borderRadius: 1,
@@ -2502,19 +3221,136 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     {document.filename}
                   </Typography>
                 )}
+
+                {sharingContext?.share_type === 'read' && (
+                  <Chip size="small" label="Shared (read-only)" variant="outlined" />
+                )}
+                {document.is_encrypted && encryptionSessionActive && (
+                  <Tooltip
+                    title="This file is stored encrypted. Your unlock session stays active while you use this browser; use Lock when you step away, or close the last tab for this file. Other encrypted files need their own password. Open the help icon for the full guide."
+                  >
+                    <Chip
+                      size="small"
+                      icon={<LockOpen fontSize="small" />}
+                      label="Encrypted (unlocked)"
+                      color="warning"
+                      variant="outlined"
+                    />
+                  </Tooltip>
+                )}
+                {document.is_encrypted && encryptionSessionActive && (
+                  <Tooltip title="End unlock session on the server for this document now">
+                    <IconButton
+                      size="small"
+                      onClick={async () => {
+                        try {
+                          await apiService.lockEncryptedDocument(documentId);
+                          encryptionSessionTokenRef.current = null;
+                          clearEncryptionSession(documentId);
+                          setEncryptionSessionActive(false);
+                          setEditContent('');
+                          setServerContent('');
+                          setIsEditing(false);
+                          setEncryptionDialogMode('unlock');
+                          setEncryptionDialogOpen(true);
+                          fetchDocument(true);
+                        } catch (e) {
+                          console.error(e);
+                        }
+                      }}
+                    >
+                      <Lock fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {document.is_encrypted && (
+                  <Tooltip title="Open Document encryption help (sessions, tabs, search, collaboration)">
+                    <IconButton
+                      size="small"
+                      aria-label="Document encryption help"
+                      onClick={() => openHelpTopic(HELP_TOPIC_DOCUMENT_ENCRYPTION)}
+                    >
+                      <HelpOutline fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+                {documentLock?.active &&
+                  documentLock.locked_by_user_id &&
+                  documentLock.locked_by_user_id !== user?.user_id &&
+                  !isMarkdownCollaborative && (
+                    <Chip
+                      size="small"
+                      color="warning"
+                      label={`Locked by ${documentLock.locked_by_username || 'another user'}`}
+                    />
+                  )}
+                {isEditing && isMarkdownCollaborative && (
+                  <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.5, ml: 0.5 }}>
+                    <Tooltip
+                      title={`Collaboration: ${collabConnectionStatus}${
+                        collabSynced ? ' (Yjs synced)' : ''
+                      }`}
+                    >
+                      <Box
+                        component="span"
+                        sx={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: '50%',
+                          flexShrink: 0,
+                          bgcolor:
+                            collabConnectionStatus === 'connected'
+                              ? 'success.main'
+                              : collabConnectionStatus === 'connecting'
+                                ? 'warning.main'
+                                : 'error.main',
+                          border: 1,
+                          borderColor: 'divider',
+                        }}
+                      />
+                    </Tooltip>
+                    {collabPresenceList.map((p, i) => (
+                      <Tooltip key={`${p.name}-${i}`} title={p.name}>
+                        <Box
+                          sx={{
+                            width: 22,
+                            height: 22,
+                            borderRadius: '50%',
+                            bgcolor: p.color,
+                            color: 'common.white',
+                            fontSize: '0.65rem',
+                            fontWeight: 600,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}
+                        >
+                          {String(p.name).slice(0, 1).toUpperCase()}
+                        </Box>
+                      </Tooltip>
+                    ))}
+                  </Box>
+                )}
                 
-                {/* Header Navigation Dropdown */}
+                {/* Outline: closed state shows heading breadcrumb; open menu jumps to any heading */}
                 {isEditing && headers.length > 0 && (
                   <FormControl 
                     size="small" 
                     sx={{ 
-                      minWidth: 180,
+                      minWidth: 120,
+                      maxWidth: 'min(52vw, 520px)',
+                      flex: '1 1 auto',
                       '& .MuiOutlinedInput-root': {
                         fontSize: '0.75rem',
                         height: '24px',
                         '& .MuiSelect-select': {
                           padding: '4px 32px 4px 8px',
-                          fontSize: '0.75rem'
+                          fontSize: '0.75rem',
+                          display: 'block',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
                         }
                       }
                     }}
@@ -2522,16 +3358,25 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     <Select
                       value=""
                       displayEmpty
+                      inputProps={{ 'aria-label': 'Document outline and jump to heading' }}
                       renderValue={() => (
-                        <Typography variant="caption" color="text.secondary">
-                          Jump to...
+                        <Typography variant="caption" color="text.secondary" component="span" sx={{ fontWeight: 500 }}>
+                          {currentSection || 'Jump to heading…'}
                         </Typography>
                       )}
                       onChange={(e) => {
-                        const lineNumber = parseInt(e.target.value);
+                        const lineNumber = parseInt(e.target.value, 10);
                         if (lineNumber) {
                           handleHeaderNavigation(lineNumber);
                         }
+                      }}
+                      MenuProps={{
+                        // In fullscreen mode, the default portal target (document.body) can be
+                        // outside the fullscreen element tree. Mount menus inside the container.
+                        container: fullscreenContainerRef.current || undefined,
+                        PaperProps: {
+                          sx: { maxHeight: 360 },
+                        },
                       }}
                       sx={{
                         fontSize: '0.75rem',
@@ -2541,11 +3386,6 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         }
                       }}
                     >
-                      <MenuItem value="" disabled>
-                        <Typography variant="caption" color="text.secondary">
-                          Jump to...
-                        </Typography>
-                      </MenuItem>
                       {headers.map((header, idx) => {
                         const fnameLower = (document?.filename || '').toLowerCase();
                         const prefix = fnameLower.endsWith('.org') ? '*'.repeat(header.level) : '#'.repeat(header.level);
@@ -2660,29 +3500,86 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           )}
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
+            {!isEditing &&
+              document.filename &&
+              (fnameLower.endsWith('.md') ||
+                fnameLower.endsWith('.txt') ||
+                fnameLower.endsWith('.org')) && (
+                <Tooltip title="Find in document (Ctrl+F)">
+                  <IconButton
+                    size="small"
+                    onClick={() => setReadonlyFindOpen((o) => !o)}
+                    color={readonlyFindOpen ? 'primary' : 'default'}
+                    aria-label="Find in document"
+                  >
+                    <SearchIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              )}
             {(document.filename && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org'))) && canUserEditDocument(document) && (
               !isEditing ? (
                 <Tooltip title="Edit">
-                  <IconButton size="small" onClick={() => {
-                    manuallyEditingRef.current = true; // Mark as manually entered edit mode
-                    setIsEditing(true);
-                    setEditModePreference(true); // Remember user prefers edit mode
-                    const fname = (document.filename || '').toLowerCase();
-                    if (fname.endsWith('.md') || fname.endsWith('.org')) {
-                      setViewMode('edit');
-                    }
-                  }}>
+                  <IconButton
+                    size="small"
+                    onClick={async () => {
+                      try {
+                        const fname = (document.filename || '').toLowerCase();
+                        const skipLock = sharingContext?.collab_eligible && fname.endsWith('.md');
+                        if (skipLock) {
+                          manuallyEditingRef.current = true;
+                          setHoldsEditLock(false);
+                          setIsEditing(true);
+                          setEditModePreference(true);
+                          if (fname.endsWith('.md') || fname.endsWith('.org')) {
+                            setViewMode('edit');
+                          }
+                          return;
+                        }
+                        const res = await apiService.acquireDocumentLock(documentId);
+                        if (res.lock) setDocumentLock(res.lock);
+                        if (!res.success) {
+                          alert(res.message || 'Could not acquire edit lock');
+                          return;
+                        }
+                        setHoldsEditLock(true);
+                        manuallyEditingRef.current = true;
+                        setIsEditing(true);
+                        setEditModePreference(true);
+                        if (fname.endsWith('.md') || fname.endsWith('.org')) {
+                          setViewMode('edit');
+                        }
+                      } catch (e) {
+                        alert(e?.message || 'Lock request failed');
+                      }
+                    }}
+                  >
                     <Edit fontSize="small" />
                   </IconButton>
                 </Tooltip>
               ) : (
-                <Tooltip title={saving ? 'Saving...' : 'Save'}>
+                <Tooltip title={isMarkdownCollaborative ? (saving ? 'Saving...' : 'Save to disk now') : (saving ? 'Saving...' : 'Save')}>
                   <span>
                     <IconButton size="small" onClick={async () => {
                       if (saving) return;
                       try {
                         setSaving(true);
-                        
+
+                        if (isMarkdownCollaborative) {
+                          try {
+                            await apiService.collabFlush(document.document_id);
+                            const now = new Date().toISOString();
+                            setDocument((prev) => (prev ? { ...prev, content: editContent, updated_at: now } : prev));
+                            setServerContent(editContent);
+                            clearUnsavedContent(documentId);
+                          } catch (e) {
+                            console.error('Collaborative flush failed', e);
+                            alert('Save to disk failed');
+                          } finally {
+                            setSaving(false);
+                          }
+                          return;
+                        }
+
                         // Skip no-op saves (prevents unnecessary re-indexing)
                         if (editContent === serverContent) {
                           clearUnsavedContent(documentId);
@@ -2707,7 +3604,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                             const isDone = /^\*+\s+(DONE|CANCELED|CANCELLED)\s+/.test(newLine);
                             
                             if (wasTodo && isDone) {
-                              console.log('Detected TODO->DONE at line', i + 1);
+                              devLog('Detected TODO->DONE at line', i + 1);
                               
                               // Build file path
                               let filePath = document.filename;
@@ -2725,7 +3622,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                                 });
                                 
                                 if (response.success && response.is_recurring) {
-                                  console.log('✅ Recurring task handled:', response.message);
+                                  devLog('✅ Recurring task handled:', response.message);
                                   recurringHandled = true;
                                   
                                   // Show notification
@@ -2739,7 +3636,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         }
                         
                         // Save content
-                        await apiService.updateDocumentContent(document.document_id, editContent);
+                        const et = encryptionSessionTokenRef.current;
+                        await apiService.updateDocumentContent(
+                          document.document_id,
+                          editContent,
+                          et ? { encryptionSessionToken: et } : {}
+                        );
+                        noteUserPersistedContentToDisk();
                         // Update document state with new content and current timestamp
                         const now = new Date().toISOString();
                         setDocument((prev) => prev ? { ...prev, content: editContent, updated_at: now } : prev);
@@ -2760,7 +3663,17 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         // Keep the user in edit mode after saving
                       } catch (e) {
                         console.error('Save failed', e);
-                        alert('Save failed');
+                        const st = e?.response?.status;
+                        if (st === 423) {
+                          encryptionSessionTokenRef.current = null;
+                          clearEncryptionSession(documentId);
+                          setEncryptionSessionActive(false);
+                          setEncryptionDialogMode('unlock');
+                          setEncryptionDialogOpen(true);
+                          alert('Session locked. Enter your password again to continue editing.');
+                        } else {
+                          alert('Save failed');
+                        }
                       } finally {
                         setSaving(false);
                       }
@@ -2953,15 +3866,30 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
             minHeight: 0,
             overflow: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'hidden' : 'auto',
             p: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 1 : 2,
-            backgroundColor: 'background.default',
+            backgroundColor: (theme) => alpha(theme.palette.background.default, 0.58),
           }}
         >
+          {!isEditing &&
+            readonlyFindOpen &&
+            document.filename &&
+            (fnameLower.endsWith('.md') ||
+              fnameLower.endsWith('.txt') ||
+              fnameLower.endsWith('.org')) && (
+              <FindInDocumentBar
+                containerRef={readonlyFindRootRef}
+                open={readonlyFindOpen}
+                onClose={() => setReadonlyFindOpen(false)}
+                darkMode={darkMode}
+              />
+            )}
           <Paper
+            ref={readonlyFindRootRef}
             variant="outlined"
             sx={{
               p: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 1 : 2,
               backgroundColor: 'background.paper',
               height: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? '100%' : undefined,
+              flex: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 1 : undefined,
               display: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'flex' : undefined,
               flexDirection: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'column' : undefined,
               minHeight: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 0 : undefined,
@@ -2979,26 +3907,18 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     <Box sx={{ p: 1, flex: 1, overflow: 'auto' }}>
                       <OrgRenderer 
                         content={editContent}
-                        onNavigate={async (navInfo) => {
-                          if (navInfo.type === 'file') {
-                            console.log('🔗 Navigating to file:', navInfo.path);
-                            alert(`File navigation coming soon!\nTarget: ${navInfo.path}`);
-                          } else if (navInfo.type === 'id') {
-                            console.log('🔗 Navigating to ID:', navInfo.id);
-                            alert(`File navigation coming soon!\nTarget ID: ${navInfo.id}`);
-                          }
-                        }}
+                        onNavigate={handleOrgPreviewNavigate}
                       />
                     </Box>
                   </Box>
                 ) : viewMode === 'split' ? (
-                  // Split view for OrgMode: Editor + Preview
-                  <Box sx={{ display: 'flex', gap: 2, height: '70vh' }}>
-                    <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
-                      <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                  // Split view for OrgMode: Editor + Preview (flex fills space below header; avoid fixed vh)
+                  <Box sx={{ display: 'flex', gap: 2, flex: 1, minHeight: 0, alignSelf: 'stretch', width: '100%' }}>
+                    <Box sx={{ flex: 1, minHeight: 0, border: '1px solid #e0e0e0', borderRadius: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                      <Typography variant="subtitle2" sx={{ flexShrink: 0, p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
                         Edit Mode
                       </Typography>
-                      <Box sx={{ p: 1, height: 'calc(100% - 40px)', overflow: 'auto' }}>
+                      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 1 }}>
                         <OrgCMEditor 
                           key={`org-${documentId}-${darkMode ? 'dark' : 'light'}-${accentId}`}
                           ref={orgEditorRef}
@@ -3017,22 +3937,14 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         />
                       </Box>
                     </Box>
-                    <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
-                      <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                    <Box sx={{ flex: 1, minHeight: 0, border: '1px solid #e0e0e0', borderRadius: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                      <Typography variant="subtitle2" sx={{ flexShrink: 0, p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
                         Preview
                       </Typography>
-                      <Box sx={{ p: 1, height: 'calc(100% - 40px)', overflow: 'auto' }}>
+                      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 1 }}>
                         <OrgRenderer 
                           content={editContent}
-                          onNavigate={async (navInfo) => {
-                            if (navInfo.type === 'file') {
-                              console.log('🔗 Navigating to file:', navInfo.path);
-                              alert(`File navigation coming soon!\nTarget: ${navInfo.path}`);
-                            } else if (navInfo.type === 'id') {
-                              console.log('🔗 Navigating to ID:', navInfo.id);
-                              alert(`ID navigation coming soon!\nTarget ID: ${navInfo.id}`);
-                            }
-                          }}
+                          onNavigate={handleOrgPreviewNavigate}
                         />
                       </Box>
                     </Box>
@@ -3060,29 +3972,18 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
               ) : fnameLower.endsWith('.md') ? (
                 viewMode === 'preview' ? (
                   // Preview only for Markdown
-                  <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
-                    <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                  <Box sx={{ flex: 1, border: 1, borderColor: 'divider', borderRadius: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                    <Typography variant="subtitle2" sx={{ p: 1, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider', fontWeight: 'bold' }}>
                       Preview
                     </Typography>
-                    <Box sx={{ 
-                      p: 2, 
+                    <Box sx={(theme) => ({
+                      p: 2,
                       flex: 1,
                       overflow: 'auto',
-                      '& h1, & h2, & h3, & h4, & h5, & h6': { mt: 2, mb: 1, fontWeight: 'bold' },
-                      '& p': { mb: 1.5, lineHeight: 1.6 },
-                      '& img': { maxWidth: '100%', height: 'auto', borderRadius: 1, my: 2 },
-                      '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
-                      '& blockquote': { borderLeft: 3, borderColor: 'primary.main', pl: 2, ml: 0, my: 2, backgroundColor: 'grey.100', py: 1, pr: 2 },
-                      '& code': { backgroundColor: 'grey.200', px: 0.5, py: 0.25, borderRadius: 0.5, fontFamily: 'monospace', fontSize: '0.875em' },
-                      '& pre': { backgroundColor: 'grey.200', p: 2, borderRadius: 1, overflow: 'auto', '& code': { backgroundColor: 'transparent', p: 0 } },
-                      '& ul, & ol': { pl: 3, mb: 1.5 },
-                      '& li': { mb: 0.5 },
-                      '& strong': { fontWeight: 'bold' },
-                      '& em': { fontStyle: 'italic' },
-                      '& details': { mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 },
-                      '& summary': { cursor: 'pointer', fontWeight: 'medium', py: 1, '&:hover': { opacity: 0.8 } }
-                    }}>
+                      ...markdownPreviewContainerSx(theme),
+                    })}>
                       <ReactMarkdown 
+                        components={{ pre: MarkdownPreWithCopy }}
                         remarkPlugins={[remarkGfm]}
                         rehypePlugins={[
                           rehypeRaw,
@@ -3100,7 +4001,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                                 'hr'
                               ],
                               attributes: {
-                                '*': ['class', 'id'],
+                                '*': ['class', 'id', 'align'],
                                 'a': ['href', 'title'],
                                 'img': ['src', 'alt', 'title', 'width', 'height'],
                                 'div': ['style'],
@@ -3116,18 +4017,18 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                           ]
                         ]}
                       >
-                        {editContent}
+                        {markdownPreviewBody(editContent)}
                       </ReactMarkdown>
                     </Box>
                   </Box>
                 ) : viewMode === 'split' ? (
-                  // Split view for Markdown: Editor + Preview
-                  <Box sx={{ display: 'flex', gap: 2, height: '70vh' }}>
-                    <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
-                      <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                  // Split view for Markdown: Editor + Preview (flex fills space below header)
+                  <Box sx={{ display: 'flex', gap: 2, flex: 1, minHeight: 0, alignSelf: 'stretch', width: '100%' }}>
+                    <Box sx={{ flex: 1, minHeight: 0, border: 1, borderColor: 'divider', borderRadius: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                      <Typography variant="subtitle2" sx={{ flexShrink: 0, p: 1, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider', fontWeight: 'bold' }}>
                         Edit Mode
                       </Typography>
-                      <Box sx={{ p: 1, height: 'calc(100% - 40px)', overflow: 'auto' }}>
+                      <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 1 }}>
                         <MarkdownCMEditor 
                           key={`md-${documentId}-${darkMode ? 'dark' : 'light'}-${accentId}`}
                           ref={markdownEditorRef}
@@ -3141,32 +4042,28 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                           onScrollRestored={handleScrollRestored}
                           onScrollChange={onScrollChange}
                           onCurrentSectionChange={handleCurrentSectionChange}
+                          menuContainerEl={fullscreenContainerRef.current}
+                          isCollaborative={isMarkdownCollaborative && !!collabSession}
+                          ytext={collabSession?.ytext}
+                          awareness={collabSession?.awareness}
+                          undoManager={collabSession?.undoManager}
+                          onCollabDocChange={handleCollabDocChange}
                         />
                       </Box>
                     </Box>
-                    <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
-                      <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                    <Box sx={{ flex: 1, minHeight: 0, border: 1, borderColor: 'divider', borderRadius: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                      <Typography variant="subtitle2" sx={{ flexShrink: 0, p: 1, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider', fontWeight: 'bold' }}>
                         Preview
                       </Typography>
-                      <Box sx={{ 
-                        p: 2, 
-                        height: 'calc(100% - 40px)', 
+                      <Box sx={(theme) => ({
+                        flex: 1,
+                        minHeight: 0,
+                        p: 2,
                         overflow: 'auto',
-                        '& h1, & h2, & h3, & h4, & h5, & h6': { mt: 2, mb: 1, fontWeight: 'bold' },
-                        '& p': { mb: 1.5, lineHeight: 1.6 },
-                        '& img': { maxWidth: '100%', height: 'auto', borderRadius: 1, my: 2 },
-                        '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
-                        '& blockquote': { borderLeft: 3, borderColor: 'primary.main', pl: 2, ml: 0, my: 2, backgroundColor: 'grey.100', py: 1, pr: 2 },
-                        '& code': { backgroundColor: 'grey.200', px: 0.5, py: 0.25, borderRadius: 0.5, fontFamily: 'monospace', fontSize: '0.875em' },
-                        '& pre': { backgroundColor: 'grey.200', p: 2, borderRadius: 1, overflow: 'auto', '& code': { backgroundColor: 'transparent', p: 0 } },
-                        '& ul, & ol': { pl: 3, mb: 1.5 },
-                        '& li': { mb: 0.5 },
-                        '& strong': { fontWeight: 'bold' },
-                        '& em': { fontStyle: 'italic' },
-                        '& details': { mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 },
-                        '& summary': { cursor: 'pointer', fontWeight: 'medium', py: 1, '&:hover': { opacity: 0.8 } }
-                      }}>
+                        ...markdownPreviewContainerSx(theme),
+                      })}>
                         <ReactMarkdown 
+                          components={{ pre: MarkdownPreWithCopy }}
                           remarkPlugins={[remarkGfm]}
                           rehypePlugins={[
                             rehypeRaw,
@@ -3184,7 +4081,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                                   'hr'
                                 ],
                                 attributes: {
-                                  '*': ['class', 'id'],
+                                  '*': ['class', 'id', 'align'],
                                   'a': ['href', 'title'],
                                   'img': ['src', 'alt', 'title', 'width', 'height'],
                                   'div': ['style'],
@@ -3200,7 +4097,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                             ]
                           ]}
                         >
-                          {editContent}
+                          {markdownPreviewBody(editContent)}
                         </ReactMarkdown>
                       </Box>
                     </Box>
@@ -3220,6 +4117,12 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       onScrollRestored={handleScrollRestored}
                       onScrollChange={onScrollChange}
                       onCurrentSectionChange={handleCurrentSectionChange}
+                      menuContainerEl={fullscreenContainerRef.current}
+                      isCollaborative={isMarkdownCollaborative && !!collabSession}
+                      ytext={collabSession?.ytext}
+                      awareness={collabSession?.awareness}
+                      undoManager={collabSession?.undoManager}
+                      onCollabDocChange={handleCollabDocChange}
                     />
                   </Box>
                 )
@@ -3241,22 +4144,11 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 />
               )
             ) : document.filename && fnameLower.endsWith('.md') ? (
-              <Box sx={{ 
-                '& h1, & h2, & h3, & h4, & h5, & h6': { mt: 2, mb: 1, fontWeight: 'bold' },
-                '& p': { mb: 1.5, lineHeight: 1.6 },
-                '& img': { maxWidth: '100%', height: 'auto', borderRadius: 1, my: 2 },
-                '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
-                '& blockquote': { borderLeft: 3, borderColor: 'primary.main', pl: 2, ml: 0, my: 2, backgroundColor: 'grey.100', py: 1, pr: 2 },
-                '& code': { backgroundColor: 'grey.200', px: 0.5, py: 0.25, borderRadius: 0.5, fontFamily: 'monospace', fontSize: '0.875em' },
-                '& pre': { backgroundColor: 'grey.200', p: 2, borderRadius: 1, overflow: 'auto', '& code': { backgroundColor: 'transparent', p: 0 } },
-                '& ul, & ol': { pl: 3, mb: 1.5 },
-                '& li': { mb: 0.5 },
-                '& strong': { fontWeight: 'bold' },
-                '& em': { fontStyle: 'italic' },
-                '& details': { mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 },
-                '& summary': { cursor: 'pointer', fontWeight: 'medium', py: 1, '&:hover': { opacity: 0.8 } }
-              }}>
+              <Box sx={(theme) => ({
+                ...markdownPreviewContainerSx(theme),
+              })}>
                 <ReactMarkdown 
+                  components={{ pre: MarkdownPreWithCopy }}
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[
                     rehypeRaw,
@@ -3274,7 +4166,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                           'hr'
                         ],
                         attributes: {
-                          '*': ['class', 'id'],
+                          '*': ['class', 'id', 'align'],
                           'a': ['href', 'title'],
                           'img': ['src', 'alt', 'title', 'width', 'height'],
                           'div': ['style'],
@@ -3290,7 +4182,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     ]
                   ]}
                 >
-                  {document.content}
+                  {markdownPreviewBody(document.content)}
                 </ReactMarkdown>
               </Box>
             ) : document.filename && document.filename.endsWith('.org') ? (
@@ -3298,23 +4190,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 <Box sx={{ p: 1 }}>
                   <OrgRenderer 
                     content={document.content}
-                    onNavigate={async (navInfo) => {
-                      if (navInfo.type === 'file') {
-                        // Handle file links - search for document by filename
-                        try {
-                          console.log('🔗 Navigating to file:', navInfo.path);
-                          // TODO: Implement file navigation by searching for document
-                          // For now, just log the intent
-                          alert(`File navigation coming soon!\nTarget: ${navInfo.path}\n\nThis will search for and open the document.`);
-                        } catch (err) {
-                          console.error('Failed to navigate to file:', err);
-                        }
-                      } else if (navInfo.type === 'id') {
-                        // Handle ID-based links
-                        console.log('🔗 Navigating to ID:', navInfo.id);
-                        alert(`ID navigation coming soon!\nTarget ID: ${navInfo.id}\n\nThis will navigate to the heading with this ID property.`);
-                      }
-                    }}
+                    onNavigate={handleOrgPreviewNavigate}
                   />
                 </Box>
                 
@@ -3342,20 +4218,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                               boxShadow: 2
                             }
                           }}
-                          onClick={async () => {
-                            console.log('🔗 Navigating to backlink:', backlink.filename);
-                            try {
-                              // Look up document by filename
-                              const response = await apiService.get(`/api/org/lookup-document?filename=${encodeURIComponent(backlink.filename)}`);
-                              if (response.success && response.document) {
-                                // Open the document (this will require parent component support)
-                                alert(`Navigation coming soon!\nWill open: ${backlink.filename}\n\nDocument ID: ${response.document.document_id}`);
-                              }
-                            } catch (err) {
-                              console.error('Failed to navigate to backlink:', err);
-                              alert(`Failed to navigate to ${backlink.filename}`);
-                            }
-                          }}
+                          onClick={() => openOrgFileByFilename(backlink.filename)}
                         >
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                             <Description fontSize="small" sx={{ color: 'primary.main' }} />
@@ -3869,6 +4732,38 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         currentHeading={tagSourceHeading}
       />
     </Box>
+
+    <Snackbar
+      open={orgLinkNotice.open}
+      autoHideDuration={6000}
+      onClose={() => setOrgLinkNotice((n) => ({ ...n, open: false }))}
+      anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+    >
+      <Alert
+        onClose={() => setOrgLinkNotice((n) => ({ ...n, open: false }))}
+        severity={orgLinkNotice.severity || 'info'}
+        sx={{ width: '100%' }}
+        variant="filled"
+      >
+        {orgLinkNotice.message}
+      </Alert>
+    </Snackbar>
+
+    <EncryptedDocumentDialog
+      mode={encryptionDialogMode}
+      documentId={documentId}
+      open={encryptionDialogOpen}
+      onClose={() => setEncryptionDialogOpen(false)}
+      onSuccess={(result) => {
+        if (result?.sessionToken) {
+          encryptionSessionTokenRef.current = result.sessionToken;
+          setEncryptionSession(documentId, result.sessionToken);
+        }
+        setEncryptionDialogOpen(false);
+        fetchDocument(true);
+      }}
+    />
+    </>
   );
 }, (prevProps, nextProps) => {
   // Custom comparison: only re-render if these specific props change
@@ -3876,7 +4771,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     prevProps.documentId === nextProps.documentId &&
     prevProps.scrollToLine === nextProps.scrollToLine &&
     prevProps.scrollToHeading === nextProps.scrollToHeading &&
-    prevProps.initialScrollPosition === nextProps.initialScrollPosition
+    prevProps.initialScrollPosition === nextProps.initialScrollPosition &&
+    prevProps.onOpenDocument === nextProps.onOpenDocument
   );
   // Note: onClose and onScrollChange are callback functions - we assume they're stable
 });

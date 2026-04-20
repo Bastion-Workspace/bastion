@@ -239,9 +239,7 @@ async def list_available_formulas_tool() -> Dict[str, Any]:
                 "output_unit": formula_def.get("output_unit", "")
             })
         
-        formatted = f"Available formulas ({len(formulas)}): " + ", ".join(f["name"] for f in formulas[:15])
-        if len(formulas) > 15:
-            formatted += f" ... and {len(formulas) - 15} more"
+        formatted = f"Available formulas ({len(formulas)}): " + ", ".join(f["name"] for f in formulas)
         return {
             "formulas": formulas,
             "count": len(formulas),

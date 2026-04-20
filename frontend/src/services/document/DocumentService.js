@@ -1,5 +1,12 @@
 import ApiServiceBase from '../base/ApiServiceBase';
 
+/** Injected by encryptionSessionRegistry to avoid circular static imports. */
+let encryptionSessionTokenResolver = null;
+
+export function setEncryptionSessionTokenResolver(fn) {
+  encryptionSessionTokenResolver = fn;
+}
+
 class DocumentService extends ApiServiceBase {
   // Document methods
   getDocuments = async () => {
@@ -144,9 +151,21 @@ class DocumentService extends ApiServiceBase {
   }
 
   // Document content retrieval
-  getDocumentContent = async (documentId) => {
+  getDocumentContent = async (documentId, opts = {}) => {
     try {
-      const response = await this.request(`/api/documents/${documentId}/content`);
+      const hasExplicit = Object.prototype.hasOwnProperty.call(
+        opts,
+        'encryptionSessionToken'
+      );
+      const token = hasExplicit
+        ? opts.encryptionSessionToken
+        : encryptionSessionTokenResolver
+          ? encryptionSessionTokenResolver(documentId)
+          : undefined;
+      const q = token
+        ? `?encryption_session_token=${encodeURIComponent(token)}`
+        : '';
+      const response = await this.request(`/api/documents/${documentId}/content${q}`);
       return response;
     } catch (error) {
       console.error('Failed to get document content:', error);
@@ -155,13 +174,58 @@ class DocumentService extends ApiServiceBase {
   }
 
   // Document content update
-  updateDocumentContent = async (documentId, content) => {
+  updateDocumentContent = async (documentId, content, opts = {}) => {
     try {
-      return await this.put(`/api/documents/${documentId}/content`, { content });
+      const hasExplicit = Object.prototype.hasOwnProperty.call(
+        opts,
+        'encryptionSessionToken'
+      );
+      const token = hasExplicit
+        ? opts.encryptionSessionToken
+        : encryptionSessionTokenResolver
+          ? encryptionSessionTokenResolver(documentId)
+          : undefined;
+      const body = { content };
+      if (token) {
+        body.encryption_session_token = token;
+      }
+      return await this.put(`/api/documents/${documentId}/content`, body);
     } catch (error) {
       console.error('Failed to update document content:', error);
       throw error;
     }
+  }
+
+  encryptDocument = async (documentId, password, confirmPassword) => {
+    return this.post(`/api/documents/${documentId}/encrypt`, {
+      password,
+      confirm_password: confirmPassword,
+    });
+  }
+
+  createDecryptSession = async (documentId, password) => {
+    return this.post(`/api/documents/${documentId}/decrypt-session`, { password });
+  }
+
+  encryptionHeartbeat = async (documentId, sessionToken) => {
+    return this.post(`/api/documents/${documentId}/encryption-heartbeat`, {
+      session_token: sessionToken,
+    });
+  }
+
+  lockEncryptedDocument = async (documentId) => {
+    return this.post(`/api/documents/${documentId}/encryption-lock`, {});
+  }
+
+  changeEncryptionPassword = async (documentId, oldPassword, newPassword) => {
+    return this.post(`/api/documents/${documentId}/change-encryption-password`, {
+      old_password: oldPassword,
+      new_password: newPassword,
+    });
+  }
+
+  removeEncryption = async (documentId, password) => {
+    return this.post(`/api/documents/${documentId}/remove-encryption`, { password });
   }
 
   // Document version history
@@ -179,6 +243,64 @@ class DocumentService extends ApiServiceBase {
 
   rollbackToVersion = async (documentId, versionId) => {
     return this.post(`/api/documents/${documentId}/versions/${versionId}/rollback`);
+  }
+
+  // Document sharing and edit locks
+  getShareableUsers = async () => {
+    return this.get('/api/users/shareable');
+  }
+
+  getSharedWithMe = async () => {
+    return this.get('/api/shared-with-me');
+  }
+
+  getDocumentShares = async (documentId) => {
+    return this.get(`/api/documents/${documentId}/shares`);
+  }
+
+  createDocumentShare = async (documentId, body) => {
+    return this.post(`/api/documents/${documentId}/shares`, body);
+  }
+
+  getFolderShares = async (folderId) => {
+    return this.get(`/api/folders/${folderId}/shares`);
+  }
+
+  createFolderShare = async (folderId, body) => {
+    return this.post(`/api/folders/${folderId}/shares`, body);
+  }
+
+  updateShare = async (shareId, body) => {
+    return this.put(`/api/shares/${shareId}`, body);
+  }
+
+  revokeShare = async (shareId) => {
+    return this.delete(`/api/shares/${shareId}`);
+  }
+
+  getDocumentSharingContext = async (documentId) => {
+    return this.get(`/api/documents/${documentId}/sharing-context`);
+  }
+
+  getDocumentLock = async (documentId) => {
+    return this.get(`/api/documents/${documentId}/lock`);
+  }
+
+  acquireDocumentLock = async (documentId) => {
+    return this.post(`/api/documents/${documentId}/lock`);
+  }
+
+  releaseDocumentLock = async (documentId) => {
+    return this.delete(`/api/documents/${documentId}/lock`);
+  }
+
+  heartbeatDocumentLock = async (documentId) => {
+    return this.post(`/api/documents/${documentId}/lock/heartbeat`);
+  }
+
+  /** Ask backend to persist collaborative Y.Doc state to disk/DB now. */
+  collabFlush = async (documentId) => {
+    return this.post(`/api/documents/${documentId}/collab-flush`, {});
   }
 
   // Document creation methods

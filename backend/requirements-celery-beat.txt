@@ -1,5 +1,5 @@
 # Celery Beat - Ultra-Minimal Requirements
-# Scheduler only, no task processing
+# Scheduler only, no task processing. Codegen: grpcio-tools in requirements-build.txt (Docker build only).
 
 # Core Celery
 celery==5.5.3
@@ -16,12 +16,13 @@ psycopg2-binary==2.9.10
 asyncpg==0.30.0
 sqlalchemy==2.0.36
 
-# gRPC tools (needed to generate protobuf code for task module imports)
-grpcio-tools==1.76.0
+# gRPC runtime for generated *_pb2 / *_pb2_grpc (codegen uses requirements-build.txt)
+grpcio==1.80.0
+protobuf>=6.31.1,<7
 
 # Configuration and logging
 pydantic==2.12.5
-pydantic-settings==2.6.1
+pydantic-settings==2.13.1
 python-dotenv==1.0.1
 structlog==24.4.0
 
@@ -32,4 +33,3 @@ bcrypt==3.2.2
 
 # Token decryption (external_connections_service used by connection_health_tasks)
 cryptography>=42.0.0
-

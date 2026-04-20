@@ -28,6 +28,7 @@ service DataService {
   rpc InsertRow(InsertRowRequest) returns (RowResponse);
   rpc UpdateRow(UpdateRowRequest) returns (RowResponse);
   rpc UpdateCell(UpdateCellRequest) returns (RowResponse);
+  rpc ResolveWorkspaceLink(ResolveWorkspaceLinkRequest) returns (ResolveWorkspaceLinkResponse);
   rpc DeleteRow(DeleteRowRequest) returns (DeleteResponse);
   rpc RecalculateTable(RecalculateTableRequest) returns (RecalculateTableResponse);
   
@@ -288,6 +289,21 @@ message RowResponse {
   string formula_data_json = 5;  // Optional formula data JSON
 }
 
+message ResolveWorkspaceLinkRequest {
+  string user_id = 1;
+  string ref_json = 2;  // Full cell value or inner _bastion_ref object as JSON
+}
+
+message ResolveWorkspaceLinkResponse {
+  bool success = 1;
+  string error = 2;
+  string label = 3;
+  string preview_json = 4;
+  bool row_found = 5;
+  string table_id = 6;
+  string row_id = 7;
+}
+
 message ExportTableDataRequest {
   string table_id = 1;
   string user_id = 2;
@@ -323,6 +339,7 @@ message ExecuteImportRequest {
   string file_path = 4;
   string field_mapping_json = 5;
   string user_id = 6;
+  string type_overrides_json = 7;
 }
 
 message ImportJobResponse {

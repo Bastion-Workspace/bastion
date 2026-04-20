@@ -1,6 +1,5 @@
 """
-LangGraph PostgreSQL Checkpointer - Roosevelt's "Pure LangGraph" Persistence
-Provides AsyncPostgresSaver for 100% LangGraph-native persistence with robust connection management
+LangGraph PostgreSQL checkpointer using AsyncPostgresSaver with connection retry and MemorySaver fallback.
 """
 
 import asyncio
@@ -14,11 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class LangGraphPostgresCheckpointer:
-    """
-    Roosevelt's "Pure LangGraph" PostgreSQL Checkpointer
-    
-    100% LangGraph-native persistence using AsyncPostgresSaver only
-    """
+    """PostgreSQL-backed LangGraph checkpointer (AsyncPostgresSaver)."""
     
     def __init__(self):
         self.checkpointer: Optional[Union[AsyncPostgresSaver, MemorySaver]] = None
@@ -73,8 +68,7 @@ class LangGraphPostgresCheckpointer:
             try:
                 logger.info(f"🔄 Connection attempt {attempt + 1}/{max_retries}")
                 
-                # ROOSEVELT'S CORRECTED LANGGRAPH PATTERN: Create the actual checkpointer instance
-                # AsyncPostgresSaver.from_conn_string returns a contextmanager, we need to enter it
+                # AsyncPostgresSaver.from_conn_string returns a context manager; enter it for the saver instance.
                 checkpointer_factory = AsyncPostgresSaver.from_conn_string(
                     self._connection_string
                 )
@@ -159,16 +153,27 @@ class LangGraphPostgresCheckpointer:
     def _build_connection_string(self) -> str:
         """Build PostgreSQL connection string from config settings"""
         from config import settings
-        
-        host = settings.POSTGRES_HOST
-        port = settings.POSTGRES_PORT
+
+        lg_host = (settings.LANGGRAPH_POSTGRES_HOST or "").strip()
+        if lg_host:
+            host = lg_host
+            port = int(settings.LANGGRAPH_POSTGRES_PORT or 5432)
+        else:
+            host = settings.POSTGRES_HOST
+            port = settings.POSTGRES_PORT
         database = settings.POSTGRES_DB
-        user = settings.POSTGRES_USER
-        password = settings.POSTGRES_PASSWORD
-        
+        user = settings.langgraph_postgres_user
+        password = settings.langgraph_postgres_password
+
         connection_string = f"postgresql://{user}:{password}@{host}:{port}/{database}"
-        logger.info(f"🔗 PostgreSQL connection: postgresql://{user}:***@{host}:{port}/{database}")
-        
+        logger.info(
+            "PostgreSQL checkpointer connection: postgresql://%s:***@%s:%s/%s",
+            user,
+            host,
+            port,
+            database,
+        )
+
         return connection_string
     
 

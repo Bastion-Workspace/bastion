@@ -467,18 +467,6 @@ const UserManagement = () => {
               <Typography variant="subtitle1" sx={{ mb: 1 }}>Features</Typography>
               <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 1 }}>
                 <FormControlLabel
-                  control={<Switch checked={!!capabilities['feature.news.view']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.news.view': e.target.checked }))} />}
-                  label="News: View"
-                />
-                <FormControlLabel
-                  control={<Switch checked={!!capabilities['feature.news.agent']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.news.agent': e.target.checked }))} />}
-                  label="News: Agent Access"
-                />
-                <FormControlLabel
-                  control={<Switch checked={!!capabilities['feature.news.notifications']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.news.notifications': e.target.checked }))} />}
-                  label="News: Notifications"
-                />
-                <FormControlLabel
                   control={<Switch checked={!!capabilities['feature.maps.view']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.maps.view': e.target.checked }))} />}
                   label="Maps: View"
                 />

@@ -487,26 +487,3 @@ class WebsiteCrawlerTools:
                 logger.info("✅ Crawl4AI service client closed")
             except Exception as e:
                 logger.error(f"❌ Failed to close crawl client: {e}")
-
-
-# Module-level wrapper functions for tool registry
-_crawler_instance = None
-
-async def crawl_website_recursive(
-    start_url: str,
-    max_pages: int = 500,
-    max_depth: int = 10,
-    user_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """Wrapper function for tool registry"""
-    global _crawler_instance
-    if _crawler_instance is None:
-        _crawler_instance = WebsiteCrawlerTools()
-    
-    return await _crawler_instance.crawl_website_recursive(
-        start_url=start_url,
-        max_pages=max_pages,
-        max_depth=max_depth,
-        user_id=user_id
-    )
-

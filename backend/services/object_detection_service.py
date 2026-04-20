@@ -12,6 +12,7 @@ import logging
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
+from config import settings
 from clients.image_vision_client import get_image_vision_client
 from services.object_encoding_service import get_object_encoding_service
 from services.database_manager.database_helpers import fetch_all, fetch_one
@@ -157,8 +158,16 @@ class ObjectDetectionService:
         Returns:
             Dict with objects (list of detections), image_width, image_height, processing_time_seconds.
         """
+        if not settings.IMAGE_VISION_ENABLED:
+            return {
+                "objects": [],
+                "image_width": 0,
+                "image_height": 0,
+                "processing_time_seconds": 0.0,
+                "error": "Image vision is disabled (IMAGE_VISION_ENABLED=false)",
+            }
         vision_client = await self._get_vision_client()
-        if not vision_client._initialized:
+        if not vision_client.is_ready():
             return {
                 "objects": [],
                 "image_width": 0,

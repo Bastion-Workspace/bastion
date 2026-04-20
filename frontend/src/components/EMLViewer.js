@@ -11,7 +11,7 @@
  * - Responsive layout
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Box,
   Paper,
@@ -34,16 +34,35 @@ import {
   Person,
   Schedule,
   Subject as SubjectIcon,
-  Send
+  Send,
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import DOMPurify from 'dompurify';
 import { useTheme } from '../contexts/ThemeContext';
+import FindInDocumentBar from './FindInDocumentBar';
 
 const EMLViewer = ({ documentId, filename }) => {
   const [emailData, setEmailData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const { darkMode } = useTheme();
+  const emlFindRootRef = useRef(null);
+  const viewerRootRef = useRef(null);
+  const [findOpen, setFindOpen] = useState(false);
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const root = viewerRootRef.current;
+      const t = e.target;
+      if (!root || !(t instanceof Node) || !root.contains(t)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, []);
 
   // Parse email content
   const parseEmail = useCallback((text) => {
@@ -306,11 +325,15 @@ const EMLViewer = ({ documentId, filename }) => {
 
   return (
     <Box
+      ref={viewerRootRef}
+      tabIndex={-1}
       sx={{
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: darkMode ? '#121212' : '#f5f5f5'
+        backgroundColor: darkMode ? '#121212' : '#f5f5f5',
+        outline: 'none',
+        minHeight: 0,
       }}
     >
       {/* Toolbar */}
@@ -334,6 +357,18 @@ const EMLViewer = ({ documentId, filename }) => {
         </Stack>
 
         <Stack direction="row" spacing={1} alignItems="center">
+          {emailData && (
+            <Tooltip title="Find in document (Ctrl+F)">
+              <IconButton
+                onClick={() => setFindOpen((o) => !o)}
+                size="small"
+                color={findOpen ? 'primary' : 'default'}
+                aria-label="Find in document"
+              >
+                <SearchIcon />
+              </IconButton>
+            </Tooltip>
+          )}
           <Tooltip title="Download EML">
             <IconButton onClick={handleDownload} size="small" color="primary">
               <Download />
@@ -341,6 +376,15 @@ const EMLViewer = ({ documentId, filename }) => {
           </Tooltip>
         </Stack>
       </Paper>
+
+      {findOpen && emailData && (
+        <FindInDocumentBar
+          containerRef={emlFindRootRef}
+          open={findOpen}
+          onClose={() => setFindOpen(false)}
+          darkMode={darkMode}
+        />
+      )}
 
       {/* Content Viewer */}
       <Box
@@ -364,6 +408,7 @@ const EMLViewer = ({ documentId, filename }) => {
           </Box>
         ) : emailData ? (
           <Paper
+            ref={emlFindRootRef}
             elevation={3}
             sx={{
               maxWidth: '800px',

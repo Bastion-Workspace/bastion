@@ -166,6 +166,7 @@ class ExecuteImportRequest(BaseModel):
     table_name: str
     file_path: str
     field_mapping: Optional[Dict[str, str]] = None
+    type_overrides: Optional[Dict[str, str]] = None
 
 
 class ImportJobResponse(BaseModel):

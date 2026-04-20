@@ -1,8 +1,5 @@
 /**
- * ROOSEVELT'S AGENT STATUS TYPES: Type definitions for out-of-band WebSocket agent status messages
- * 
- * This is the client-side companion to the backend's agent status streaming system.
- * Use these types to handle real-time agent tool execution updates.
+ * Client-side types and WebSocket helper for out-of-band agent status messages.
  */
 
 /**
@@ -21,8 +18,8 @@
  */
 
 /**
- * Tool Names (what tool is being executed)
- * @typedef {'search_local' | 'get_document' | 'search_and_crawl' | 'crawl_web_content' | 'search_entities'} ToolName
+ * Tool name from the orchestrator (open set; examples include search_documents, search_and_crawl).
+ * @typedef {string} ToolName
  */
 
 /**
@@ -75,10 +72,8 @@
  */
 
 /**
- * ROOSEVELT'S AGENT STATUS WEBSOCKET CLIENT
- * 
- * Creates and manages WebSocket connection for agent status updates
- * 
+ * Creates and manages WebSocket connection for agent status updates.
+ *
  * @param {AgentStatusWebSocketOptions} options - Connection options
  * @returns {Object} WebSocket control object
  */
@@ -90,7 +85,7 @@ export function createAgentStatusWebSocket(options) {
     const wsHost = window.location.host;
     const wsUrl = `${wsProtocol}//${wsHost}/api/ws/agent-status/${conversationId}?token=${encodeURIComponent(token)}`;
     
-    console.log(`🤖 AGENT STATUS: Connecting to ${wsUrl}`);
+    console.log(`Agent status WebSocket connecting to ${wsUrl}`);
     
     let ws = null;
     let reconnectTimeout = null;
@@ -101,39 +96,39 @@ export function createAgentStatusWebSocket(options) {
             ws = new WebSocket(wsUrl);
             
             ws.onopen = () => {
-                console.log(`✅ AGENT STATUS: Connected to conversation ${conversationId}`);
+                console.log(`Agent status WebSocket connected for conversation ${conversationId}`);
                 if (onConnect) onConnect();
             };
             
             ws.onmessage = (event) => {
                 try {
                     const message = JSON.parse(event.data);
-                    console.log(`🤖 AGENT STATUS: Received`, message);
+                    console.log('Agent status WebSocket message', message);
                     onMessage(message);
                 } catch (error) {
-                    console.error(`❌ AGENT STATUS: Failed to parse message`, error);
+                    console.error('Agent status WebSocket failed to parse message', error);
                     if (onError) onError(error);
                 }
             };
             
             ws.onclose = () => {
-                console.log(`📡 AGENT STATUS: Disconnected from conversation ${conversationId}`);
+                console.log(`Agent status WebSocket disconnected from conversation ${conversationId}`);
                 if (onDisconnect) onDisconnect();
                 
                 // Auto-reconnect unless intentionally closed
                 if (!isIntentionallyClosed) {
-                    console.log(`🔄 AGENT STATUS: Reconnecting in 3 seconds...`);
+                    console.log('Agent status WebSocket reconnecting in 3 seconds...');
                     reconnectTimeout = setTimeout(connect, 3000);
                 }
             };
             
             ws.onerror = (error) => {
-                console.error(`❌ AGENT STATUS: WebSocket error`, error);
+                console.error('Agent status WebSocket error', error);
                 if (onError) onError(error);
             };
             
         } catch (error) {
-            console.error(`❌ AGENT STATUS: Failed to create WebSocket`, error);
+            console.error('Agent status WebSocket failed to create', error);
             if (onError) onError(error);
         }
     };
@@ -154,7 +149,7 @@ export function createAgentStatusWebSocket(options) {
             if (ws) {
                 ws.close();
             }
-            console.log(`🔌 AGENT STATUS: Connection closed for conversation ${conversationId}`);
+            console.log(`Agent status WebSocket closed for conversation ${conversationId}`);
         },
         
         /**
@@ -175,116 +170,3 @@ export function createAgentStatusWebSocket(options) {
         }
     };
 }
-
-/**
- * ROOSEVELT'S STATUS MESSAGE FORMATTER
- * 
- * Format agent status messages for UI display
- * 
- * @param {AgentStatusMessage} message - Agent status message
- * @returns {string} Formatted display text
- */
-export function formatAgentStatusMessage(message) {
-    const { status_type, message: text, tool_name, iteration, max_iterations } = message;
-    
-    // Add iteration context if available
-    let formatted = text;
-    if (iteration && max_iterations) {
-        formatted = `[${iteration}/${max_iterations}] ${text}`;
-    }
-    
-    return formatted;
-}
-
-/**
- * ROOSEVELT'S STATUS INDICATOR STYLES
- * 
- * Get status indicator styles based on status type
- * 
- * @param {AgentStatusType} statusType - Status type
- * @returns {Object} Style object
- */
-export function getAgentStatusStyle(statusType) {
-    const styles = {
-        tool_start: {
-            color: '#2196F3', // Blue
-            icon: '🔧',
-            animation: 'pulse'
-        },
-        tool_complete: {
-            color: '#4CAF50', // Green
-            icon: '✅',
-            animation: 'none'
-        },
-        tool_error: {
-            color: '#F44336', // Red
-            icon: '❌',
-            animation: 'shake'
-        },
-        iteration_start: {
-            color: '#FF9800', // Orange
-            icon: '🔄',
-            animation: 'spin'
-        },
-        synthesis: {
-            color: '#9C27B0', // Purple
-            icon: '✨',
-            animation: 'fade'
-        }
-    };
-    
-    return styles[statusType] || {
-        color: '#757575',
-        icon: '📡',
-        animation: 'none'
-    };
-}
-
-/**
- * ROOSEVELT'S STATUS FILTER
- * 
- * Determine if a status update should be shown based on settings
- * 
- * @param {AgentStatusMessage} message - Agent status message
- * @param {Object} settings - User settings
- * @returns {boolean} Whether to show the status
- */
-export function shouldShowAgentStatus(message, settings = {}) {
-    const {
-        showToolStart = true,
-        showToolComplete = false,  // Hide successes by default to reduce noise
-        showToolError = true,
-        showIterationStart = true,
-        showSynthesis = true
-    } = settings;
-    
-    switch (message.status_type) {
-        case 'tool_start':
-            return showToolStart;
-        case 'tool_complete':
-            return showToolComplete;
-        case 'tool_error':
-            return showToolError;
-        case 'iteration_start':
-            return showIterationStart;
-        case 'synthesis':
-            return showSynthesis;
-        default:
-            return true;
-    }
-}
-
-export default {
-    createAgentStatusWebSocket,
-    formatAgentStatusMessage,
-    getAgentStatusStyle,
-    shouldShowAgentStatus
-};
-
-
-
-
-
-
-
-

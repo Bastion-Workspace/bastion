@@ -26,6 +26,7 @@ import {
 import { Add, Edit, Delete, Tune, Science } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import savedArtifactService from '../../services/savedArtifactService';
 import JsonResponseViewer from '../agent-factory/JsonResponseViewer';
 import ControlTestPanel from './ControlTestPanel';
 
@@ -88,7 +89,11 @@ export default function ControlPanesSettingsTab() {
   const [form, setForm] = useState({
     name: '',
     icon: 'Tune',
+    pane_type: 'connector',
     connector_id: '',
+    artifact_id: '',
+    artifact_popover_width: 360,
+    artifact_popover_height: 400,
     credentials_encrypted: {},
     connection_id: null,
     controls: [],
@@ -123,6 +128,12 @@ export default function ControlPanesSettingsTab() {
     () => apiService.agentFactory.listConnectors(),
     { enabled: editorOpen }
   );
+  const { data: savedArtifactsPayload } = useQuery(
+    ['savedArtifactsList'],
+    () => savedArtifactService.list(),
+    { enabled: editorOpen }
+  );
+  const savedArtifactsList = savedArtifactsPayload?.artifacts || [];
   const [connectorIdForEndpoints, setConnectorIdForEndpoints] = useState('');
   const { data: connectorDetail } = useQuery(
     ['connector', connectorIdForEndpoints],
@@ -149,8 +160,12 @@ export default function ControlPanesSettingsTab() {
       const results = await Promise.all(
         panes.map(async (pane) => {
           try {
+            if ((pane.pane_type || 'connector') === 'artifact') {
+              return { id: pane.id, status: 'ok' };
+            }
             let endpointId = (pane.controls || []).find((c) => c.refresh_endpoint_id)?.refresh_endpoint_id;
             if (!endpointId) {
+              if (!pane.connector_id) return { id: pane.id, status: 'error' };
               const conn = await apiService.agentFactory.getConnector(pane.connector_id);
               const ids = conn?.definition?.endpoints ? Object.keys(conn.definition.endpoints) : [];
               endpointId = ids[0];
@@ -200,7 +215,11 @@ export default function ControlPanesSettingsTab() {
     setForm({
       name: '',
       icon: 'Tune',
+      pane_type: 'connector',
       connector_id: '',
+      artifact_id: '',
+      artifact_popover_width: 360,
+      artifact_popover_height: 400,
       credentials_encrypted: {},
       connection_id: null,
       controls: [],
@@ -242,7 +261,11 @@ export default function ControlPanesSettingsTab() {
     setForm({
       name: pane.name || '',
       icon: pane.icon || 'Tune',
+      pane_type: pane.pane_type || 'connector',
       connector_id: pane.connector_id || '',
+      artifact_id: pane.artifact_id || '',
+      artifact_popover_width: pane.artifact_popover_width ?? 360,
+      artifact_popover_height: pane.artifact_popover_height ?? 400,
       credentials_encrypted: credsObj,
       connection_id: pane.connection_id ?? null,
       controls: Array.isArray(pane.controls) ? pane.controls : [],
@@ -271,7 +294,40 @@ export default function ControlPanesSettingsTab() {
                 }
               })()
             : {};
-    const body = { ...form, credentials_encrypted: credsObj };
+    const isArtifact = (form.pane_type || 'connector') === 'artifact';
+    if (isArtifact) {
+      if (!form.artifact_id) return;
+      const body = {
+        name: form.name.trim(),
+        icon: form.icon,
+        pane_type: 'artifact',
+        artifact_id: form.artifact_id,
+        artifact_popover_width: Number(form.artifact_popover_width) || 360,
+        artifact_popover_height: Number(form.artifact_popover_height) || 400,
+        is_visible: form.is_visible,
+        sort_order: form.sort_order,
+        refresh_interval: form.refresh_interval,
+      };
+      if (editingPane) {
+        updateMutation.mutate({ id: editingPane.id, body });
+      } else {
+        createMutation.mutate(body);
+      }
+      return;
+    }
+    if (!form.connector_id) return;
+    const body = {
+      name: form.name.trim(),
+      icon: form.icon,
+      pane_type: 'connector',
+      connector_id: form.connector_id,
+      credentials_encrypted: credsObj,
+      connection_id: form.connection_id,
+      controls: form.controls || [],
+      is_visible: form.is_visible,
+      sort_order: form.sort_order,
+      refresh_interval: form.refresh_interval,
+    };
     if (editingPane) {
       updateMutation.mutate({ id: editingPane.id, body });
     } else {
@@ -406,7 +462,9 @@ export default function ControlPanesSettingsTab() {
                         )}
                         <Typography variant="subtitle1">{pane.name}</Typography>
                         <Typography variant="body2" color="text.secondary">
-                          ({pane.connector_name || pane.connector_id})
+                          {(pane.pane_type || 'connector') === 'artifact'
+                            ? `artifact ${pane.artifact_id || ''}`
+                            : `(${pane.connector_name || pane.connector_id})`}
                         </Typography>
                       </Box>
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
@@ -463,76 +521,143 @@ export default function ControlPanesSettingsTab() {
                 </Select>
               </FormControl>
               <FormControl fullWidth sx={{ mb: 2 }}>
-                <InputLabel>Connector</InputLabel>
+                <InputLabel>Pane type</InputLabel>
                 <Select
-                  value={form.connector_id}
-                  label="Connector"
-                  onChange={(e) => {
-                    setForm((p) => ({ ...p, connector_id: e.target.value }));
-                    setConnectorIdForEndpoints(e.target.value);
-                    setTestEndpointId('');
-                  }}
+                  value={form.pane_type || 'connector'}
+                  label="Pane type"
+                  onChange={(e) => setForm((p) => ({ ...p, pane_type: e.target.value }))}
                 >
-                  {connectors.map((c) => (
-                    <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
-                  ))}
+                  <MenuItem value="connector">Data connector</MenuItem>
+                  <MenuItem value="artifact">Saved artifact</MenuItem>
                 </Select>
               </FormControl>
-              <TextField
-                fullWidth
-                type="password"
-                label="API Key (if required by connector)"
-                value={apiKey}
-                onChange={(e) =>
-                  setForm((p) => ({
-                    ...p,
-                    credentials_encrypted: { ...(p.credentials_encrypted || {}), api_key: e.target.value },
-                  }))
-                }
-                sx={{ mb: 2 }}
-              />
-              <TextField
-                fullWidth
-                type="number"
-                inputProps={{ min: 0, step: 1 }}
-                label="Refresh interval (seconds)"
-                helperText="0 = off; 5, 10, or 30 recommended for live state"
-                value={form.refresh_interval ?? 0}
-                onChange={(e) => setForm((p) => ({ ...p, refresh_interval: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
-                sx={{ mb: 2 }}
-              />
-              <Box sx={{ mb: 2 }}>
-                <Typography variant="subtitle2" sx={{ mb: 1 }}>Controls</Typography>
-                <List dense>
-                  {form.controls.map((c, idx) => {
-                    const bindingSummary = (c.param_source && c.param_source.length > 0)
-                      ? c.param_source
-                        .map((src) => `${src.param || '?'} ← ${form.controls.find((o) => o.id === src.from_control_id)?.label || src.from_control_id || '?'}`)
-                        .join(', ')
-                      : '';
-                    const primary = bindingSummary
-                      ? `${c.type}: ${c.label || c.endpoint_id || '—'} (${bindingSummary})`
-                      : `${c.type}: ${c.label || c.endpoint_id || '—'}`;
-                    return (
-                      <ListItem key={c.id || idx}>
-                        <ListItemText primary={primary} />
-                        <ListItemSecondaryAction>
-                        <IconButton size="small" onClick={() => handleEditControl(idx)} aria-label="Edit control">
-                          <Edit fontSize="small" />
-                        </IconButton>
-                        <IconButton size="small" onClick={() => removeControl(idx)} aria-label="Remove control">
-                          <Delete fontSize="small" />
-                        </IconButton>
-                      </ListItemSecondaryAction>
-                    </ListItem>
-                    );
-                  })}
-                </List>
-                <Button size="small" startIcon={<Add />} onClick={handleAddControl}>
-                  Add Control
-                </Button>
-              </Box>
+              {(form.pane_type || 'connector') === 'artifact' ? (
+                <>
+                  <FormControl fullWidth sx={{ mb: 2 }}>
+                    <InputLabel>Saved artifact</InputLabel>
+                    <Select
+                      value={form.artifact_id}
+                      label="Saved artifact"
+                      onChange={(e) => setForm((p) => ({ ...p, artifact_id: e.target.value }))}
+                    >
+                      <MenuItem value="">
+                        <em>Select…</em>
+                      </MenuItem>
+                      {savedArtifactsList.map((a) => (
+                        <MenuItem key={a.id} value={a.id}>
+                          {a.title} ({a.artifact_type})
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="Popover width (px)"
+                    inputProps={{ min: 200, max: 1200 }}
+                    value={form.artifact_popover_width}
+                    onChange={(e) =>
+                      setForm((p) => ({
+                        ...p,
+                        artifact_popover_width: Math.max(200, Math.min(1200, parseInt(e.target.value, 10) || 360)),
+                      }))
+                    }
+                    sx={{ mb: 2 }}
+                  />
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="Popover height (px)"
+                    inputProps={{ min: 120, max: 1600 }}
+                    value={form.artifact_popover_height}
+                    onChange={(e) =>
+                      setForm((p) => ({
+                        ...p,
+                        artifact_popover_height: Math.max(120, Math.min(1600, parseInt(e.target.value, 10) || 400)),
+                      }))
+                    }
+                    sx={{ mb: 2 }}
+                  />
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                    The artifact runs in the background while the app is open. State syncs with the same saved artifact on the home dashboard when both use the same artifact ID.
+                  </Typography>
+                </>
+              ) : (
+                <>
+                  <FormControl fullWidth sx={{ mb: 2 }}>
+                    <InputLabel>Connector</InputLabel>
+                    <Select
+                      value={form.connector_id}
+                      label="Connector"
+                      onChange={(e) => {
+                        setForm((p) => ({ ...p, connector_id: e.target.value }));
+                        setConnectorIdForEndpoints(e.target.value);
+                        setTestEndpointId('');
+                      }}
+                    >
+                      {connectors.map((c) => (
+                        <MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    fullWidth
+                    type="password"
+                    label="API Key (if required by connector)"
+                    value={apiKey}
+                    onChange={(e) =>
+                      setForm((p) => ({
+                        ...p,
+                        credentials_encrypted: { ...(p.credentials_encrypted || {}), api_key: e.target.value },
+                      }))
+                    }
+                    sx={{ mb: 2 }}
+                  />
+                  <TextField
+                    fullWidth
+                    type="number"
+                    inputProps={{ min: 0, step: 1 }}
+                    label="Refresh interval (seconds)"
+                    helperText="0 = off; 5, 10, or 30 recommended for live state"
+                    value={form.refresh_interval ?? 0}
+                    onChange={(e) => setForm((p) => ({ ...p, refresh_interval: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
+                    sx={{ mb: 2 }}
+                  />
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="subtitle2" sx={{ mb: 1 }}>Controls</Typography>
+                    <List dense>
+                      {form.controls.map((c, idx) => {
+                        const bindingSummary = (c.param_source && c.param_source.length > 0)
+                          ? c.param_source
+                            .map((src) => `${src.param || '?'} ← ${form.controls.find((o) => o.id === src.from_control_id)?.label || src.from_control_id || '?'}`)
+                            .join(', ')
+                          : '';
+                        const primary = bindingSummary
+                          ? `${c.type}: ${c.label || c.endpoint_id || '—'} (${bindingSummary})`
+                          : `${c.type}: ${c.label || c.endpoint_id || '—'}`;
+                        return (
+                          <ListItem key={c.id || idx}>
+                            <ListItemText primary={primary} />
+                            <ListItemSecondaryAction>
+                            <IconButton size="small" onClick={() => handleEditControl(idx)} aria-label="Edit control">
+                              <Edit fontSize="small" />
+                            </IconButton>
+                            <IconButton size="small" onClick={() => removeControl(idx)} aria-label="Remove control">
+                              <Delete fontSize="small" />
+                            </IconButton>
+                          </ListItemSecondaryAction>
+                        </ListItem>
+                        );
+                      })}
+                    </List>
+                    <Button size="small" startIcon={<Add />} onClick={handleAddControl}>
+                      Add Control
+                    </Button>
+                  </Box>
+                </>
+              )}
             </Box>
+            {(form.pane_type || 'connector') === 'connector' ? (
             <Box>
               <Typography variant="subtitle2" sx={{ mb: 1 }}>Test endpoint</Typography>
               <FormControl fullWidth size="small" sx={{ mb: 1 }}>
@@ -598,6 +723,7 @@ export default function ControlPanesSettingsTab() {
                 />
               )}
             </Box>
+            ) : null}
           </Box>
         </DialogContent>
         <DialogActions>
@@ -605,7 +731,14 @@ export default function ControlPanesSettingsTab() {
           <Button
             variant="contained"
             onClick={handleSavePane}
-            disabled={!form.name.trim() || createMutation.isLoading || updateMutation.isLoading}
+            disabled={
+              !form.name.trim()
+              || createMutation.isLoading
+              || updateMutation.isLoading
+              || ((form.pane_type || 'connector') === 'artifact'
+                ? !form.artifact_id
+                : !form.connector_id)
+            }
           >
             {editingPane ? 'Update' : 'Create'}
           </Button>

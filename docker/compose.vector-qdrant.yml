@@ -1,0 +1,8 @@
+# Vector-service: use Qdrant backend (merge after docker-compose.example.yml).
+# With compose.qdrant-stack.yml, QDRANT_URL targets the in-stack qdrant service.
+# See docker/README.md
+services:
+  vector-service:
+    environment:
+      VECTOR_DB_BACKEND: qdrant
+      QDRANT_URL: http://qdrant:6333

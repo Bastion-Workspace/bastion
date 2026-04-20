@@ -1,6 +1,5 @@
 """
-MCP Tool Schemas
-Pydantic models for MCP tool inputs and outputs
-"""
+MCP tool schemas (Pydantic models).
 
-from document_mcp.schemas.tool_schemas import * 
+Import symbols from ``document_mcp.schemas.tool_schemas`` as needed.
+"""

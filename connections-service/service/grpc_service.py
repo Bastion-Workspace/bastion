@@ -20,14 +20,29 @@ from connections_service_pb2 import (
     CreateCalendarEventResponse,
     CreateContactRequest,
     CreateContactResponse,
+    CreateDriveFolderRequest,
+    CreateDriveFolderResponse,
     CreateDraftRequest,
     CreateDraftResponse,
+    CreateOneNotePageRequest,
+    CreateOneNotePageResponse,
+    CreatePlannerTaskRequest,
+    CreatePlannerTaskResponse,
+    CreateTodoTaskRequest,
+    CreateTodoTaskResponse,
     DeleteCalendarEventRequest,
     DeleteCalendarEventResponse,
     DeleteContactRequest,
     DeleteContactResponse,
+    DeleteDriveItemRequest,
+    DeleteDriveItemResponse,
     DeleteEmailRequest,
     DeleteEmailResponse,
+    DeletePlannerTaskRequest,
+    DeletePlannerTaskResponse,
+    DeleteTodoTaskRequest,
+    DeleteTodoTaskResponse,
+    DriveItem,
     EmailMessage,
     EmailFolder,
     ExecuteConnectorEndpointRequest,
@@ -40,6 +55,10 @@ from connections_service_pb2 import (
     GetCalendarEventByIdResponse,
     GetCalendarEventsRequest,
     GetCalendarEventsResponse,
+    GetDriveItemRequest,
+    GetDriveItemResponse,
+    GetFileContentRequest,
+    GetFileContentResponse,
     GetContactByIdRequest,
     GetContactByIdResponse,
     GetContactsRequest,
@@ -54,10 +73,30 @@ from connections_service_pb2 import (
     GetEmailThreadResponse,
     GetFoldersRequest,
     GetFoldersResponse,
+    GetOneNotePageContentRequest,
+    GetOneNotePageContentResponse,
+    GetPlannerTasksRequest,
+    GetPlannerTasksResponse,
+    GetTodoTasksRequest,
+    GetTodoTasksResponse,
     HealthCheckRequest,
     HealthCheckResponse,
     ListCalendarsRequest,
     ListCalendarsResponse,
+    ListDriveItemsRequest,
+    ListDriveItemsResponse,
+    ListOneNoteNotebooksRequest,
+    ListOneNoteNotebooksResponse,
+    ListOneNotePagesRequest,
+    ListOneNotePagesResponse,
+    ListOneNoteSectionsRequest,
+    ListOneNoteSectionsResponse,
+    ListPlannerPlansRequest,
+    ListPlannerPlansResponse,
+    ListTodoListsRequest,
+    ListTodoListsResponse,
+    MoveDriveItemRequest,
+    MoveDriveItemResponse,
     MoveEmailRequest,
     MoveEmailResponse,
     RegisterBotRequest,
@@ -74,12 +113,27 @@ from connections_service_pb2 import (
     SyncFolderResponse,
     UnregisterBotRequest,
     UnregisterBotResponse,
+    OneNoteNotebook,
+    OneNotePage,
+    OneNoteSection,
+    PlannerPlan,
+    PlannerTask,
+    SearchDriveRequest,
+    SearchDriveResponse,
+    TodoList,
+    TodoTask,
     UpdateCalendarEventRequest,
     UpdateCalendarEventResponse,
     UpdateContactRequest,
     UpdateContactResponse,
     UpdateEmailRequest,
     UpdateEmailResponse,
+    UpdatePlannerTaskRequest,
+    UpdatePlannerTaskResponse,
+    UpdateTodoTaskRequest,
+    UpdateTodoTaskResponse,
+    UploadFileRequest,
+    UploadFileResponse,
 )
 from connections_service_pb2_grpc import ConnectionsServiceServicer
 from config.settings import settings
@@ -186,6 +240,86 @@ def _dict_to_contact(d: Dict[str, Any]) -> Contact:
         birthday=d.get("birthday", ""),
         notes=d.get("notes", ""),
         folder_id=d.get("folder_id", ""),
+    )
+
+
+def _dict_to_todo_list(d: Dict[str, Any]) -> TodoList:
+    return TodoList(
+        id=d.get("id", ""),
+        display_name=d.get("display_name", ""),
+        is_owner=d.get("is_owner", False),
+        is_shared=d.get("is_shared", False),
+        well_known_list_name=d.get("well_known_list_name", ""),
+    )
+
+
+def _dict_to_todo_task(d: Dict[str, Any]) -> TodoTask:
+    return TodoTask(
+        id=d.get("id", ""),
+        list_id=d.get("list_id", ""),
+        title=d.get("title", ""),
+        status=d.get("status", ""),
+        body=d.get("body", ""),
+        due_datetime=d.get("due_datetime", ""),
+        importance=d.get("importance", "normal"),
+    )
+
+
+def _dict_to_drive_item(d: Dict[str, Any]) -> DriveItem:
+    return DriveItem(
+        id=d.get("id", ""),
+        name=d.get("name", ""),
+        web_url=d.get("web_url", ""),
+        is_folder=d.get("is_folder", False),
+        mime_type=d.get("mime_type", ""),
+        size=int(d.get("size") or 0),
+        parent_id=d.get("parent_id", ""),
+        last_modified=d.get("last_modified", ""),
+    )
+
+
+def _dict_to_onenote_notebook(d: Dict[str, Any]) -> OneNoteNotebook:
+    return OneNoteNotebook(
+        id=d.get("id", ""),
+        display_name=d.get("display_name", ""),
+        web_url=d.get("web_url", ""),
+    )
+
+
+def _dict_to_onenote_section(d: Dict[str, Any]) -> OneNoteSection:
+    return OneNoteSection(
+        id=d.get("id", ""),
+        display_name=d.get("display_name", ""),
+        notebook_id=d.get("notebook_id", ""),
+        web_url=d.get("web_url", ""),
+    )
+
+
+def _dict_to_onenote_page(d: Dict[str, Any]) -> OneNotePage:
+    return OneNotePage(
+        id=d.get("id", ""),
+        title=d.get("title", ""),
+        section_id=d.get("section_id", ""),
+        web_url=d.get("web_url", ""),
+        created_time=d.get("created_time", ""),
+    )
+
+
+def _dict_to_planner_plan(d: Dict[str, Any]) -> PlannerPlan:
+    return PlannerPlan(
+        id=d.get("id", ""),
+        title=d.get("title", ""),
+        owner=d.get("owner", ""),
+    )
+
+
+def _dict_to_planner_task(d: Dict[str, Any]) -> PlannerTask:
+    return PlannerTask(
+        id=d.get("id", ""),
+        plan_id=d.get("plan_id", ""),
+        title=d.get("title", ""),
+        percent_complete=int(d.get("percent_complete") or 0),
+        due_datetime=d.get("due_datetime", ""),
     )
 
 
@@ -656,6 +790,347 @@ class ConnectionsServiceImplementation(ConnectionsServiceServicer):
             request.access_token, request.contact_id
         )
         return DeleteContactResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def ListTodoLists(
+        self, request: ListTodoListsRequest, context
+    ) -> ListTodoListsResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListTodoListsResponse(lists=[], error="Unknown provider")
+        result = await provider.list_todo_lists(request.access_token)
+        lists = [_dict_to_todo_list(x) for x in result.get("lists", [])]
+        return ListTodoListsResponse(lists=lists, error=result.get("error") or None)
+
+    async def GetTodoTasks(
+        self, request: GetTodoTasksRequest, context
+    ) -> GetTodoTasksResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetTodoTasksResponse(tasks=[], error="Unknown provider")
+        result = await provider.get_todo_tasks(
+            request.access_token, request.list_id, top=request.top or 50
+        )
+        tasks = [_dict_to_todo_task(x) for x in result.get("tasks", [])]
+        return GetTodoTasksResponse(tasks=tasks, error=result.get("error") or None)
+
+    async def CreateTodoTask(
+        self, request: CreateTodoTaskRequest, context
+    ) -> CreateTodoTaskResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreateTodoTaskResponse(success=False, error="Unknown provider")
+        result = await provider.create_todo_task(
+            request.access_token,
+            request.list_id,
+            title=request.title or "",
+            body=request.body or "",
+            due_datetime=request.due_datetime or "",
+            importance=request.importance or "normal",
+        )
+        return CreateTodoTaskResponse(
+            success=result.get("success", False),
+            task_id=result.get("task_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def UpdateTodoTask(
+        self, request: UpdateTodoTaskRequest, context
+    ) -> UpdateTodoTaskResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return UpdateTodoTaskResponse(success=False, error="Unknown provider")
+        title = request.title if request.HasField("title") else None
+        body = request.body if request.HasField("body") else None
+        status = request.status if request.HasField("status") else None
+        due = request.due_datetime if request.HasField("due_datetime") else None
+        imp = request.importance if request.HasField("importance") else None
+        result = await provider.update_todo_task(
+            request.access_token,
+            request.list_id,
+            request.task_id,
+            title=title,
+            body=body,
+            status=status,
+            due_datetime=due,
+            importance=imp,
+        )
+        return UpdateTodoTaskResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def DeleteTodoTask(
+        self, request: DeleteTodoTaskRequest, context
+    ) -> DeleteTodoTaskResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return DeleteTodoTaskResponse(success=False, error="Unknown provider")
+        result = await provider.delete_todo_task(
+            request.access_token, request.list_id, request.task_id
+        )
+        return DeleteTodoTaskResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def ListDriveItems(
+        self, request: ListDriveItemsRequest, context
+    ) -> ListDriveItemsResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListDriveItemsResponse(items=[], error="Unknown provider")
+        result = await provider.list_drive_items(
+            request.access_token,
+            parent_item_id=request.parent_item_id or "",
+            top=request.top or 50,
+        )
+        items = [_dict_to_drive_item(x) for x in result.get("items", [])]
+        return ListDriveItemsResponse(items=items, error=result.get("error") or None)
+
+    async def GetDriveItem(
+        self, request: GetDriveItemRequest, context
+    ) -> GetDriveItemResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetDriveItemResponse(error="Unknown provider")
+        result = await provider.get_drive_item(request.access_token, request.item_id)
+        it = result.get("item")
+        return GetDriveItemResponse(
+            item=_dict_to_drive_item(it) if it else None,
+            error=result.get("error") or None,
+        )
+
+    async def SearchDrive(
+        self, request: SearchDriveRequest, context
+    ) -> SearchDriveResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return SearchDriveResponse(items=[], error="Unknown provider")
+        result = await provider.search_drive(
+            request.access_token, request.query or "", top=request.top or 25
+        )
+        items = [_dict_to_drive_item(x) for x in result.get("items", [])]
+        return SearchDriveResponse(items=items, error=result.get("error") or None)
+
+    async def GetFileContent(
+        self, request: GetFileContentRequest, context
+    ) -> GetFileContentResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetFileContentResponse(error="Unknown provider")
+        result = await provider.get_file_content(request.access_token, request.item_id)
+        return GetFileContentResponse(
+            content_base64=result.get("content_base64", ""),
+            mime_type=result.get("mime_type", ""),
+            error=result.get("error") or None,
+        )
+
+    async def UploadFile(
+        self, request: UploadFileRequest, context
+    ) -> UploadFileResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return UploadFileResponse(success=False, error="Unknown provider")
+        result = await provider.upload_file(
+            request.access_token,
+            request.parent_item_id or "",
+            request.name or "upload.bin",
+            request.content_base64 or "",
+            mime_type=request.mime_type or "application/octet-stream",
+        )
+        return UploadFileResponse(
+            success=result.get("success", False),
+            item_id=result.get("item_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def CreateDriveFolder(
+        self, request: CreateDriveFolderRequest, context
+    ) -> CreateDriveFolderResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreateDriveFolderResponse(success=False, error="Unknown provider")
+        result = await provider.create_drive_folder(
+            request.access_token,
+            request.parent_item_id or "",
+            request.name or "New folder",
+        )
+        return CreateDriveFolderResponse(
+            success=result.get("success", False),
+            item_id=result.get("item_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def MoveDriveItem(
+        self, request: MoveDriveItemRequest, context
+    ) -> MoveDriveItemResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return MoveDriveItemResponse(success=False, error="Unknown provider")
+        result = await provider.move_drive_item(
+            request.access_token, request.item_id, request.new_parent_item_id
+        )
+        return MoveDriveItemResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def DeleteDriveItem(
+        self, request: DeleteDriveItemRequest, context
+    ) -> DeleteDriveItemResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return DeleteDriveItemResponse(success=False, error="Unknown provider")
+        result = await provider.delete_drive_item(request.access_token, request.item_id)
+        return DeleteDriveItemResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def ListOneNoteNotebooks(
+        self, request: ListOneNoteNotebooksRequest, context
+    ) -> ListOneNoteNotebooksResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListOneNoteNotebooksResponse(notebooks=[], error="Unknown provider")
+        result = await provider.list_onenote_notebooks(request.access_token)
+        nbs = [_dict_to_onenote_notebook(x) for x in result.get("notebooks", [])]
+        return ListOneNoteNotebooksResponse(
+            notebooks=nbs, error=result.get("error") or None
+        )
+
+    async def ListOneNoteSections(
+        self, request: ListOneNoteSectionsRequest, context
+    ) -> ListOneNoteSectionsResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListOneNoteSectionsResponse(sections=[], error="Unknown provider")
+        result = await provider.list_onenote_sections(
+            request.access_token, request.notebook_id
+        )
+        secs = [_dict_to_onenote_section(x) for x in result.get("sections", [])]
+        return ListOneNoteSectionsResponse(
+            sections=secs, error=result.get("error") or None
+        )
+
+    async def ListOneNotePages(
+        self, request: ListOneNotePagesRequest, context
+    ) -> ListOneNotePagesResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListOneNotePagesResponse(pages=[], error="Unknown provider")
+        result = await provider.list_onenote_pages(
+            request.access_token, request.section_id, top=request.top or 50
+        )
+        pages = [_dict_to_onenote_page(x) for x in result.get("pages", [])]
+        return ListOneNotePagesResponse(pages=pages, error=result.get("error") or None)
+
+    async def GetOneNotePageContent(
+        self, request: GetOneNotePageContentRequest, context
+    ) -> GetOneNotePageContentResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetOneNotePageContentResponse(error="Unknown provider")
+        result = await provider.get_onenote_page_content(
+            request.access_token, request.page_id
+        )
+        return GetOneNotePageContentResponse(
+            html_content=result.get("html_content", ""),
+            error=result.get("error") or None,
+        )
+
+    async def CreateOneNotePage(
+        self, request: CreateOneNotePageRequest, context
+    ) -> CreateOneNotePageResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreateOneNotePageResponse(success=False, error="Unknown provider")
+        result = await provider.create_onenote_page(
+            request.access_token,
+            request.section_id,
+            request.html or "",
+            title=request.title or "",
+        )
+        return CreateOneNotePageResponse(
+            success=result.get("success", False),
+            page_id=result.get("page_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def ListPlannerPlans(
+        self, request: ListPlannerPlansRequest, context
+    ) -> ListPlannerPlansResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListPlannerPlansResponse(plans=[], error="Unknown provider")
+        result = await provider.list_planner_plans(request.access_token)
+        plans = [_dict_to_planner_plan(x) for x in result.get("plans", [])]
+        return ListPlannerPlansResponse(plans=plans, error=result.get("error") or None)
+
+    async def GetPlannerTasks(
+        self, request: GetPlannerTasksRequest, context
+    ) -> GetPlannerTasksResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetPlannerTasksResponse(tasks=[], error="Unknown provider")
+        result = await provider.get_planner_tasks(
+            request.access_token, request.plan_id
+        )
+        tasks = [_dict_to_planner_task(x) for x in result.get("tasks", [])]
+        return GetPlannerTasksResponse(tasks=tasks, error=result.get("error") or None)
+
+    async def CreatePlannerTask(
+        self, request: CreatePlannerTaskRequest, context
+    ) -> CreatePlannerTaskResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreatePlannerTaskResponse(success=False, error="Unknown provider")
+        result = await provider.create_planner_task(
+            request.access_token,
+            request.plan_id,
+            title=request.title or "",
+            bucket_id=request.bucket_id or "",
+        )
+        return CreatePlannerTaskResponse(
+            success=result.get("success", False),
+            task_id=result.get("task_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def UpdatePlannerTask(
+        self, request: UpdatePlannerTaskRequest, context
+    ) -> UpdatePlannerTaskResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return UpdatePlannerTaskResponse(success=False, error="Unknown provider")
+        title = request.title if request.HasField("title") else None
+        pct = request.percent_complete if request.HasField("percent_complete") else None
+        due = request.due_datetime if request.HasField("due_datetime") else None
+        result = await provider.update_planner_task(
+            request.access_token,
+            request.task_id,
+            title=title,
+            percent_complete=pct,
+            due_datetime=due,
+        )
+        return UpdatePlannerTaskResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def DeletePlannerTask(
+        self, request: DeletePlannerTaskRequest, context
+    ) -> DeletePlannerTaskResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return DeletePlannerTaskResponse(success=False, error="Unknown provider")
+        result = await provider.delete_planner_task(
+            request.access_token, request.task_id, etag=request.etag or ""
+        )
+        return DeletePlannerTaskResponse(
             success=result.get("success", False),
             error=result.get("error") or None,
         )

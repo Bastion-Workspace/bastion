@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useCallback, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -17,7 +17,50 @@ import {
 } from '@mui/material';
 import { PlayArrow, Pause, Stop, SkipNext, SkipPrevious, Close, VolumeUp, VolumeOff, Refresh, PowerSettingsNew, Lightbulb, Thermostat, ExpandMore, ExpandLess } from '@mui/icons-material';
 import { useControlPanes } from '../../contexts/ControlPaneContext';
+import { useArtifactInstance } from '../../contexts/ArtifactInstanceContext';
 import apiService from '../../services/apiService';
+
+function ControlPaneArtifactBody({ pane, onClose }) {
+  const containerRef = useRef(null);
+  const { mountArtifactInContainer, restoreArtifactToPool } = useArtifactInstance();
+
+  useLayoutEffect(() => {
+    const pid = pane?.id;
+    if (!pid) return undefined;
+    const el = containerRef.current;
+    if (!el) return undefined;
+    mountArtifactInContainer(pid, el);
+    return () => {
+      restoreArtifactToPool(pid);
+    };
+  }, [pane?.id, mountArtifactInContainer, restoreArtifactToPool]);
+
+  const w = Math.max(220, Math.min(1200, Number(pane?.artifact_popover_width) || 360));
+  const h = Math.max(160, Math.min(1600, Number(pane?.artifact_popover_height) || 400));
+
+  return (
+    <Box sx={{ minWidth: Math.min(w, 400), maxWidth: w, width: '100%', p: 1 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+        <Typography variant="subtitle2">{pane.name}</Typography>
+        <IconButton size="small" onClick={onClose} aria-label="Close">
+          <Close fontSize="small" />
+        </IconButton>
+      </Box>
+      <Box
+        ref={containerRef}
+        sx={{
+          width: '100%',
+          height: h,
+          minHeight: 200,
+          overflow: 'auto',
+          border: 1,
+          borderColor: 'divider',
+          borderRadius: 1,
+        }}
+      />
+    </Box>
+  );
+}
 
 function getByPath(obj, path) {
   if (!obj || !path) return undefined;
@@ -215,6 +258,10 @@ const ControlPanePopover = ({ pane, onClose }) => {
   );
 
   if (!pane) return null;
+
+  if ((pane.pane_type || 'connector').toLowerCase() === 'artifact') {
+    return <ControlPaneArtifactBody pane={pane} onClose={onClose} />;
+  }
 
   return (
     <Box sx={{ minWidth: 220, maxWidth: 320, p: 1.5 }}>

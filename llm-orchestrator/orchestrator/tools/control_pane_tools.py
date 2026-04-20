@@ -27,7 +27,11 @@ class ListControlPanesInputs(BaseModel):
 
 
 class ListControlPanesOutputs(BaseModel):
-    panes: List[Dict[str, Any]] = Field(description="List of control panes (id, name, icon, connector_id, connector_name, controls, is_visible, sort_order)")
+    panes: List[Dict[str, Any]] = Field(
+        description="List of control panes: id, name, icon, pane_type (connector|artifact), connector_id, artifact_id, "
+        "artifact_popover_width/height, connector_name, controls, is_visible, sort_order, refresh_interval. "
+        "Artifact panes embed a saved library artifact in the status bar; connector panes use data source connectors."
+    )
     count: int = Field(description="Number of panes")
     formatted: str = Field(description="Human-readable summary for LLM/chat")
 
@@ -46,7 +50,10 @@ class GetConnectorEndpointsOutputs(BaseModel):
 
 class CreateControlPaneInputs(BaseModel):
     name: str = Field(description="Display name for the control pane")
-    connector_id: str = Field(description="Data source connector UUID to wire the pane to")
+    connector_id: str = Field(
+        description="Data source connector UUID to wire the pane to. "
+        "Saved-artifact panes (status bar embeds from the artifact library) are created in the app Control Panes settings, not via this tool."
+    )
     controls: List[Dict[str, Any]] = Field(
         description="Array of control objects: type (slider|dropdown|toggle|button|text_display), label, endpoint_id, param_key. "
         "endpoint_id is the connector's internal endpoint key (snake_case, e.g. server_get_status) — it selects which endpoint config to call; not sent to the API. Never use numeric IDs (0, 1, 2). "
@@ -136,8 +143,12 @@ async def list_control_panes_tool(user_id: str = "system") -> Dict[str, Any]:
         for p in panes:
             name = p.get("name", "(unnamed)")
             pid = p.get("id", "")
-            conn_name = p.get("connector_name") or p.get("connector_id", "")
-            parts.append(f"  - {name} (id: {pid}, connector: {conn_name})")
+            if (p.get("pane_type") or "connector") == "artifact":
+                extra = f"artifact_id={p.get('artifact_id', '')}"
+            else:
+                conn_name = p.get("connector_name") or p.get("connector_id", "")
+                extra = f"connector: {conn_name}"
+            parts.append(f"  - {name} (id: {pid}, {extra})")
         formatted = "\n".join(parts) if panes else parts[0]
         return {"panes": panes, "count": len(panes), "formatted": formatted}
     except Exception as e:

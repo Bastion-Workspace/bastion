@@ -26,7 +26,11 @@ class ListTodosParams(BaseModel):
     states: Optional[List[str]] = Field(default=None, description="TODO states to include")
     tags: Optional[List[str]] = Field(default=None, description="Filter by tags")
     query: str = Field(default="", description="Search query")
-    limit: int = Field(default=100, ge=1, le=500, description="Max results")
+    limit: int = Field(
+        default=0,
+        ge=0,
+        description="Max results; 0 = no cap (return all matches). Use a positive value to cap very large lists.",
+    )
     include_archives: bool = Field(default=False, description="Include archive files")
     include_body: bool = Field(default=False, description="Include body/description text for each todo")
     closed_since_days: Optional[int] = Field(default=None, ge=0, description="Only DONE items closed in the last N days (e.g. 7 for last week)")
@@ -50,12 +54,12 @@ async def list_todos_tool(
     states: Optional[List[str]] = None,
     tags: Optional[List[str]] = None,
     query: str = "",
-    limit: int = 100,
+    limit: int = 0,
     include_archives: bool = False,
     include_body: bool = False,
     closed_since_days: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """List todos across org files. Use closed_since_days=7 for items completed in the last week. line_number in results is 0-based."""
+    """List todos across org files. Default limit is 0 (no cap). Use closed_since_days=7 for items completed in the last week. line_number in results is 0-based."""
     try:
         client = await get_backend_tool_client()
         result = await client.list_todos(
@@ -76,14 +80,14 @@ async def list_todos_tool(
         count = result.get("count", 0)
         files_searched = result.get("files_searched", 0)
         lines = [f"Found {count} todo(s) across {files_searched} file(s). To toggle or update a todo, use its file_path and line_number (0-based)."]
-        for i, r in enumerate(results[:15], 1):
+        for i, r in enumerate(results, 1):
             ln = r.get("line_number", 0)
             fp = r.get("file_path", "") or r.get("filename", "")
             closed = r.get("closed", "") or ""
             extra = f" closed={closed}" if closed else ""
-            lines.append(f"{i}. [{r.get('todo_state', '')}] {r.get('heading', '')[:60]}{extra} — file_path={fp} line_number={ln}")
-        if count > 15:
-            lines.append(f"... and {count - 15} more.")
+            heading = str(r.get("heading", "") or "")
+            title = heading[:60] + ("…" if len(heading) > 60 else "")
+            lines.append(f"{i}. [{r.get('todo_state', '')}] {title}{extra} — file_path={fp} line_number={ln}")
         return {
             "success": True,
             "results": results,
@@ -578,10 +582,8 @@ async def discover_refile_targets_tool(user_id: str = "system") -> Dict[str, Any
         targets = result.get("targets", [])
         count = len(targets)
         lines = [f"Found {count} refile destination(s)."]
-        for i, t in enumerate(targets[:20], 1):
+        for i, t in enumerate(targets, 1):
             lines.append(f"{i}. {t.get('display_name', '')} — file={t.get('file', '')} heading_line={t.get('heading_line', 0)}")
-        if count > 20:
-            lines.append(f"... and {count - 20} more.")
         return {
             "success": True,
             "targets": targets,

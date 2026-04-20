@@ -25,7 +25,7 @@ class OrgSettingsService:
     """
     Service for managing org-mode settings
     
-    **BULLY!** Handles all org-mode configuration like a well-organized cavalry!
+    Org-mode configuration CRUD and defaults.
     """
     
     def __init__(self):
@@ -42,7 +42,7 @@ class OrgSettingsService:
         """
         Get default org-mode settings
 
-        **By George!** Sensible defaults for a fresh start!
+        Return default settings for a new user.
         """
         return OrgModeSettings(
             user_id=user_id,
@@ -115,7 +115,7 @@ class OrgSettingsService:
         """
         Create or update org-mode settings for a user
         
-        **BULLY!** Persistent configuration like a well-drilled cavalry!
+        Persist org-mode settings JSON for the user.
         """
         try:
             # Get existing settings or defaults
@@ -252,7 +252,7 @@ async def get_org_settings_service():
     """
     Get or create the org settings service singleton
     
-    **BULLY!** One service to rule them all!
+    Singleton accessor for org settings service.
     """
     global _org_settings_service
     

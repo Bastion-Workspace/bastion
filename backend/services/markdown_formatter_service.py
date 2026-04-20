@@ -1,8 +1,6 @@
 """
 Markdown Formatter Service
-Formats web content and RSS articles as structured Markdown files with YAML frontmatter
-
-**BULLY!** The Roosevelt "Square Deal" approach to content preservation!
+Formats web content and RSS articles as structured Markdown files with YAML frontmatter.
 """
 
 import logging
@@ -17,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 class MarkdownFormatterService:
     """
-    Formats web content as structured Markdown files
-    
-    **BULLY!** Preserves content with the reliability of a cavalry charge!
+    Formats web content as structured Markdown files with frontmatter.
     """
     
     def __init__(self):
@@ -39,9 +35,7 @@ class MarkdownFormatterService:
         images: List[Dict[str, Any]] = None
     ) -> str:
         """
-        Format RSS article as Markdown with YAML frontmatter
-        
-        **By George!** Creates a beautiful, structured document!
+        Format an RSS article as Markdown with YAML frontmatter.
         """
         try:
             # Create YAML frontmatter
@@ -108,9 +102,7 @@ class MarkdownFormatterService:
         images: List[Dict[str, Any]] = None
     ) -> str:
         """
-        Format scraped web content as Markdown with YAML frontmatter
-        
-        **BULLY!** Perfect for general web scraping!
+        Format scraped web content as Markdown with YAML frontmatter.
         """
         try:
             # Create YAML frontmatter
@@ -202,9 +194,13 @@ class MarkdownFormatterService:
             images_md = "\n## Images\n\n"
             saved_images = []
             
-            # Create images directory
-            upload_dir = Path(settings.UPLOAD_DIR)
-            images_dir = upload_dir / "web_sources" / "images" / document_id if document_id else upload_dir / "web_sources" / "images"
+            # Create images directory (backend web_sources volume, not document library)
+            ws_root = Path(settings.WEB_SOURCES_ROOT)
+            images_dir = (
+                ws_root / "images" / document_id
+                if document_id
+                else ws_root / "images"
+            )
             images_dir.mkdir(parents=True, exist_ok=True)
             
             # Download and save images
@@ -235,7 +231,11 @@ class MarkdownFormatterService:
                             saved_path = asyncio.run(download_image())
                             if saved_path:
                                 # Use static URL path in markdown
-                                static_path = f"/static/images/{document_id}/{local_filename}" if document_id else f"/static/images/{local_filename}"
+                                static_path = (
+                                    f"/api/web-sources/images/{document_id}/{local_filename}"
+                                    if document_id
+                                    else f"/api/web-sources/images/{local_filename}"
+                                )
                                 images_md += f"- ![{alt_text}]({static_path})\n"
                                 saved_images.append(saved_path)
                                 logger.info(f"✅ Saved image: {saved_path}")
@@ -276,7 +276,7 @@ class MarkdownFormatterService:
                 ext = url.split('.')[-1].split('?')[0].lower()
                 if ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg']:
                     return f".{ext}"
-        except:
+        except Exception:
             pass
         return ".jpg"  # Default extension
     
@@ -310,7 +310,7 @@ class MarkdownFormatterService:
             from urllib.parse import urlparse
             parsed = urlparse(url)
             return parsed.netloc.lower()
-        except:
+        except Exception:
             return "unknown"
     
     def generate_filename(
@@ -321,9 +321,7 @@ class MarkdownFormatterService:
         feed_name: str = None
     ) -> str:
         """
-        Generate safe filename for markdown file
-        
-        **BULLY!** Creates clean, organized filenames!
+        Generate a safe filename for a markdown export.
         """
         try:
             # Sanitize title for filename

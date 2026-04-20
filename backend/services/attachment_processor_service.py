@@ -64,17 +64,28 @@ class AttachmentProcessorService:
                 }
             
             # Initialize vision client
+            from config import settings
+
             vision_client = await get_image_vision_client()
-            await vision_client.initialize(required=False)
-            
-            if not vision_client._initialized:
-                logger.warning("⚠️ Image Vision Service unavailable - skipping face detection")
+            if not settings.IMAGE_VISION_ENABLED:
+                logger.warning("Image vision disabled by configuration - skipping face detection")
                 return {
                     "face_encodings": [],
                     "bounding_boxes": [],
                     "detected_identities": [],
                     "face_count": 0,
-                    "error": "Image Vision Service unavailable"
+                    "error": "Image vision is disabled (IMAGE_VISION_ENABLED=false)",
+                }
+            await vision_client.initialize(required=False)
+
+            if not vision_client.is_ready():
+                logger.warning("Image Vision Service unavailable - skipping face detection")
+                return {
+                    "face_encodings": [],
+                    "bounding_boxes": [],
+                    "detected_identities": [],
+                    "face_count": 0,
+                    "error": "Image Vision Service unavailable",
                 }
             
             # Detect faces in the image
@@ -165,7 +176,7 @@ class AttachmentProcessorService:
         Returns:
             Feature vector or None if not implemented
         """
-        # TODO: Implement visual feature extraction using CLIP or similar
+        # Future: optional visual feature extraction (e.g. CLIP) for image attachments (not implemented).
         # For now, return None
         return None
 

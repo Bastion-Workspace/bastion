@@ -4,6 +4,7 @@ Handles /newchat, /chats, /loadchat, /chat, and /model (list or set model) comma
 """
 
 import asyncio
+import base64
 import logging
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -231,6 +232,49 @@ class ChannelListenerManager:
         chat_key = (connection_id, msg.chat_id)
         conversation_id = await self._get_current_conversation_id(connection_id, msg.platform, msg.chat_id)
         text = (msg.text or "").strip()
+
+        if msg.audio:
+            aud = msg.audio or {}
+            raw = aud.get("data") or ""
+            try:
+                if isinstance(raw, str):
+                    audio_bytes = base64.b64decode(raw)
+                elif isinstance(raw, (bytes, bytearray)):
+                    audio_bytes = bytes(raw)
+                else:
+                    raise ValueError("invalid audio data type")
+            except Exception as e:
+                logger.warning("Invalid inbound audio payload: %s", e)
+                await instance.send_message(msg.chat_id, "Sorry, invalid audio data.", None)
+                return
+            filename = (aud.get("filename") or "voice.bin").strip() or "voice.bin"
+            mime = aud.get("mime") or "application/octet-stream"
+            whisper_prompt = aud.get("prompt")
+            wp = str(whisper_prompt).strip() if whisper_prompt is not None else ""
+            tr = await self._backend_client.transcribe_audio(
+                user_id=user_id,
+                audio_bytes=audio_bytes,
+                filename=filename,
+                content_type=mime,
+                prompt=wp or None,
+            )
+            if tr.get("error"):
+                await instance.send_message(
+                    msg.chat_id,
+                    f"Sorry, I couldn't transcribe that: {tr['error'][:200]}",
+                    None,
+                )
+                return
+            transcript = (tr.get("text") or "").strip()
+            if not transcript:
+                await instance.send_message(
+                    msg.chat_id,
+                    "Sorry, transcription was empty.",
+                    None,
+                )
+                return
+            text = f"{text}\n\n{transcript}".strip() if text else transcript
+
         text_lower = text.lower()
 
         # Persist outbound chat_id for proactive messaging (fire-and-forget)
@@ -400,7 +444,7 @@ class ChannelListenerManager:
             result = await self._backend_client.send_external_message(
                 user_id=user_id,
                 conversation_id=conversation_id,
-                query=msg.text,
+                query=text,
                 platform=msg.platform,
                 platform_chat_id=msg.chat_id,
                 sender_name=msg.sender_name,

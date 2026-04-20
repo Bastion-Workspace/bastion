@@ -9,7 +9,7 @@
  * - Download functionality
  */
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   Box,
   Paper,
@@ -24,11 +24,13 @@ import {
   Slideshow,
   Download,
   NavigateBefore,
-  NavigateNext
+  NavigateNext,
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import DOMPurify from 'dompurify';
 import { useTheme } from '../contexts/ThemeContext';
 import { useImageLightbox } from './common/ImageLightbox';
+import FindInDocumentBar from './FindInDocumentBar';
 
 const PptxViewer = ({ documentId, filename }) => {
   const [slidesHtml, setSlidesHtml] = useState([]);
@@ -37,7 +39,24 @@ const PptxViewer = ({ documentId, filename }) => {
   const [currentSlide, setCurrentSlide] = useState(0);
   const { darkMode } = useTheme();
   const contentRef = useRef(null);
+  const slideInnerRef = useRef(null);
+  const viewerRootRef = useRef(null);
+  const [findOpen, setFindOpen] = useState(false);
   const { openLightbox } = useImageLightbox();
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const root = viewerRootRef.current;
+      const t = e.target;
+      if (!root || !(t instanceof Node) || !root.contains(t)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, []);
 
   useEffect(() => {
     const fetchAndConvertPptx = async () => {
@@ -145,6 +164,15 @@ const PptxViewer = ({ documentId, filename }) => {
   const canPrev = totalSlides > 0 && currentSlide > 0;
   const canNext = totalSlides > 0 && currentSlide < totalSlides - 1;
 
+  const crossSlideSearchMemo = useMemo(
+    () => ({
+      slidesHtml,
+      slideIndex: currentSlide,
+      setSlideIndex: setCurrentSlide,
+    }),
+    [slidesHtml, currentSlide]
+  );
+
   let content;
   if (error) {
     content = (
@@ -181,6 +209,7 @@ const PptxViewer = ({ documentId, filename }) => {
         }}
       >
         <Box
+          ref={slideInnerRef}
           sx={{
             width: '100%',
             height: '100%',
@@ -204,11 +233,15 @@ const PptxViewer = ({ documentId, filename }) => {
 
   return (
     <Box
+      ref={viewerRootRef}
+      tabIndex={-1}
       sx={{
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: darkMode ? '#121212' : '#f5f5f5'
+        backgroundColor: darkMode ? '#121212' : '#f5f5f5',
+        outline: 'none',
+        minHeight: 0,
       }}
     >
       <Paper
@@ -231,6 +264,18 @@ const PptxViewer = ({ documentId, filename }) => {
         </Stack>
 
         <Stack direction="row" spacing={1} alignItems="center">
+          {totalSlides > 0 && (
+            <Tooltip title="Find in document (Ctrl+F)">
+              <IconButton
+                onClick={() => setFindOpen((o) => !o)}
+                size="small"
+                color={findOpen ? 'primary' : 'default'}
+                aria-label="Find in document"
+              >
+                <SearchIcon />
+              </IconButton>
+            </Tooltip>
+          )}
           {totalSlides > 0 && (
             <>
               <Tooltip title="Previous slide">
@@ -269,6 +314,16 @@ const PptxViewer = ({ documentId, filename }) => {
           </Tooltip>
         </Stack>
       </Paper>
+
+      {findOpen && totalSlides > 0 && (
+        <FindInDocumentBar
+          containerRef={slideInnerRef}
+          open={findOpen}
+          onClose={() => setFindOpen(false)}
+          darkMode={darkMode}
+          crossSlideSearch={crossSlideSearchMemo}
+        />
+      )}
 
       <Box
         ref={contentRef}

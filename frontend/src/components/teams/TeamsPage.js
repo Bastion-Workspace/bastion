@@ -29,6 +29,7 @@ import {
 import { useTeam } from '../../contexts/TeamContext';
 import { useAuth } from '../../contexts/AuthContext';
 import CreateTeamDialog from './CreateTeamDialog';
+import { solidSurfaceBg } from '../../theme/wallpaperPaneSx';
 
 const TeamsPage = () => {
   const navigate = useNavigate();
@@ -88,14 +89,14 @@ const TeamsPage = () => {
 
   if (isLoading && teams.length === 0) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, display: 'flex', justifyContent: 'center' }}>
+      <Container maxWidth="lg" sx={{ py: 4, display: 'flex', justifyContent: 'center' }}>
         <CircularProgress />
       </Container>
     );
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
+    <Container maxWidth="lg" sx={{ py: 3 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 4 }}>
         <Typography variant="h4" component="h1">
           Teams
@@ -131,10 +132,7 @@ const TeamsPage = () => {
                     flexDirection: 'column',
                     border: '2px solid',
                     borderColor: 'primary.main',
-                    bgcolor: (theme) => 
-                      theme.palette.mode === 'dark' 
-                        ? 'rgba(25, 118, 210, 0.16)' 
-                        : 'primary.light',
+                    bgcolor: (theme) => solidSurfaceBg(theme),
                     '&:hover': {
                       boxShadow: 4
                     }
@@ -210,7 +208,7 @@ const TeamsPage = () => {
       )}
 
       {teams.length === 0 ? (
-        <Card sx={{ textAlign: 'center', py: 6 }}>
+        <Card sx={{ textAlign: 'center', py: 6, bgcolor: (t) => solidSurfaceBg(t) }}>
           <CardContent>
             <Group sx={{ fontSize: 64, color: 'text.secondary', mb: 2 }} />
             <Typography variant="h5" gutterBottom>
@@ -239,6 +237,7 @@ const TeamsPage = () => {
                   display: 'flex',
                   flexDirection: 'column',
                   cursor: 'pointer',
+                  bgcolor: (t) => solidSurfaceBg(t),
                   '&:hover': {
                     boxShadow: 4
                   }

@@ -71,15 +71,18 @@ from orchestrator.tools.utility_tools import (
     get_list_length_tool,
 )
 import orchestrator.tools.agent_invocation_tools  # noqa: F401 - register_action at load
+import orchestrator.tools.delegation_tools  # noqa: F401 - register_action delegate_to at load
 import orchestrator.tools.agent_communication_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_conversation_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_workspace_tools  # noqa: F401 - register_action at load
+import orchestrator.tools.consensus_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_goal_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_task_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_governance_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_memory_tools  # noqa: F401 - register_agent_memory_actions at load
 import orchestrator.tools.team_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.local_proxy_tools  # noqa: F401 - register_action at load
+import orchestrator.tools.code_workspace_tools  # noqa: F401 - register_action at load
 
 from orchestrator.tools.visualization_tools import (
     create_chart_tool,
@@ -107,7 +110,12 @@ from orchestrator.tools.system_modeling_tools import (
 from orchestrator.tools.data_workspace_tools import (
     list_data_workspaces_tool,
     get_workspace_schema_tool,
+    resolve_workspace_link_tool,
     query_data_workspace_tool,
+    create_workspace_table_tool,
+    insert_workspace_rows_tool,
+    update_workspace_rows_tool,
+    delete_workspace_rows_tool,
     DATA_WORKSPACE_TOOLS
 )
 
@@ -141,6 +149,11 @@ from orchestrator.tools.contact_tools import (
     delete_contact_tool,
     search_contacts_tool,
 )
+import orchestrator.tools.m365_graph_todo_tools  # noqa: F401 - register_action at load
+import orchestrator.tools.m365_graph_files_tools  # noqa: F401
+import orchestrator.tools.m365_graph_onenote_tools  # noqa: F401
+import orchestrator.tools.m365_graph_planner_tools  # noqa: F401
+import orchestrator.tools.devops_tools  # noqa: F401 - register_action at load
 from orchestrator.tools.account_tools import list_accounts_tool
 from orchestrator.tools.navigation_tools import (
     create_location_tool,
@@ -192,6 +205,13 @@ from orchestrator.tools.org_content_tools import (
     search_org_headings_tool,
     get_org_statistics_tool,
 )
+from orchestrator.tools.editor_navigation_tools import (
+    editor_list_sections_tool,
+    editor_get_section_tool,
+    editor_get_sections_tool,
+    editor_search_content_tool,
+    editor_get_ref_section_tool,
+)
 from orchestrator.tools.image_generation_tools import (
     generate_image_tool,
 )
@@ -206,6 +226,7 @@ from orchestrator.tools.session_memory_tools import (
     clipboard_store_tool,
     clipboard_get_tool,
 )
+import orchestrator.tools.artifact_tools  # noqa: F401 - register_action create_artifact
 from orchestrator.tools.planning_tools import (
     create_plan_tool,
     get_plan_tool,
@@ -297,6 +318,7 @@ from orchestrator.tools.data_connection_tools import (
     get_bulk_scrape_status_tool,
 )
 import orchestrator.tools.user_profile_tools  # noqa: F401 - register_action at load
+import orchestrator.tools.scratchpad_tools  # noqa: F401 - register_action at load
 from orchestrator.tools.user_profile_tools import (
     get_my_profile_tool,
     get_user_facts_tool,
@@ -316,6 +338,12 @@ from orchestrator.tools.local_proxy_tools import (
     local_open_url_tool,
     get_available_local_proxy_tools,
 )
+from orchestrator.tools.code_workspace_tools import (
+    code_open_workspace_tool,
+    code_file_tree_tool,
+    code_search_files_tool,
+    code_git_info_tool,
+)
 import orchestrator.tools.reference_file_loader  # noqa: F401 - register_action at load
 import orchestrator.tools.file_analysis_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.file_editing_tools  # noqa: F401 - register_action at load
@@ -330,6 +358,10 @@ try:
     load_plugins()
 except Exception:  # noqa: S110
     pass  # Plugins are optional; discovery/registration failures are non-fatal
+
+# GitHub OAuth tools must register after plugins: GitHubPlugin used to overwrite these with
+# PAT-based methods that do not accept connection_id, breaking github:{id}:github_* playbooks.
+import orchestrator.tools.github_tools  # noqa: F401, E402 - register_action side effect
 
 __all__ = [
     # Document tools
@@ -391,7 +423,12 @@ __all__ = [
     # Data workspace tools
     'list_data_workspaces_tool',
     'get_workspace_schema_tool',
+    'resolve_workspace_link_tool',
     'query_data_workspace_tool',
+    'create_workspace_table_tool',
+    'insert_workspace_rows_tool',
+    'update_workspace_rows_tool',
+    'delete_workspace_rows_tool',
     'DATA_WORKSPACE_TOOLS',
     # Weather tools
     'get_weather_tool',
@@ -465,6 +502,12 @@ __all__ = [
     'parse_org_structure_tool',
     'search_org_headings_tool',
     'get_org_statistics_tool',
+    # Editor navigation tools (format-agnostic section browsing and search)
+    'editor_list_sections_tool',
+    'editor_get_section_tool',
+    'editor_get_sections_tool',
+    'editor_search_content_tool',
+    'editor_get_ref_section_tool',
     # Image generation tools
     'generate_image_tool',
     # Bridging tools (plan steps)
@@ -541,5 +584,10 @@ __all__ = [
     'local_list_processes_tool',
     'local_open_url_tool',
     'get_available_local_proxy_tools',
+    # Code workspace tools
+    'code_open_workspace_tool',
+    'code_file_tree_tool',
+    'code_search_files_tool',
+    'code_git_info_tool',
 ]
 

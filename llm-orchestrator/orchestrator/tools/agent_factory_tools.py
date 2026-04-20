@@ -435,6 +435,7 @@ RUNTIME_VARS = frozenset({
     "editor_current_section", "editor_current_heading",
     "editor_previous_section", "editor_next_section",
     "editor_section_index", "editor_adjacent_sections", "editor_total_sections",
+    "editor_toc",
     "editor_is_first_section", "editor_is_last_section", "editor_ref_count",
     "document_context", "pinned_document_id", "last_tool_results",
     "profile",
@@ -640,6 +641,66 @@ def _validate_playbook_wiring(steps: List[Dict[str, Any]], actions_by_name: Dict
     return errors
 
 
+def _step_has_nonempty_condition(step: Dict[str, Any]) -> bool:
+    c = step.get("condition")
+    if c is None:
+        return False
+    return bool(str(c).strip())
+
+
+def _step_exclusive_set(step: Dict[str, Any]) -> bool:
+    return bool(step.get("exclusive"))
+
+
+def _step_type_for_exclusive_warn(step: Dict[str, Any]) -> str:
+    return str(step.get("step_type") or step.get("type") or "").strip().lower()
+
+
+def _warn_missing_exclusive(steps: List[Any], warnings: List[str]) -> None:
+    """
+    Warn when 2+ consecutive steps have a condition but not `exclusive`, followed by a step
+    with no condition (catch-all). Without exclusive, the catch-all still runs after a match.
+    Skips runs where every step is type branch (different routing semantics).
+    """
+    if not isinstance(steps, list) or len(steps) < 3:
+        return
+    n = len(steps)
+    i = 0
+    while i < n:
+        step = steps[i]
+        if not isinstance(step, dict) or not _step_has_nonempty_condition(step) or _step_exclusive_set(step):
+            i += 1
+            continue
+        j = i
+        run_indices: List[int] = []
+        while j < n:
+            s = steps[j]
+            if not isinstance(s, dict) or not _step_has_nonempty_condition(s) or _step_exclusive_set(s):
+                break
+            run_indices.append(j)
+            j += 1
+        if len(run_indices) >= 2 and j < n:
+            nxt = steps[j]
+            if isinstance(nxt, dict) and not _step_has_nonempty_condition(nxt):
+                if not all(_step_type_for_exclusive_warn(steps[k]) == "branch" for k in run_indices):
+                    names: List[str] = []
+                    for k in run_indices:
+                        nm = str(steps[k].get("name") or steps[k].get("output_key") or f"step_{k}").strip()
+                        quoted = f'"{nm}"' if nm else f"step_{k}"
+                        names.append(quoted)
+                    qnames = ", ".join(names)
+                    lo, hi = run_indices[0], run_indices[-1]
+                    catch = nxt.get("name") or nxt.get("output_key") or f"step_{j}"
+                    catch_s = str(catch).strip() or f"step_{j}"
+                    warnings.append(
+                        f"Steps {qnames} (steps {lo}-{hi}) have conditions but are not marked exclusive; "
+                        f'step {j} ("{catch_s}") has no condition and will always run — even after a conditional '
+                        f'step matches. Enable "Exclusive (stop after match)" on the conditional steps, or add a '
+                        f'condition to "{catch_s}".'
+                    )
+        i = run_indices[0] + 1
+
+
 def _validate_playbook_steps(steps: List[Dict[str, Any]]) -> List[str]:
     """Minimal structure validation for playbook steps. Returns list of warning strings."""
     warnings: List[str] = []
@@ -664,7 +725,7 @@ def _validate_playbook_steps(steps: List[Dict[str, Any]]) -> List[str]:
             warnings.append(f"step {i} ({name or '?'}): tool step requires 'action'")
         if step_type == "llm_agent" and "max_iterations" not in step:
             warnings.append(
-                f"step {i} ({name or '?'}): llm_agent step has no max_iterations (defaults to 3); consider setting max_iterations (1–25) for complex or multi-tool tasks."
+                f"step {i} ({name or '?'}): llm_agent step has no max_iterations (defaults to 3); consider setting max_iterations (1–50) for complex or multi-tool tasks."
             )
         if step_type == "llm_agent":
             available_tools = step.get("available_tools") or []
@@ -673,6 +734,68 @@ def _validate_playbook_steps(steps: List[Dict[str, Any]]) -> List[str]:
                 warnings.append(
                     f"step {i} ({name or '?'}): llm_agent has {len(available_tools)} tools but max_iterations is {max_iter or 3}; consider setting max_iterations higher (e.g. 8–15) so the agent can use multiple tools."
                 )
+        if step_type in ("llm_agent", "deep_agent"):
+            from orchestrator.engines.tool_resolution import skill_discovery_mode_from_step
+            _step_tools = list(step.get("available_tools") or [])
+            _step_skills = list(step.get("skill_ids") or step.get("skills") or [])
+            if not _step_tools and not _step_skills and skill_discovery_mode_from_step(step) == "off":
+                warnings.append(
+                    f"step {i} ({name or '?'}): {step_type} has no available_tools and no pinned skill_ids, "
+                    "and skill discovery is off — the agent will have no capabilities at runtime. "
+                    "Add tools to available_tools, add skill_ids, or enable skill discovery "
+                    "(set discovery_mode to 'auto', 'catalog', or 'full')."
+                )
+        if step_type in ("llm_agent", "deep_agent"):
+            dm_raw = step.get("delegation_mode")
+            if dm_raw is not None and str(dm_raw).strip():
+                dm = str(dm_raw).strip().lower()
+                if dm not in ("supervised", "parallel", "sequential"):
+                    warnings.append(
+                        f"step {i} ({name or '?'}): invalid delegation_mode '{dm_raw}' (use supervised, parallel, or sequential)"
+                    )
+            raw_sa = step.get("subagents")
+            if raw_sa is not None and not isinstance(raw_sa, list):
+                warnings.append(f"step {i} ({name or '?'}): subagents must be a list")
+            elif isinstance(raw_sa, list):
+                for sj, sa in enumerate(raw_sa):
+                    if not isinstance(sa, dict):
+                        warnings.append(f"step {i} ({name or '?'}): subagents[{sj}] must be an object")
+                        continue
+                    if not (sa.get("agent_profile_id") or "").strip():
+                        warnings.append(
+                            f"step {i} ({name or '?'}): subagents[{sj}] missing agent_profile_id"
+                        )
+            raw_samples = step.get("samples")
+            if raw_samples is not None:
+                try:
+                    sn = int(raw_samples)
+                    if sn < 1 or sn > 5:
+                        warnings.append(
+                            f"step {i} ({name or '?'}): samples must be an integer 1–5 (got {raw_samples!r})"
+                        )
+                except (TypeError, ValueError):
+                    warnings.append(
+                        f"step {i} ({name or '?'}): samples must be an integer 1–5 (got {raw_samples!r})"
+                    )
+            ss_raw = step.get("selection_strategy")
+            if ss_raw is not None and str(ss_raw).strip():
+                ss = str(ss_raw).strip().lower()
+                if ss not in ("llm_judge", "highest_score"):
+                    warnings.append(
+                        f"step {i} ({name or '?'}): invalid selection_strategy {ss_raw!r} (use llm_judge or highest_score)"
+                    )
+                elif ss == "highest_score" and step_type != "deep_agent":
+                    warnings.append(
+                        f"step {i} ({name or '?'}): selection_strategy highest_score is only for deep_agent"
+                    )
+            fo = step.get("fan_out")
+            if fo is not None:
+                if step_type not in ("llm_agent", "deep_agent"):
+                    warnings.append(f"step {i} ({name or '?'}): fan_out only on llm_agent or deep_agent")
+                elif not isinstance(fo, dict):
+                    warnings.append(f"step {i} ({name or '?'}): fan_out must be an object")
+                elif not str(fo.get("source") or "").strip():
+                    warnings.append(f"step {i} ({name or '?'}): fan_out.source is required")
         if step_type == "deep_agent":
             phases = step.get("phases")
             if not isinstance(phases, list):
@@ -695,6 +818,7 @@ def _validate_playbook_steps(steps: List[Dict[str, Any]]) -> List[str]:
                         warnings.append(f"step {i} ({name or '?'}): phase {pj} (refine) requires 'target' (phase name)")
         if name:
             seen_names.add(name)
+    _warn_missing_exclusive(steps, warnings)
     return warnings
 
 
@@ -729,22 +853,23 @@ async def list_available_actions_tool(
             })
         count = len(actions)
         lines = [f"Found {count} action(s):"]
-        for a in actions[:30]:
+        for a in actions:
             lines.append(f"- **{a['name']}** ({a['category']}): {a.get('description', '')[:80]}")
-        if count > 30:
-            lines.append(f"... and {count - 30} more")
         guide = (
             "\n\nCONFIRM-FLOW RULE: Tools that accept confirmed (e.g. update_playbook, create_playbook, create_agent_profile, update_agent_profile, delete_playbook, delete_agent_profile, assign_playbook_to_agent, set_agent_profile_status, create_agent_schedule, bind_data_source_to_agent, create_skill, propose_skill_update): (1) After showing a preview (confirmed=False), when the user approves in any later message (e.g. 'yes', 'go ahead', 'apply'), you MUST call the same tool again with the same arguments and confirmed=True in your very next response—before replying in text. (2) Use the same playbook_id and updates (or other arguments) from your earlier tool call in this conversation. (3) Do not tell the user the change is done until you have called with confirmed=True and received a success response. Do not only acknowledge in text—make the call.\n"
             "\nPLAYBOOK DEFINITION SHAPE (same for create_playbook and update_playbook):\n"
             "- Playbook definition: {\"steps\": [...], \"run_context\": \"interactive\" | \"background\"}. Steps is a list of step objects.\n"
-            "- Step fields (required per type: step_type, output_key; tool needs action; llm_task needs prompt/prompt_template; llm_agent has optional available_tools, may be empty for toolless steps; deep_agent needs phases): name, step_type, output_key, action (tool), inputs, params, prompt, prompt_template, condition, branch_condition, then_steps, else_steps, parallel_steps, steps (loop), available_tools, max_iterations, system_prompt_additions, phases (deep_agent), skill_ids, model_override, output_schema, timeout_minutes, on_reject.\n"
+            "- Step fields (required per type: step_type, output_key; tool needs action; llm_task needs prompt/prompt_template; llm_agent has optional available_tools, may be empty for toolless steps; deep_agent needs phases): name, step_type, output_key, action (tool), inputs, params, prompt, prompt_template, condition, branch_condition, then_steps, else_steps, parallel_steps, steps (loop), available_tools, max_iterations, system_prompt_additions, phases (deep_agent), skill_ids, discovery_mode, max_discovered_skills, model_override, output_schema, timeout_minutes, on_reject, subagents, delegation_mode, samples, selection_strategy, selection_criteria, fan_out.\n"
+            "- subagents (llm_agent, deep_agent): optional list of {agent_profile_id, playbook_id?, role?, accepts?, returns?}. Adds delegate_subagent_* tools and shared scratchpad. delegation_mode: supervised (default, LLM delegates via tools), parallel (pre-run all subagents then synthesize), sequential (pre-run subagents in order then synthesize).\n"
+            "- samples (llm_agent, deep_agent): optional integer 1–5 (default 1). Runs the step N times independently with raised temperature and selects the best result. selection_strategy: llm_judge (default, LLM picks best) or highest_score (deep_agent only, uses last evaluate phase score from phase_trace; falls back to llm_judge if no scores). selection_criteria: optional string for the judge when using llm_judge.\n"
+            "- fan_out (llm_agent, deep_agent): optional object {source, item_variable?, max_items?, merge?}. Reads a list from playbook_state (source is a dot-path like plan.items), runs the step once per item in parallel (capped by max_items, default 10), merges results. item_variable (default current_item) is injected into playbook_state and inputs for each copy — use {current_item} in prompts. merge: list (default: items array plus formatted join) or concat (formatted sections per item).\n"
             "- For get_playbook_detail: when the response includes a 'Full definition' JSON block, use that exact structure in update_playbook (with your edits) to avoid dropping fields.\n"
             "\nPLAYBOOK WIRING RULES:\n"
             "- Use exactly ONE opening brace and ONE closing brace: {output_key.field}. If you use {{double}} the ref breaks (system will see unknown step). Exception: {{#var}}...{{/var}} is valid for conditional blocks.\n"
             "- Conditional blocks: wrap a section in {{#var}}...{{/var}}; the section is included only when var is non-empty. Example: {{#editor}}Document: {editor}{{/editor}} shows the document block only when a file is open. Expression conditionals: {{#editor_length > 5000}}...{{/editor_length > 5000}} or {{#search_docs.count > 0}}...{{/search_docs.count > 0}} (step output fields resolve from playbook state). In branch_condition you can use: 'X is defined' / 'X is not defined'; 'X matches \"regex\"'; AND / OR (e.g. {editor_document_type} == \"fiction\" AND {editor_selection} is defined).\n"
             "- Tool step inputs: wire with {output_key.field} e.g. \"start_datetime\": \"{get_date.formatted}\" or \"{today}\" for literals.\n"
             "- LLM task prompt strings: embed refs with single braces e.g. \"Weather: {get_weather.formatted}, Cal: {fetch_cal.formatted}\".\n"
-            "- Valid runtime variables: today, today_end, tomorrow, today_day_of_week, query, query_length, history, user_weather_location, trigger_input, editor, editor_refs, editor_document_id, editor_filename, editor_length, editor_document_type, editor_cursor_offset, editor_selection, editor_current_section, editor_current_heading, editor_previous_section, editor_next_section, editor_section_index, editor_adjacent_sections, editor_total_sections, editor_is_first_section, editor_is_last_section, editor_ref_count, document_context, pinned_document_id, last_tool_results, profile, and any editor_refs_CATEGORY (e.g. editor_refs_rules, editor_refs_style). Do NOT invent other names — use upstream output_key (e.g. {fetch_todos.formatted}).\n"
+            "- Valid runtime variables: today, today_end, tomorrow, today_day_of_week, query, query_length, history, user_weather_location, trigger_input, editor, editor_refs, editor_document_id, editor_filename, editor_length, editor_document_type, editor_cursor_offset, editor_selection, editor_current_section, editor_current_heading, editor_previous_section, editor_next_section, editor_section_index, editor_adjacent_sections, editor_total_sections, editor_toc, editor_is_first_section, editor_is_last_section, editor_ref_count, document_context, pinned_document_id, last_tool_results, profile, and any editor_refs_CATEGORY (e.g. editor_refs_rules, editor_refs_style). Do NOT invent other names — use upstream output_key (e.g. {fetch_todos.formatted}).\n"
             "- editor: full content of the currently open file (filename + content block). Empty if no file is open.\n"
             "- editor_filename: base filename of the open file (e.g. chapter_01.md). Empty if no file open.\n"
             "- editor_length: character count of the open file body (number as string). Use in conditionals: {{#editor_length > 5000}}...{{/editor_length > 5000}} to include a block only when the document is over 5000 characters; use {{#editor_length < 5000}} for short documents.\n"
@@ -787,6 +912,15 @@ async def list_available_actions_tool(
             "- llm_agent available_tools: list of action names the agent can call (e.g. [\"send_email\", \"list_todos\"]). "
             "May be empty for conversational/reasoning-only steps (toolless agent: one LLM call, no tool loop).\n"
             "- deep_agent = ONE step that runs a multi-phase LangGraph workflow. Requires a \"phases\" list; each phase has type (reason, act, search, evaluate, synthesize, refine), name, and optional prompt/available_tools/criteria/target. Use deep_agent when you need a fixed sequence of distinct phases (e.g. reason -> search -> evaluate -> synthesize) with different prompts or tools per phase; use llm_agent when you want a single ReAct loop with free-form tool choice.\n"
+            "\nSKILLS & DISCOVERY (llm_agent and deep_agent steps):\n"
+            "- skill_ids: list of skill UUID strings. Call list_skills first and use each skill's id field (not name or slug). Alias \"skills\" is accepted. Pinned skills are always attached regardless of discovery_mode.\n"
+            "- discovery_mode (or skill_discovery_mode): \"off\" | \"auto\" | \"catalog\" | \"full\". If omitted, effective mode is typically auto (same as Workflow Composer default).\n"
+            "  * off — only pinned skill_ids; no automatic skill attachment from the catalog or search.\n"
+            "  * auto — before the step runs, semantic search matches skills to the step prompt and attaches up to max_discovered_skills; recommended default for most agents.\n"
+            "  * catalog — injects a compressed catalog of core skills into the system prompt so the model knows what procedures exist; use when the agent should choose procedures by name.\n"
+            "  * full — catalog injection plus the model may call search_and_acquire_skills during the ReAct loop to attach more skills at runtime; use for open-ended or multi-domain work.\n"
+            "- max_discovered_skills: integer 1–10 (default 3); caps how many skills auto/catalog/full discovery adds in the pre-run phase.\n"
+            "- Workflow: list_skills (or get_skill_detail) to pick UUIDs → set skill_ids on the step; ensure available_tools covers tools required by those skills or enable discovery.\n"
             "\nEXAMPLE PLAYBOOK (morning briefing pattern):\n"
             "Step 1: step_type: tool, action: get_my_profile, output_key: user_profile, inputs: {}\n"
             "Step 2: step_type: tool, action: get_weather, output_key: weather_data, inputs: {data_types: \"current,forecast\"}\n"
@@ -794,6 +928,11 @@ async def list_available_actions_tool(
             "Step 4: step_type: llm_task, output_key: briefing, prompt: \"Weather: {weather_data.formatted}\\nCalendar: {cal_events.formatted}\\nCompose a morning briefing.\"\n"
             "Step 5: step_type: tool, action: send_email, output_key: delivery, inputs: {to: \"{user_profile.email}\", subject: \"Briefing for {today}\", body: \"{briefing.formatted}\", confirmed: true}\n"
             "  (Alternative: action: send_channel_message, inputs: {channel: \"email\", to_email: \"{user_profile.email}\", subject: \"Briefing for {today}\", message: \"{briefing.formatted}\"})\n"
+            "\nEXAMPLE (llm_agent with pinned skill + discovery; replace UUID via list_skills):\n"
+            "Step: step_type: llm_agent, name: research, output_key: research_result, "
+            "available_tools: [\"search_documents\", \"search_web\"], "
+            "skill_ids: [\"<uuid-from-list_skills>\"], discovery_mode: \"auto\", max_discovered_skills: 3, max_iterations: 8, "
+            "prompt: \"Research the following topic and summarize findings: {query}\"\n"
         )
         formatted = "\n".join(lines) + guide
         return {"actions": actions, "count": count, "formatted": formatted}
@@ -950,15 +1089,27 @@ async def create_playbook_tool(
     if not confirmed:
         step_count = len(steps) if isinstance(steps, list) else 0
         formatted = f"[Preview] Would create playbook: **{name}** ({step_count} steps)"
-        llm_agent_steps = [
-            (s.get("name") or s.get("output_key") or "?", s.get("max_iterations"))
-            for s in (steps if isinstance(steps, list) else [])
-            if isinstance(s, dict) and s.get("step_type") == "llm_agent"
-        ]
-        if llm_agent_steps:
-            formatted += "\nLLM agent steps (max_iterations): " + ", ".join(
-                f"{n}={v if v is not None else '3 (default)'}" for n, v in llm_agent_steps
-            )
+        from orchestrator.engines.tool_resolution import skill_discovery_mode_from_step
+
+        agent_step_previews = []
+        for s in steps if isinstance(steps, list) else []:
+            if not isinstance(s, dict):
+                continue
+            stype = s.get("step_type")
+            if stype not in ("llm_agent", "deep_agent"):
+                continue
+            label = s.get("name") or s.get("output_key") or "?"
+            n_skills = len(list(s.get("skill_ids") or s.get("skills") or []))
+            dm = skill_discovery_mode_from_step(s)
+            parts = [f"skill_ids={n_skills}", f"discovery_mode={dm}"]
+            if stype == "llm_agent":
+                mi = s.get("max_iterations")
+                parts.insert(0, f"max_iterations={mi if mi is not None else '3 (default)'}")
+            elif s.get("max_iterations") is not None:
+                parts.insert(0, f"max_iterations={s.get('max_iterations')}")
+            agent_step_previews.append(f"{stype} {label} ({', '.join(parts)})")
+        if agent_step_previews:
+            formatted += "\nAgent steps (llm_agent / deep_agent): " + "; ".join(agent_step_previews)
         if validate_warnings:
             formatted += "\nValidation warnings: " + "; ".join(validate_warnings[:5])
         if wiring_errors:
@@ -1350,7 +1501,7 @@ async def get_playbook_detail_tool(
             f"Description: {playbook.get('description') or '(none)'}",
             f"run_context: {run_context}",
             f"Steps: {len(steps)}",
-            "When updating, preserve all step fields you are not editing (prompt, prompt_template, inputs, params, condition, then_steps, else_steps, parallel_steps, phases, available_tools, max_iterations, skill_ids, etc.).",
+            "When updating, preserve all step fields you are not editing (prompt, prompt_template, inputs, params, condition, then_steps, else_steps, parallel_steps, phases, available_tools, max_iterations, skill_ids, discovery_mode, max_discovered_skills, etc.).",
         ]
         if triggers:
             lines.append(f"Triggers: {len(triggers)} pattern(s)")
@@ -1552,7 +1703,7 @@ async def list_skills_tool(
         skills = await client.list_skills(user_id=user_id, category=category, include_builtin=True)
         count = len(skills)
         lines = [f"Found {count} skill(s):"]
-        for s in skills[:25]:
+        for s in skills:
             name = s.get("name") or s.get("slug") or "?"
             sid = s.get("id") or ""
             cat = s.get("category") or "General"
@@ -1560,8 +1711,6 @@ async def list_skills_tool(
             desc_snippet = (s.get("description") or "")[:60]
             desc_str = f": {desc_snippet}" if desc_snippet else ""
             lines.append(f"- **{name}** (id: {sid}) [{cat}]{builtin}{desc_str}")
-        if count > 25:
-            lines.append(f"... and {count - 25} more")
         return {"skills": skills, "count": count, "formatted": "\n".join(lines)}
     except Exception as e:
         logger.error("list_skills_tool error: %s", e)

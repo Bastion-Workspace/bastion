@@ -36,6 +36,37 @@ service ConnectionsService {
   rpc UpdateContact(UpdateContactRequest) returns (UpdateContactResponse);
   rpc DeleteContact(DeleteContactRequest) returns (DeleteContactResponse);
 
+  // Microsoft To Do (Graph)
+  rpc ListTodoLists(ListTodoListsRequest) returns (ListTodoListsResponse);
+  rpc GetTodoTasks(GetTodoTasksRequest) returns (GetTodoTasksResponse);
+  rpc CreateTodoTask(CreateTodoTaskRequest) returns (CreateTodoTaskResponse);
+  rpc UpdateTodoTask(UpdateTodoTaskRequest) returns (UpdateTodoTaskResponse);
+  rpc DeleteTodoTask(DeleteTodoTaskRequest) returns (DeleteTodoTaskResponse);
+
+  // OneDrive / Files (Graph)
+  rpc ListDriveItems(ListDriveItemsRequest) returns (ListDriveItemsResponse);
+  rpc GetDriveItem(GetDriveItemRequest) returns (GetDriveItemResponse);
+  rpc SearchDrive(SearchDriveRequest) returns (SearchDriveResponse);
+  rpc GetFileContent(GetFileContentRequest) returns (GetFileContentResponse);
+  rpc UploadFile(UploadFileRequest) returns (UploadFileResponse);
+  rpc CreateDriveFolder(CreateDriveFolderRequest) returns (CreateDriveFolderResponse);
+  rpc MoveDriveItem(MoveDriveItemRequest) returns (MoveDriveItemResponse);
+  rpc DeleteDriveItem(DeleteDriveItemRequest) returns (DeleteDriveItemResponse);
+
+  // OneNote (Graph)
+  rpc ListOneNoteNotebooks(ListOneNoteNotebooksRequest) returns (ListOneNoteNotebooksResponse);
+  rpc ListOneNoteSections(ListOneNoteSectionsRequest) returns (ListOneNoteSectionsResponse);
+  rpc ListOneNotePages(ListOneNotePagesRequest) returns (ListOneNotePagesResponse);
+  rpc GetOneNotePageContent(GetOneNotePageContentRequest) returns (GetOneNotePageContentResponse);
+  rpc CreateOneNotePage(CreateOneNotePageRequest) returns (CreateOneNotePageResponse);
+
+  // Microsoft Planner (Graph)
+  rpc ListPlannerPlans(ListPlannerPlansRequest) returns (ListPlannerPlansResponse);
+  rpc GetPlannerTasks(GetPlannerTasksRequest) returns (GetPlannerTasksResponse);
+  rpc CreatePlannerTask(CreatePlannerTaskRequest) returns (CreatePlannerTaskResponse);
+  rpc UpdatePlannerTask(UpdatePlannerTaskRequest) returns (UpdatePlannerTaskResponse);
+  rpc DeletePlannerTask(DeletePlannerTaskRequest) returns (DeletePlannerTaskResponse);
+
   // Bot lifecycle management (called by backend)
   rpc RegisterBot(RegisterBotRequest) returns (RegisterBotResponse);
   rpc UnregisterBot(UnregisterBotRequest) returns (UnregisterBotResponse);
@@ -487,6 +518,370 @@ message DeleteContactRequest {
 }
 
 message DeleteContactResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// ============================================================================
+// Microsoft To Do
+// ============================================================================
+
+message TodoList {
+  string id = 1;
+  string display_name = 2;
+  bool is_owner = 3;
+  bool is_shared = 4;
+  string well_known_list_name = 5;
+}
+
+message TodoTask {
+  string id = 1;
+  string list_id = 2;
+  string title = 3;
+  string status = 4;
+  string body = 5;
+  string due_datetime = 6;
+  string importance = 7;
+}
+
+message ListTodoListsRequest {
+  string access_token = 1;
+  string provider = 2;
+}
+
+message ListTodoListsResponse {
+  repeated TodoList lists = 1;
+  optional string error = 2;
+}
+
+message GetTodoTasksRequest {
+  string access_token = 1;
+  string provider = 2;
+  string list_id = 3;
+  int32 top = 4;
+}
+
+message GetTodoTasksResponse {
+  repeated TodoTask tasks = 1;
+  optional string error = 2;
+}
+
+message CreateTodoTaskRequest {
+  string access_token = 1;
+  string provider = 2;
+  string list_id = 3;
+  string title = 4;
+  string body = 5;
+  string due_datetime = 6;
+  string importance = 7;
+}
+
+message CreateTodoTaskResponse {
+  bool success = 1;
+  string task_id = 2;
+  optional string error = 3;
+}
+
+message UpdateTodoTaskRequest {
+  string access_token = 1;
+  string provider = 2;
+  string list_id = 3;
+  string task_id = 4;
+  optional string title = 5;
+  optional string body = 6;
+  optional string status = 7;
+  optional string due_datetime = 8;
+  optional string importance = 9;
+}
+
+message UpdateTodoTaskResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message DeleteTodoTaskRequest {
+  string access_token = 1;
+  string provider = 2;
+  string list_id = 3;
+  string task_id = 4;
+}
+
+message DeleteTodoTaskResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// ============================================================================
+// OneDrive / Files
+// ============================================================================
+
+message DriveItem {
+  string id = 1;
+  string name = 2;
+  string web_url = 3;
+  bool is_folder = 4;
+  string mime_type = 5;
+  int64 size = 6;
+  string parent_id = 7;
+  string last_modified = 8;
+}
+
+message ListDriveItemsRequest {
+  string access_token = 1;
+  string provider = 2;
+  string parent_item_id = 3;
+  int32 top = 4;
+}
+
+message ListDriveItemsResponse {
+  repeated DriveItem items = 1;
+  optional string error = 2;
+}
+
+message GetDriveItemRequest {
+  string access_token = 1;
+  string provider = 2;
+  string item_id = 3;
+}
+
+message GetDriveItemResponse {
+  DriveItem item = 1;
+  optional string error = 2;
+}
+
+message SearchDriveRequest {
+  string access_token = 1;
+  string provider = 2;
+  string query = 3;
+  int32 top = 4;
+}
+
+message SearchDriveResponse {
+  repeated DriveItem items = 1;
+  optional string error = 2;
+}
+
+message GetFileContentRequest {
+  string access_token = 1;
+  string provider = 2;
+  string item_id = 3;
+}
+
+message GetFileContentResponse {
+  string content_base64 = 1;
+  string mime_type = 2;
+  optional string error = 3;
+}
+
+message UploadFileRequest {
+  string access_token = 1;
+  string provider = 2;
+  string parent_item_id = 3;
+  string name = 4;
+  string content_base64 = 5;
+  string mime_type = 6;
+}
+
+message UploadFileResponse {
+  bool success = 1;
+  string item_id = 2;
+  optional string error = 3;
+}
+
+message CreateDriveFolderRequest {
+  string access_token = 1;
+  string provider = 2;
+  string parent_item_id = 3;
+  string name = 4;
+}
+
+message CreateDriveFolderResponse {
+  bool success = 1;
+  string item_id = 2;
+  optional string error = 3;
+}
+
+message MoveDriveItemRequest {
+  string access_token = 1;
+  string provider = 2;
+  string item_id = 3;
+  string new_parent_item_id = 4;
+}
+
+message MoveDriveItemResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message DeleteDriveItemRequest {
+  string access_token = 1;
+  string provider = 2;
+  string item_id = 3;
+}
+
+message DeleteDriveItemResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// ============================================================================
+// OneNote
+// ============================================================================
+
+message OneNoteNotebook {
+  string id = 1;
+  string display_name = 2;
+  string web_url = 3;
+}
+
+message OneNoteSection {
+  string id = 1;
+  string display_name = 2;
+  string notebook_id = 3;
+  string web_url = 4;
+}
+
+message OneNotePage {
+  string id = 1;
+  string title = 2;
+  string section_id = 3;
+  string web_url = 4;
+  string created_time = 5;
+}
+
+message ListOneNoteNotebooksRequest {
+  string access_token = 1;
+  string provider = 2;
+}
+
+message ListOneNoteNotebooksResponse {
+  repeated OneNoteNotebook notebooks = 1;
+  optional string error = 2;
+}
+
+message ListOneNoteSectionsRequest {
+  string access_token = 1;
+  string provider = 2;
+  string notebook_id = 3;
+}
+
+message ListOneNoteSectionsResponse {
+  repeated OneNoteSection sections = 1;
+  optional string error = 2;
+}
+
+message ListOneNotePagesRequest {
+  string access_token = 1;
+  string provider = 2;
+  string section_id = 3;
+  int32 top = 4;
+}
+
+message ListOneNotePagesResponse {
+  repeated OneNotePage pages = 1;
+  optional string error = 2;
+}
+
+message GetOneNotePageContentRequest {
+  string access_token = 1;
+  string provider = 2;
+  string page_id = 3;
+}
+
+message GetOneNotePageContentResponse {
+  string html_content = 1;
+  optional string error = 2;
+}
+
+message CreateOneNotePageRequest {
+  string access_token = 1;
+  string provider = 2;
+  string section_id = 3;
+  string html = 4;
+  string title = 5;
+}
+
+message CreateOneNotePageResponse {
+  bool success = 1;
+  string page_id = 2;
+  optional string error = 3;
+}
+
+// ============================================================================
+// Microsoft Planner
+// ============================================================================
+
+message PlannerPlan {
+  string id = 1;
+  string title = 2;
+  string owner = 3;
+}
+
+message PlannerTask {
+  string id = 1;
+  string plan_id = 2;
+  string title = 3;
+  int32 percent_complete = 4;
+  string due_datetime = 5;
+}
+
+message ListPlannerPlansRequest {
+  string access_token = 1;
+  string provider = 2;
+}
+
+message ListPlannerPlansResponse {
+  repeated PlannerPlan plans = 1;
+  optional string error = 2;
+}
+
+message GetPlannerTasksRequest {
+  string access_token = 1;
+  string provider = 2;
+  string plan_id = 3;
+}
+
+message GetPlannerTasksResponse {
+  repeated PlannerTask tasks = 1;
+  optional string error = 2;
+}
+
+message CreatePlannerTaskRequest {
+  string access_token = 1;
+  string provider = 2;
+  string plan_id = 3;
+  string title = 4;
+  string bucket_id = 5;
+}
+
+message CreatePlannerTaskResponse {
+  bool success = 1;
+  string task_id = 2;
+  optional string error = 3;
+}
+
+message UpdatePlannerTaskRequest {
+  string access_token = 1;
+  string provider = 2;
+  string task_id = 3;
+  optional string title = 4;
+  optional int32 percent_complete = 5;
+  optional string due_datetime = 6;
+}
+
+message UpdatePlannerTaskResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message DeletePlannerTaskRequest {
+  string access_token = 1;
+  string provider = 2;
+  string task_id = 3;
+  string etag = 4;
+}
+
+message DeletePlannerTaskResponse {
   bool success = 1;
   optional string error = 2;
 }

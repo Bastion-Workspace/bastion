@@ -1,14 +1,14 @@
 """
-Roosevelt's Messaging Service
+Messaging service
 Core service for user-to-user messaging operations
 
-BULLY! A well-organized messaging system is like a well-organized cavalry charge!
+Room-based messaging, presence, and delivery helpers.
 """
 
 import logging
 import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional, Tuple
 import asyncpg
 
@@ -191,11 +191,18 @@ class MessagingService:
                     SELECT 
                         r.room_id, r.room_name, r.room_type, r.created_by,
                         r.created_at, r.last_message_at,
+                        r.federation_metadata,
+                        p.status AS federation_peer_status,
+                        p.peer_url AS federation_peer_url,
+                        p.display_name AS federation_peer_display_name,
                         (SELECT COUNT(*) FROM chat_messages cm 
                          WHERE cm.room_id = r.room_id 
                          AND cm.deleted_at IS NULL) as message_count
                     FROM chat_rooms r
                     JOIN room_participants rp ON r.room_id = rp.room_id
+                    LEFT JOIN federation_peers p
+                      ON r.room_type = 'federated'
+                     AND p.peer_id = (r.federation_metadata->>'peer_id')::uuid
                     WHERE rp.user_id = $1
                     ORDER BY r.last_message_at DESC
                     LIMIT $2
@@ -204,6 +211,12 @@ class MessagingService:
                 rooms = []
                 for row in rows:
                     room_dict = dict(row)
+                    fm = room_dict.get("federation_metadata")
+                    if isinstance(fm, str):
+                        try:
+                            room_dict["federation_metadata"] = json.loads(fm)
+                        except Exception:
+                            room_dict["federation_metadata"] = {}
                     
                     # Get participants if requested
                     if include_participants:
@@ -240,7 +253,7 @@ class MessagingService:
                             FROM room_participants
                             WHERE room_id = $1 AND user_id = $2
                         )
-                        AND cm.sender_id != $2
+                        AND cm.sender_id IS DISTINCT FROM $2
                         AND cm.deleted_at IS NULL
                     """, room_dict['room_id'], user_id)
                     room_dict['unread_count'] = unread_count
@@ -494,7 +507,8 @@ class MessagingService:
         sender_id: str,
         content: str,
         message_type: str = 'text',
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        reply_to_message_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Send a message to a room
@@ -504,59 +518,115 @@ class MessagingService:
             sender_id: User ID of sender
             content: Message content
             message_type: 'text', 'ai_share', or 'system'
-            metadata: Optional metadata (for AI shares, etc.)
+            metadata: Optional metadata (for AI shares, mentions, etc.)
+            reply_to_message_id: Optional message ID being replied to
         
         Returns:
             Message dict or None if failed
         """
         await self._ensure_initialized()
         
-        # Validate message length
         if len(content) > settings.MESSAGE_MAX_LENGTH:
-            logger.warning(f"⚠️ Message exceeds max length ({len(content)} > {settings.MESSAGE_MAX_LENGTH})")
             content = content[:settings.MESSAGE_MAX_LENGTH]
         
-        # Encrypt content if enabled
         encrypted_content = encryption_service.encrypt_message(content)
         
         try:
             async with self.db_pool.acquire() as conn:
-                # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", sender_id)
                 
-                # Insert message
                 message_id = str(uuid.uuid4())
-                # Convert metadata to JSON string if present, or None
                 metadata_json = json.dumps(metadata) if metadata else None
                 
                 row = await conn.fetchrow("""
                     INSERT INTO chat_messages 
-                    (message_id, room_id, sender_id, message_content, message_type, metadata)
-                    VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+                    (message_id, room_id, sender_id, message_content, message_type, metadata, reply_to_message_id)
+                    VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
                     RETURNING message_id, created_at
-                """, message_id, room_id, sender_id, encrypted_content, message_type, metadata_json)
+                """, message_id, room_id, sender_id, encrypted_content, message_type, metadata_json,
+                   reply_to_message_id)
                 
-                # Update room's last_message_at
                 await conn.execute("""
-                    UPDATE chat_rooms
-                    SET last_message_at = NOW()
-                    WHERE room_id = $1
+                    UPDATE chat_rooms SET last_message_at = NOW() WHERE room_id = $1
                 """, room_id)
+
+                # Fetch sender info for the response
+                sender_row = await conn.fetchrow(
+                    "SELECT username, display_name, avatar_url FROM users WHERE user_id = $1",
+                    sender_id,
+                )
                 
-                logger.info(f"✅ Message sent to room {room_id} by {sender_id}")
-                
-                return {
+                result = {
                     "message_id": message_id,
                     "room_id": room_id,
                     "sender_id": sender_id,
-                    "content": content,  # Return decrypted for immediate display
+                    "content": content,
                     "message_type": message_type,
-                    "metadata": metadata,  # Return original metadata dict
-                    "created_at": row['created_at'].isoformat()
+                    "metadata": metadata,
+                    "reply_to_message_id": reply_to_message_id,
+                    "created_at": row['created_at'].isoformat(),
                 }
+                if sender_row:
+                    result["username"] = sender_row["username"]
+                    result["display_name"] = sender_row["display_name"]
+                    result["avatar_url"] = sender_row["avatar_url"]
+
+                fed_res = None
+                try:
+                    fed_res = await self._maybe_deliver_federated(room_id, result)
+                    if fed_res:
+                        result["federation_delivery"] = fed_res
+                except Exception as fed_e:
+                    logger.warning("Federated outbound delivery failed (non-fatal): %s", fed_e)
+
+                rt = await conn.fetchrow(
+                    "SELECT room_type FROM chat_rooms WHERE room_id = $1::uuid", room_id
+                )
+                if rt and (rt.get("room_type") or "") == "federated":
+                    if fed_res and fed_res.get("ok"):
+                        st = "delivered"
+                    elif fed_res and (fed_res.get("reason") or "") == "peer_suspended":
+                        st = "peer_suspended"
+                    else:
+                        st = "failed"
+                    await conn.execute(
+                        """
+                        UPDATE chat_messages
+                        SET federation_delivery_status = $2
+                        WHERE message_id = $1::uuid
+                        """,
+                        message_id,
+                        st,
+                    )
+                    result["federation_delivery_status"] = st
+
+                return result
         
         except Exception as e:
-            logger.error(f"❌ Failed to send message: {e}")
+            logger.error(f"Failed to send message: {e}")
+            return None
+
+    async def _maybe_deliver_federated(
+        self, room_id: str, message_dict: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """If room is federated, sign and deliver the message to the peer (HTTP or outbox)."""
+        if not getattr(settings, "FEDERATION_ENABLED", False):
+            return None
+        try:
+            async with self.db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT room_type FROM chat_rooms WHERE room_id = $1::uuid
+                    """,
+                    room_id,
+                )
+            if not row or (row.get("room_type") or "") != "federated":
+                return None
+            from services.federation_message_service import federation_message_service
+
+            return await federation_message_service.deliver_outbound_message(room_id, message_dict)
+        except Exception as e:
+            logger.warning("_maybe_deliver_federated: %s", e)
             return None
     
     async def get_room_messages(
@@ -589,11 +659,22 @@ class MessagingService:
                 if before_message_id:
                     rows = await conn.fetch("""
                         SELECT 
-                            m.message_id, m.sender_id, m.message_content, 
+                            m.message_id, m.sender_id, m.federated_sender_id, m.message_content, 
                             m.message_type, m.metadata, m.created_at,
-                            u.username, u.display_name, u.avatar_url
+                            m.federation_delivery_status,
+                            m.reply_to_message_id, m.is_edited, m.edited_at,
+                            u.username, u.display_name, u.avatar_url,
+                            fu.federated_address AS federated_address,
+                            fu.display_name AS federated_display_name,
+                            fu.avatar_url AS federated_avatar_url,
+                            COALESCE(ru.display_name, rfu.display_name) AS reply_sender_name,
+                            rm.message_content AS reply_content
                         FROM chat_messages m
-                        JOIN users u ON m.sender_id = u.user_id
+                        LEFT JOIN users u ON m.sender_id = u.user_id
+                        LEFT JOIN federated_users fu ON m.federated_sender_id = fu.federated_user_id
+                        LEFT JOIN chat_messages rm ON m.reply_to_message_id = rm.message_id
+                        LEFT JOIN users ru ON rm.sender_id = ru.user_id
+                        LEFT JOIN federated_users rfu ON rm.federated_sender_id = rfu.federated_user_id
                         WHERE m.room_id = $1
                         AND m.deleted_at IS NULL
                         AND m.created_at < (
@@ -605,11 +686,22 @@ class MessagingService:
                 else:
                     rows = await conn.fetch("""
                         SELECT 
-                            m.message_id, m.sender_id, m.message_content, 
+                            m.message_id, m.sender_id, m.federated_sender_id, m.message_content, 
                             m.message_type, m.metadata, m.created_at,
-                            u.username, u.display_name, u.avatar_url
+                            m.federation_delivery_status,
+                            m.reply_to_message_id, m.is_edited, m.edited_at,
+                            u.username, u.display_name, u.avatar_url,
+                            fu.federated_address AS federated_address,
+                            fu.display_name AS federated_display_name,
+                            fu.avatar_url AS federated_avatar_url,
+                            COALESCE(ru.display_name, rfu.display_name) AS reply_sender_name,
+                            rm.message_content AS reply_content
                         FROM chat_messages m
-                        JOIN users u ON m.sender_id = u.user_id
+                        LEFT JOIN users u ON m.sender_id = u.user_id
+                        LEFT JOIN federated_users fu ON m.federated_sender_id = fu.federated_user_id
+                        LEFT JOIN chat_messages rm ON m.reply_to_message_id = rm.message_id
+                        LEFT JOIN users ru ON rm.sender_id = ru.user_id
+                        LEFT JOIN federated_users rfu ON rm.federated_sender_id = rfu.federated_user_id
                         WHERE m.room_id = $1
                         AND m.deleted_at IS NULL
                         ORDER BY m.created_at DESC
@@ -619,13 +711,34 @@ class MessagingService:
                 messages = []
                 for row in rows:
                     msg_dict = dict(row)
-                    # Decrypt content
+                    if msg_dict.get("federated_sender_id"):
+                        msg_dict["display_name"] = (
+                            msg_dict.get("federated_display_name")
+                            or msg_dict.get("federated_address")
+                            or msg_dict.get("display_name")
+                        )
+                        msg_dict["username"] = msg_dict.get("federated_address") or msg_dict.get("username")
+                        msg_dict["avatar_url"] = msg_dict.get("federated_avatar_url") or msg_dict.get("avatar_url")
+                        msg_dict["is_federated"] = True
+                    for k in (
+                        "federated_display_name",
+                        "federated_avatar_url",
+                    ):
+                        msg_dict.pop(k, None)
                     msg_dict['content'] = encryption_service.decrypt_message(msg_dict['message_content'])
-                    del msg_dict['message_content']  # Remove encrypted version
+                    del msg_dict['message_content']
                     
-                    # Get reactions
+                    if msg_dict.get('reply_content'):
+                        msg_dict['reply_preview'] = {
+                            'sender_name': msg_dict.pop('reply_sender_name', None),
+                            'content': encryption_service.decrypt_message(msg_dict.pop('reply_content'))[:200],
+                        }
+                    else:
+                        msg_dict.pop('reply_sender_name', None)
+                        msg_dict.pop('reply_content', None)
+                    
                     reactions = await conn.fetch("""
-                        SELECT emoji, user_id, reaction_id
+                        SELECT emoji, user_id, reaction_id, federated_user_id
                         FROM message_reactions
                         WHERE message_id = $1
                     """, msg_dict['message_id'])
@@ -695,6 +808,84 @@ class MessagingService:
             logger.error(f"❌ Failed to delete message: {e}")
             return False
     
+    async def edit_message(
+        self,
+        message_id: str,
+        user_id: str,
+        new_content: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Edit a message (sender only). Returns updated message dict."""
+        await self._ensure_initialized()
+        if len(new_content) > settings.MESSAGE_MAX_LENGTH:
+            new_content = new_content[:settings.MESSAGE_MAX_LENGTH]
+        encrypted = encryption_service.encrypt_message(new_content)
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                row = await conn.fetchrow("""
+                    UPDATE chat_messages
+                    SET message_content = $1, is_edited = true, edited_at = NOW()
+                    WHERE message_id = $2 AND sender_id = $3 AND deleted_at IS NULL
+                    RETURNING message_id, room_id, sender_id, message_type, metadata, created_at, edited_at
+                """, encrypted, message_id, user_id)
+                if not row:
+                    return None
+                return {
+                    "message_id": row["message_id"],
+                    "room_id": row["room_id"],
+                    "sender_id": row["sender_id"],
+                    "content": new_content,
+                    "message_type": row["message_type"],
+                    "metadata": row["metadata"],
+                    "is_edited": True,
+                    "edited_at": row["edited_at"].isoformat() if row["edited_at"] else None,
+                    "created_at": row["created_at"].isoformat(),
+                }
+        except Exception as e:
+            logger.error(f"Failed to edit message: {e}")
+            return None
+
+    async def search_messages(
+        self,
+        room_id: str,
+        user_id: str,
+        query: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Search messages in a room using ILIKE."""
+        await self._ensure_initialized()
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                pattern = f"%{query}%"
+                rows = await conn.fetch("""
+                    SELECT m.message_id, m.sender_id, m.message_content,
+                           m.message_type, m.metadata, m.created_at,
+                           u.username, u.display_name,
+                           fu.federated_address AS federated_address,
+                           fu.display_name AS federated_display_name
+                    FROM chat_messages m
+                    LEFT JOIN users u ON m.sender_id = u.user_id
+                    LEFT JOIN federated_users fu ON m.federated_sender_id = fu.federated_user_id
+                    WHERE m.room_id = $1 AND m.deleted_at IS NULL
+                    AND m.message_content ILIKE $2
+                    ORDER BY m.created_at DESC
+                    LIMIT $3
+                """, room_id, pattern, limit)
+                results = []
+                for row in rows:
+                    d = dict(row)
+                    if d.get("federated_address"):
+                        d["display_name"] = d.get("federated_display_name") or d.get("federated_address")
+                        d["username"] = d.get("federated_address")
+                    d.pop("federated_display_name", None)
+                    d["content"] = encryption_service.decrypt_message(d.pop("message_content"))
+                    results.append(d)
+                return results
+        except Exception as e:
+            logger.error(f"Failed to search messages: {e}")
+            return []
+
     # =====================
     # REACTION OPERATIONS
     # =====================
@@ -704,17 +895,10 @@ class MessagingService:
         message_id: str,
         user_id: str,
         emoji: str
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """
-        Add emoji reaction to a message
-        
-        Args:
-            message_id: Message UUID
-            user_id: User adding reaction
-            emoji: Emoji character
-        
-        Returns:
-            Reaction ID or None if failed
+        Add emoji reaction to a message.
+        Returns dict with reaction_id, message_id, room_id, emoji on success.
         """
         await self._ensure_initialized()
         
@@ -724,13 +908,45 @@ class MessagingService:
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 reaction_id = str(uuid.uuid4())
-                await conn.execute("""
+                ins = await conn.fetchrow(
+                    """
                     INSERT INTO message_reactions (reaction_id, message_id, user_id, emoji)
-                    VALUES ($1, $2, $3, $4)
-                    ON CONFLICT (message_id, user_id, emoji) DO NOTHING
-                """, reaction_id, message_id, user_id, emoji)
-                
-                return reaction_id
+                    SELECT $1::uuid, $2::uuid, $3, $4
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM message_reactions
+                        WHERE message_id = $2::uuid AND user_id = $3 AND emoji = $4
+                    )
+                    RETURNING reaction_id
+                    """,
+                    reaction_id,
+                    message_id,
+                    user_id,
+                    emoji,
+                )
+                row = await conn.fetchrow(
+                    "SELECT room_id FROM chat_messages WHERE message_id = $1::uuid",
+                    message_id,
+                )
+                if ins and ins.get("reaction_id"):
+                    rid = ins["reaction_id"]
+                else:
+                    rid = await conn.fetchval(
+                        """
+                        SELECT reaction_id FROM message_reactions
+                        WHERE message_id = $1::uuid AND user_id = $2 AND emoji = $3
+                        """,
+                        message_id,
+                        user_id,
+                        emoji,
+                    )
+                if not rid or not row:
+                    return None
+                return {
+                    "reaction_id": str(rid),
+                    "message_id": message_id,
+                    "room_id": str(row["room_id"]),
+                    "emoji": emoji,
+                }
         
         except Exception as e:
             logger.error(f"❌ Failed to add reaction: {e}")
@@ -740,16 +956,9 @@ class MessagingService:
         self,
         reaction_id: str,
         user_id: str
-    ) -> bool:
+    ) -> Optional[Dict[str, Any]]:
         """
-        Remove an emoji reaction
-        
-        Args:
-            reaction_id: Reaction UUID
-            user_id: User removing reaction
-        
-        Returns:
-            True if successful
+        Remove an emoji reaction. Returns deleted row info dict or None.
         """
         await self._ensure_initialized()
         
@@ -758,16 +967,32 @@ class MessagingService:
                 # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
+                prev = await conn.fetchrow(
+                    """
+                    SELECT reaction_id, message_id, room_id, emoji, user_id, federated_user_id
+                    FROM message_reactions
+                    WHERE reaction_id = $1::uuid AND user_id = $2
+                    """,
+                    reaction_id,
+                    user_id,
+                )
                 result = await conn.execute("""
                     DELETE FROM message_reactions
                     WHERE reaction_id = $1 AND user_id = $2
                 """, reaction_id, user_id)
                 
-                return result == "DELETE 1"
+                if result == "DELETE 1" and prev:
+                    return {
+                        "reaction_id": str(prev["reaction_id"]),
+                        "message_id": str(prev["message_id"]),
+                        "room_id": str(prev["room_id"]),
+                        "emoji": prev["emoji"],
+                    }
+                return None
         
         except Exception as e:
             logger.error(f"❌ Failed to remove reaction: {e}")
-            return False
+            return None
     
     # =====================
     # PRESENCE OPERATIONS
@@ -956,6 +1181,27 @@ class MessagingService:
             logger.error(f"❌ Failed to get unread counts: {e}")
             return {}
 
+    async def get_message_federation_wire_id(self, message_id: str) -> Optional[str]:
+        """BFP message id for cross-instance reactions (remote id if mirrored, else local)."""
+        await self._ensure_initialized()
+        try:
+            async with self.db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT COALESCE(
+                        NULLIF(metadata->>'federation_remote_message_id', ''),
+                        message_id::text
+                    ) AS wire
+                    FROM chat_messages
+                    WHERE message_id = $1::uuid AND deleted_at IS NULL
+                    """,
+                    message_id,
+                )
+                return str(row["wire"]) if row and row.get("wire") else None
+        except Exception as e:
+            logger.warning("get_message_federation_wire_id failed: %s", e)
+            return None
+
     async def get_room_participants(self, room_id: str) -> List[Dict[str, Any]]:
         """
         Get all participants in a specific room
@@ -1009,8 +1255,38 @@ class MessagingService:
                     SET last_read_at = NOW()
                     WHERE room_id = $1 AND user_id = $2
                 """, room_id, user_id)
-                
-                return result == "UPDATE 1"
+                ok = result == "UPDATE 1"
+                if ok and getattr(settings, "FEDERATION_ENABLED", False):
+                    rtype = await conn.fetchrow(
+                        "SELECT room_type FROM chat_rooms WHERE room_id = $1::uuid",
+                        room_id,
+                    )
+                    if rtype and (rtype.get("room_type") or "") == "federated":
+                        pref = await conn.fetchrow(
+                            """
+                            SELECT federation_share_read_receipts
+                            FROM users WHERE user_id = $1
+                            """,
+                            user_id,
+                        )
+                        share = True
+                        if pref and pref.get("federation_share_read_receipts") is False:
+                            share = False
+                        if share:
+                            from services.federation_message_service import (
+                                federation_message_service,
+                            )
+
+                            ts = datetime.now(timezone.utc).isoformat()
+                            try:
+                                await federation_message_service.deliver_outbound_read_receipt(
+                                    room_id, user_id, ts
+                                )
+                            except Exception as fre:
+                                logger.warning(
+                                    "Federated read receipt forward failed: %s", fre
+                                )
+                return ok
         except Exception as e:
             logger.error(f"❌ Failed to mark room {room_id} as read for user {user_id}: {e}")
             return False

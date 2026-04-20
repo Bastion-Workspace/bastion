@@ -100,7 +100,7 @@ def make_json_safe(obj: Any, max_depth: int = 10) -> Any:
     # For other types, convert to string
     try:
         return str(obj)[:1000]  # Limit string length
-    except:
+    except Exception:
         return "<unserializable_object>"
 
 

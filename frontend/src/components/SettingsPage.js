@@ -60,6 +60,7 @@ import {
   FolderOpen,
   MusicNote,
   RssFeed as RssFeedIcon,
+  MenuBook,
   Info,
   Visibility,
   VisibilityOff,
@@ -68,6 +69,7 @@ import {
   Lock,
   Palette,
   BrightnessAuto,
+  Wallpaper,
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -89,6 +91,9 @@ import UserLLMProviders from './UserLLMProviders';
 import UserVoiceProviders from './UserVoiceProviders';
 import BrowserSessionManagement from './agent-factory/BrowserSessionManagement';
 import RSSFeedSettings from './RSSFeedSettings';
+import SettingsEbooksOpdsSection from './settings/SettingsEbooksOpdsSection';
+import BbsWallpaperSettingsTab from './settings/BbsWallpaperSettingsTab';
+import UiWallpaperSettingsSection from './settings/UiWallpaperSettingsSection';
 
 // Model Status Display Component
 const ModelStatusDisplay = () => {
@@ -275,20 +280,30 @@ const SettingsPage = () => {
     const status = urlParams.get('connections');
     if (status === 'success') {
       setSnackbar({ open: true, message: 'Email connected successfully.', severity: 'success' });
-      setCurrentTab(7); // Connections tab
-      urlParams.delete('connections');
-      const newSearch = urlParams.toString();
-      window.history.replaceState({}, '', newSearch ? `?${newSearch}` : window.location.pathname);
+      setSearchParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          p.delete('connections');
+          p.set('tab', 'connections');
+          return p;
+        },
+        { replace: true }
+      );
     } else if (status === 'error') {
       const msg = urlParams.get('message') || 'Connection failed.';
       setSnackbar({ open: true, message: msg, severity: 'error' });
-      setCurrentTab(7);
-      urlParams.delete('connections');
-      urlParams.delete('message');
-      const newSearch = urlParams.toString();
-      window.history.replaceState({}, '', newSearch ? `?${newSearch}` : window.location.pathname);
+      setSearchParams(
+        (prev) => {
+          const p = new URLSearchParams(prev);
+          p.delete('connections');
+          p.delete('message');
+          p.set('tab', 'connections');
+          return p;
+        },
+        { replace: true }
+      );
     }
-  }, []);
+  }, [setSearchParams]);
 
   const { data: useAdminModelsData } = useQuery(
     'useAdminModels',
@@ -1712,11 +1727,13 @@ const SettingsPage = () => {
 
   const tabs = [
     { id: 'profile', label: 'User Profile', icon: <Person /> },
+    { id: 'wallpaper', label: 'Wallpaper', icon: <Wallpaper /> },
     { id: 'appearance', label: 'Appearance', icon: <Palette /> },
     { id: 'personas', label: 'Personas', icon: <Psychology /> },
     { id: 'models', label: 'Models', icon: <Settings /> },
     { id: 'news', label: 'News', icon: <DescriptionIcon /> },
     { id: 'rss-feeds', label: 'RSS Feeds', icon: <RssFeedIcon /> },
+    { id: 'ebooks-opds', label: 'Ebooks (OPDS)', icon: <MenuBook /> },
     { id: 'org', label: 'Org-Mode', icon: <ListAlt /> },
     { id: 'media', label: 'Media', icon: <MusicNote /> },
     { id: 'connections', label: 'Connections', icon: <Email /> },
@@ -1831,7 +1848,7 @@ const SettingsPage = () => {
   };
 
   return (
-    <Box>
+    <Box sx={{ px: { xs: 2, sm: 3 }, py: 2 }}>
       <Typography variant="h4" gutterBottom>
         Settings
       </Typography>
@@ -2496,6 +2513,20 @@ const SettingsPage = () => {
       {currentTab === 1 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
+            <UiWallpaperSettingsSection />
+          </Grid>
+          <Grid item xs={12}>
+            <Divider sx={{ my: 1 }} />
+          </Grid>
+          <Grid item xs={12}>
+            <BbsWallpaperSettingsTab />
+          </Grid>
+        </Grid>
+      )}
+
+      {currentTab === 2 && (
+        <Grid container spacing={3}>
+          <Grid item xs={12}>
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -2585,7 +2616,7 @@ const SettingsPage = () => {
         </Grid>
       )}
 
-      {currentTab === 2 && (
+      {currentTab === 3 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
             <motion.div
@@ -2737,7 +2768,7 @@ const SettingsPage = () => {
         </DialogActions>
       </Dialog>
 
-      {currentTab === 3 && (
+      {currentTab === 4 && (
         <Grid container spacing={3}>
 
         {/* User-level LLM providers (toggle + own API keys / models) */}
@@ -3403,7 +3434,7 @@ const SettingsPage = () => {
       )}
 
       {/* News Settings Tab */}
-      {currentTab === 4 && (
+      {currentTab === 5 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
             <motion.div
@@ -3542,7 +3573,7 @@ const SettingsPage = () => {
         </Grid>
       )}
 
-      {currentTab === 5 && (
+      {currentTab === 6 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3552,8 +3583,18 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
+      {currentTab === 7 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <SettingsEbooksOpdsSection />
+        </motion.div>
+      )}
+
       {/* Org-Mode Settings Tab */}
-      {currentTab === 6 && (
+      {currentTab === 8 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3564,7 +3605,7 @@ const SettingsPage = () => {
       )}
 
       {/* Media Settings Tab */}
-      {currentTab === 7 && (
+      {currentTab === 9 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3575,7 +3616,7 @@ const SettingsPage = () => {
       )}
 
       {/* Connections Tab */}
-      {currentTab === 8 && (
+      {currentTab === 10 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3586,7 +3627,7 @@ const SettingsPage = () => {
       )}
 
       {/* Browser Sessions Tab */}
-      {currentTab === 9 && (
+      {currentTab === 11 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3597,7 +3638,7 @@ const SettingsPage = () => {
       )}
 
       {/* Database Management Tab */}
-      {currentTab === 10 && user?.role === 'admin' && (
+      {currentTab === 12 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -3846,7 +3887,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 11 && user?.role === 'admin' && (
+      {currentTab === 13 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

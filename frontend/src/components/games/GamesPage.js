@@ -5,8 +5,16 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import SolitaireGame from './solitaire/SolitaireGame';
 import LemonadeGame from './lemonade/LemonadeGame';
+import OregonTrailGame from './oregon-trail/OregonTrailGame';
 
 const GAMES = [
+  {
+    id: 'oregon-trail',
+    title: 'The Oregon Trail',
+    description: 'LLM-powered 1848 wagon journey. Dynamic AI narrator, NPC conversations, and creative problem solving across 2,170 miles.',
+    storageKey: 'bastion_oregon_trail',
+    serverSaved: true,
+  },
   {
     id: 'solitaire',
     title: 'Solitaire',
@@ -32,7 +40,8 @@ const GamesPage = () => {
     return <Navigate to="/documents" replace />;
   }
 
-  const hasSavedGame = (storageKey) => {
+  const hasSavedGame = (storageKey, serverSaved) => {
+    if (serverSaved) return false;
     try {
       const raw = localStorage.getItem(`${storageKey}_${userId}`);
       if (!raw) return false;
@@ -45,6 +54,13 @@ const GamesPage = () => {
     }
   };
 
+  if (gameId === 'oregon-trail') {
+    return (
+      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <OregonTrailGame userId={userId} onBack={() => navigate('/games')} />
+      </Box>
+    );
+  }
   if (gameId === 'solitaire') {
     return (
       <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -76,7 +92,7 @@ const GamesPage = () => {
                 <CardContent sx={{ width: '100%' }}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                     <Typography variant="h6">{game.title}</Typography>
-                    {hasSavedGame(game.storageKey) && (
+                    {hasSavedGame(game.storageKey, game.serverSaved) && (
                       <Chip label="Resume" color="primary" size="small" />
                     )}
                   </Box>

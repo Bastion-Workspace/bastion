@@ -13,10 +13,6 @@ from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
 
-_MAX_FEEDS_IN_FORMATTED = 60
-_MAX_ARTICLES_IN_FORMATTED = 15
-
-
 def _truncate_url(url: str, max_len: int = 72) -> str:
     u = (url or "").strip()
     if len(u) <= max_len:
@@ -43,7 +39,6 @@ def _format_feeds_for_llm(feeds: List[Dict[str, Any]], total_count: Optional[int
         grouped.keys(),
         key=lambda k: (k == "Uncategorized", k.lower()),
     )
-    shown = 0
     for cat in category_order:
         parts.append(f"--- {cat} ---")
         bucket = sorted(
@@ -51,11 +46,6 @@ def _format_feeds_for_llm(feeds: List[Dict[str, Any]], total_count: Optional[int
             key=lambda x: ((x.get("feed_name") or "") or "").lower(),
         )
         for f in bucket:
-            if shown >= _MAX_FEEDS_IN_FORMATTED:
-                omitted = count - shown
-                parts.append(f"... ({omitted} more feed(s) not listed; narrow scope or paginate in a follow-up if needed.)")
-                return "\n".join(parts)
-            shown += 1
             name = f.get("feed_name", "?")
             fid = f.get("feed_id", "")
             url = _truncate_url(f.get("feed_url") or "")
@@ -251,8 +241,7 @@ class GetRssArticlesParams(BaseModel):
 def _format_article_digest_lines(articles: List[Dict[str, Any]]) -> List[str]:
     """Short per-article lines for LLM formatted output."""
     lines: List[str] = []
-    cap = _MAX_ARTICLES_IN_FORMATTED
-    for i, a in enumerate(articles[:cap], 1):
+    for i, a in enumerate(articles, 1):
         if not isinstance(a, dict):
             continue
         title = ((a.get("title") or "") or "")[:120]
@@ -280,8 +269,6 @@ def _format_article_digest_lines(articles: List[Dict[str, Any]]) -> List[str]:
         lines.append(line2)
         if line3_parts:
             lines.append(f"      {' | '.join(line3_parts)}")
-    if len(articles) > cap:
-        lines.append(f"  ... and {len(articles) - cap} more (see structured articles).")
     return lines
 
 
@@ -688,10 +675,8 @@ async def get_unread_counts_tool(user_id: str = "system") -> Dict[str, Any]:
             return {"counts": {}, "success": False, "error": err, "formatted": f"Error: {err}"}
         counts = result.get("counts") or {}
         lines = [f"Unread counts for {len(counts)} feed(s):"]
-        for fid, n in list(counts.items())[:30]:
+        for fid, n in sorted(counts.items(), key=lambda kv: (kv[0] or "")):
             lines.append(f"  {fid}: {n}")
-        if len(counts) > 30:
-            lines.append(f"  ... and {len(counts) - 30} more feeds.")
         return {
             "counts": counts,
             "success": True,

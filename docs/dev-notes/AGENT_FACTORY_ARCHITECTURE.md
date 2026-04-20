@@ -291,7 +291,6 @@ Approval steps support `on_reject`: `stop`, `skip`, or `continue`.
 | `data_source_connectors` | Connector templates |
 | `agent_data_sources` | Profile ↔ connector + encrypted credentials |
 | `agent_plugin_configs` | Per-profile plugin secrets |
-| `agent_service_bindings` | Profile ↔ `external_connections` (email/messaging scope) |
 | `agent_execution_log` | Runs: status, duration, tokens, cost, `metadata.execution_trace`, `trigger_type`, `schedule_id` |
 | `agent_discoveries` | Structured discovery rows per execution |
 | `agent_schedules` | Cron/interval, circuit breaker (`consecutive_failures`, `max_consecutive_failures`) |

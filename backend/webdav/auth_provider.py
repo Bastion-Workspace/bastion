@@ -85,13 +85,13 @@ class PlatoAuthController(BaseDomainController):
             bool: True if authentication successful, False otherwise
         """
         try:
-            logger.info(f"🔐 WebDAV auth attempt for user: {user_name}")
+            logger.debug(f"🔐 WebDAV auth attempt for user: {user_name}")
             
             # Verify credentials synchronously
             user_info = self._verify_credentials_sync(user_name, password)
             
             if user_info:
-                logger.info(f"✅ WebDAV auth SUCCESS for user: {user_name}")
+                logger.debug(f"✅ WebDAV auth SUCCESS for user: {user_name}")
                 # Store user info in environ for later use
                 environ["webdav.auth.user_name"] = user_name
                 environ["webdav.auth.user_id"] = user_info['user_id']
@@ -119,7 +119,7 @@ class PlatoAuthController(BaseDomainController):
         """
         conn = None
         try:
-            logger.info(f"🔍 Connecting to database: {self.db_config['host']}:{self.db_config['port']}/{self.db_config['database']}")
+            logger.debug(f"🔍 Connecting to database: {self.db_config['host']}:{self.db_config['port']}/{self.db_config['database']}")
             
             # Create synchronous database connection
             conn = psycopg2.connect(
@@ -130,12 +130,12 @@ class PlatoAuthController(BaseDomainController):
                 database=self.db_config['database']
             )
             
-            logger.info(f"✅ Database connected")
+            logger.debug(f"✅ Database connected")
             
             cur = conn.cursor()
             
             # Query database for user
-            logger.info(f"🔍 Querying for user: {username}")
+            logger.debug(f"🔍 Querying for user: {username}")
             cur.execute("""
                 SELECT user_id, username, password_hash, salt, is_active
                 FROM users
@@ -150,22 +150,19 @@ class PlatoAuthController(BaseDomainController):
                 return None
             
             user_id, db_username, password_hash, salt, is_active = user_row
-            logger.info(f"✅ User found: {db_username}, active: {is_active}")
+            logger.debug(f"✅ User found: {db_username}, active: {is_active}")
             
             if not is_active:
                 logger.warning(f"🔍 User inactive: {username}")
                 return None
             
             # Verify password using passlib (same as main auth)
-            logger.info(f"🔍 Verifying password for user: {db_username}")
-            logger.info(f"🔍 Password hash starts with: {password_hash[:10] if password_hash else 'None'}...")
-            logger.info(f"🔍 Password length: {len(password)}")
-            
+            logger.debug(f"🔍 Verifying password for user: {db_username}")
+
             is_valid = pwd_context.verify(password, password_hash)
-            logger.info(f"🔍 Password verification result: {is_valid}")
+            logger.debug(f"🔍 Password verification result: {is_valid}")
             
             if is_valid:
-                logger.info(f"✅ Password verified for user: {db_username}")
                 return {
                     'user_id': user_id,
                     'username': db_username

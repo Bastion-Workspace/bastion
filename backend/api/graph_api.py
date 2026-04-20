@@ -6,19 +6,74 @@ Documents and links are filtered by user_id so file relations never leak across 
 """
 
 import logging
-from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 
 from models.api_models import AuthenticatedUserResponse
 from services.database_manager.database_helpers import fetch_all
 from services.link_extraction_service import get_link_extraction_service
+from services.service_container import get_service_container
 from utils.auth_middleware import get_current_user, require_admin
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["graph"])
+
+
+@router.get("/api/health/vectors")
+async def vectors_health():
+    """Vector stack connectivity and embedding backlog (for ops / UI)."""
+    from config import settings
+
+    from services import vector_embed_backlog as vb
+    from services.vector_store_service import get_vector_store
+
+    enabled = getattr(settings, "VECTOR_EMBEDDING_ENABLED", True)
+    required = getattr(settings, "VECTOR_EMBEDDING_REQUIRED", False)
+    try:
+        vs = await get_vector_store()
+        connected = bool(vs.is_vector_available())
+    except Exception:
+        connected = False
+    try:
+        backlog = await vb.backlog_count()
+    except Exception:
+        backlog = 0
+    return {
+        "vector_embedding_enabled": enabled,
+        "vector_embedding_required": required,
+        "vector_store_available": connected,
+        "backlog_count": backlog,
+    }
+
+
+@router.get("/api/health/neo4j")
+async def neo4j_health():
+    """Neo4j connectivity and knowledge-graph backlog (for ops / UI)."""
+    from config import settings
+
+    from services import kg_write_backlog as kb
+
+    container = await get_service_container()
+    kg = getattr(container, "knowledge_graph_service", None)
+    enabled = getattr(settings, "NEO4J_ENABLED", True)
+    connected = False
+    if kg and kg.is_connected():
+        try:
+            connected = bool(await kg.check_health())
+        except Exception:
+            connected = False
+    try:
+        backlog = await kb.backlog_count()
+    except Exception:
+        backlog = 0
+    return {
+        "neo4j_enabled": enabled,
+        "neo4j_required": getattr(settings, "NEO4J_REQUIRED", False),
+        "neo4j_connected": connected,
+        "backlog_count": backlog,
+    }
 
 
 async def _fetch_link_graph_data(
@@ -236,10 +291,18 @@ async def get_entity_graph(
                 "edges": [],
                 "entity_count": 0,
                 "document_count": 0,
+                "neo4j_connected": False,
             }
-        from services.knowledge_graph_service import KnowledgeGraphService
-        kg_service = KnowledgeGraphService()
-        await kg_service.initialize()
+        container = await get_service_container()
+        kg_service = getattr(container, "knowledge_graph_service", None)
+        if not kg_service or not kg_service.is_connected():
+            return {
+                "nodes": [],
+                "edges": [],
+                "entity_count": 0,
+                "document_count": 0,
+                "neo4j_connected": False,
+            }
         data = await kg_service.get_entity_graph_for_documents(
             document_ids=document_ids,
             entity_limit=entity_limit,
@@ -305,6 +368,7 @@ async def get_entity_graph(
             "edges": edges,
             "entity_count": len(entity_nodes),
             "document_count": len(kg_doc_ids),
+            "neo4j_connected": True,
         }
     except Exception as e:
         logger.error("Entity graph failed: %s", e)
@@ -325,6 +389,7 @@ async def get_unified_graph(
     rls_context = {"user_id": user_id, "user_role": "user"}
     include_files = "files" in (layers or "").lower().replace(" ", "").split(",")
     include_entities = "entities" in (layers or "").lower().replace(" ", "").split(",")
+    neo4j_connected = True
     try:
         nodes = []
         edges = []
@@ -349,6 +414,9 @@ async def get_unified_graph(
                 })
 
         if include_entities:
+            container = await get_service_container()
+            kg_service = getattr(container, "knowledge_graph_service", None)
+            neo4j_connected = bool(kg_service and kg_service.is_connected())
             text_filter = (
                 "AND (LOWER(filename) LIKE '%.org' OR LOWER(filename) LIKE '%.md' OR LOWER(filename) LIKE '%.txt')"
             )
@@ -366,16 +434,18 @@ async def get_unified_graph(
             document_ids = [r["document_id"] for r in doc_rows]
             doc_meta_by_id_from_entity = {r["document_id"]: r for r in doc_rows}
             if document_ids:
-                from services.knowledge_graph_service import KnowledgeGraphService
-                kg_service = KnowledgeGraphService()
-                await kg_service.initialize()
-                data = await kg_service.get_entity_graph_for_documents(
-                    document_ids=document_ids,
-                    entity_limit=entity_limit,
-                )
-                entity_nodes = data.get("entity_nodes") or []
-                kg_doc_ids = set(data.get("document_ids") or [])
-                co_occurrence_edges = data.get("co_occurrence_edges") or []
+                if kg_service and kg_service.is_connected():
+                    data = await kg_service.get_entity_graph_for_documents(
+                        document_ids=document_ids,
+                        entity_limit=entity_limit,
+                    )
+                    entity_nodes = data.get("entity_nodes") or []
+                    kg_doc_ids = set(data.get("document_ids") or [])
+                    co_occurrence_edges = data.get("co_occurrence_edges") or []
+                else:
+                    entity_nodes = []
+                    kg_doc_ids = set()
+                    co_occurrence_edges = []
                 seen_file_ids = {n["id"] for n in nodes if n.get("node_type") == "file"}
                 for en in entity_nodes:
                     name = en.get("name") or ""
@@ -416,7 +486,11 @@ async def get_unified_graph(
                         "weight": e.get("weight") or 0,
                     })
 
-        return {"nodes": nodes, "edges": edges}
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "neo4j_connected": neo4j_connected,
+        }
     except Exception as e:
         logger.error("Unified graph failed: %s", e)
         raise
@@ -457,21 +531,30 @@ async def get_entity_detail(
                 "confidence": None,
                 "document_mentions": [],
                 "co_occurring_entities": [],
+                "neo4j_connected": False,
             }
-        from services.knowledge_graph_service import KnowledgeGraphService
-        kg_service = KnowledgeGraphService()
-        await kg_service.initialize()
+        container = await get_service_container()
+        kg_service = getattr(container, "knowledge_graph_service", None)
+        if not kg_service or not kg_service.is_connected():
+            return {
+                "name": entity_name,
+                "entity_type": None,
+                "confidence": None,
+                "document_mentions": [],
+                "co_occurring_entities": [],
+                "neo4j_connected": False,
+            }
         data = await kg_service.get_entity_detail(
             entity_name=entity_name,
             user_document_ids=document_ids,
         )
         mentions = data.get("document_mentions") or []
-        doc_ids_mentioned = [m["document_id"] for m in mentions]
         for m in mentions:
             meta = doc_meta_by_id.get(m["document_id"])
             m["title"] = (meta and meta.get("title")) or m["document_id"]
             m["filename"] = (meta and meta.get("filename")) or ""
         data["document_mentions"] = mentions
+        data["neo4j_connected"] = True
         return data
     except Exception as e:
         logger.error("Entity detail failed for %s: %s", entity_name, e)
@@ -486,8 +569,6 @@ async def rebuild_all_links(
     Backfill document_links for all existing text documents (.org, .md, .txt).
     Admin only. Uses admin RLS context so all documents are visible.
     """
-    from services.folder_service import FolderService
-
     rls_context = {"user_id": "", "user_role": "admin"}
     try:
         rows = await fetch_all(
@@ -501,32 +582,22 @@ async def rebuild_all_links(
             """,
             rls_context=rls_context,
         )
-        folder_service = FolderService()
-        await folder_service.initialize()
         link_service = await get_link_extraction_service()
+        from clients.document_service_client import get_document_service_client
+
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
         processed = 0
         errors = 0
         for r in rows:
             doc_id = r["document_id"]
-            filename = r.get("filename") or ""
-            folder_id = r.get("folder_id")
             user_id = r.get("user_id")
-            collection_type = r.get("collection_type") or "user"
-            team_id = r.get("team_id")
-            if team_id and not isinstance(team_id, str):
-                team_id = str(team_id)
             try:
-                path = await folder_service.get_document_file_path(
-                    filename=filename,
-                    folder_id=folder_id,
-                    user_id=user_id,
-                    collection_type=collection_type,
-                    team_id=team_id,
-                )
-                if not path or not Path(path).exists():
+                resp = await dsc.get_document_content_grpc(doc_id, user_id or "")
+                content = (resp.content or "") if resp else ""
+                if not content.strip():
                     errors += 1
                     continue
-                content = Path(path).read_text(encoding="utf-8")
                 await link_service.extract_and_store_links(doc_id, content, rls_context)
                 processed += 1
             except Exception as e:

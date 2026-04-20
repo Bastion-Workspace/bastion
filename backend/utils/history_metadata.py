@@ -3,10 +3,14 @@ Metadata allowlist for conversation history persistence.
 
 Only these keys from orchestrator chunk metadata are stored on assistant messages.
 Excluded: editor_operations, manuscript_edit, approval_queue_id,
-static_visualization_data, chart_result, citations, sources (display-layer, not history).
+citations, sources (display-layer, not history).
+Charts and diagrams use persisted artifact / artifacts metadata (not chart_result).
 
 images: JSON string of structured image refs (url + small metadata). Data-URI entries
 are stripped via sanitize_images_for_persistence before filter_history_safe_metadata.
+
+artifact / artifacts: JSON string(s) of chat artifact payloads (create_artifact tool) for
+drawer reload; code size is bounded server-side by the tool.
 """
 
 import json
@@ -16,6 +20,7 @@ _HISTORY_SAFE_METADATA_KEYS = frozenset({
     "tool_call_summary",
     "agent_profile_id",
     "agent_display_name",
+    "persona_ai_name",
     "task_status",
     "tools_used_categories",
     "delegated_agent",
@@ -27,6 +32,8 @@ _HISTORY_SAFE_METADATA_KEYS = frozenset({
     "delegated_by",
     "line_dispatch_sub_agent",
     "images",
+    "artifact",
+    "artifacts",
 })
 
 

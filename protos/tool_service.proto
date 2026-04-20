@@ -45,14 +45,8 @@ message SearchHelpDocsResponse {
 
 // Tool Service - Backend exposes data access to orchestrator
 service ToolService {
-  // Document operations
-  rpc SearchDocuments(SearchRequest) returns (SearchResponse);
-  rpc FindDocumentsByTags(FindDocumentsByTagsRequest) returns (FindDocumentsByTagsResponse);
-  rpc GetDocument(DocumentRequest) returns (DocumentResponse);
-  rpc GetDocumentContent(DocumentRequest) returns (DocumentContentResponse);
-  rpc GetDocumentChunks(DocumentRequest) returns (DocumentChunksResponse);
-  rpc FindDocumentByPath(FindDocumentByPathRequest) returns (FindDocumentByPathResponse);
-  
+  // Document / folder / file-edit RPCs moved to document_service.proto (DocumentService).
+
   // RSS operations
   rpc SearchRSSFeeds(RSSSearchRequest) returns (RSSSearchResponse);
   rpc GetRSSArticles(RSSArticlesRequest) returns (RSSArticlesResponse);
@@ -72,8 +66,6 @@ service ToolService {
   // Entity operations
   rpc SearchEntities(EntitySearchRequest) returns (EntitySearchResponse);
   rpc GetEntity(EntityRequest) returns (EntityResponse);
-  rpc FindDocumentsByEntities(FindDocumentsByEntitiesRequest) returns (FindDocumentsByEntitiesResponse);
-  rpc FindRelatedDocumentsByEntities(FindRelatedDocumentsByEntitiesRequest) returns (FindRelatedDocumentsByEntitiesResponse);
   rpc FindCoOccurringEntities(FindCoOccurringEntitiesRequest) returns (FindCoOccurringEntitiesResponse);
   
   // Weather operations
@@ -160,25 +152,6 @@ service ToolService {
   rpc DetectObjects(DetectObjectsRequest) returns (DetectObjectsResponse);
   rpc IdentifyObjects(IdentifyObjectsRequest) returns (IdentifyObjectsResponse);
 
-  // File creation operations (user documents only)
-  rpc CreateUserFile(CreateUserFileRequest) returns (CreateUserFileResponse);
-  rpc CreateUserFolder(CreateUserFolderRequest) returns (CreateUserFolderResponse);
-  rpc GetFolderTree(GetFolderTreeRequest) returns (GetFolderTreeResponse);
-  rpc ListFolderDocuments(ListFolderDocumentsRequest) returns (ListFolderDocumentsResponse);
-  rpc PickRandomDocumentFromFolder(PickRandomDocumentFromFolderRequest) returns (PickRandomDocumentFromFolderResponse);
-
-  // Document editing operations (user documents only)
-  rpc UpdateDocumentMetadata(UpdateDocumentMetadataRequest) returns (UpdateDocumentMetadataResponse);
-  rpc UpdateDocumentContent(UpdateDocumentContentRequest) returns (UpdateDocumentContentResponse);
-  
-  // Document edit proposal operations (universal edit proposal system)
-  rpc ProposeDocumentEdit(ProposeDocumentEditRequest) returns (ProposeDocumentEditResponse);
-  rpc ApplyDocumentEditProposal(ApplyDocumentEditProposalRequest) returns (ApplyDocumentEditProposalResponse);
-  rpc ApplyOperationsDirectly(ApplyOperationsDirectlyRequest) returns (ApplyOperationsDirectlyResponse);
-  rpc ListDocumentProposals(ListDocumentProposalsRequest) returns (ListDocumentProposalsResponse);
-  rpc GetDocumentEditProposal(GetDocumentEditProposalRequest) returns (GetDocumentEditProposalResponse);
-  rpc RejectDocumentEditProposal(RejectDocumentEditProposalRequest) returns (RejectDocumentEditProposalResponse);
-  
   // Conversation operations
   rpc UpdateConversationTitle(UpdateConversationTitleRequest) returns (UpdateConversationTitleResponse);
   
@@ -196,7 +169,12 @@ service ToolService {
   // Data Workspace operations
   rpc ListDataWorkspaces(ListDataWorkspacesRequest) returns (ListDataWorkspacesResponse);
   rpc GetWorkspaceSchema(GetWorkspaceSchemaRequest) returns (GetWorkspaceSchemaResponse);
+  rpc ResolveWorkspaceLink(ResolveWorkspaceLinkRequest) returns (ResolveWorkspaceLinkResponse);
   rpc QueryDataWorkspace(QueryDataWorkspaceRequest) returns (QueryDataWorkspaceResponse);
+  rpc CreateDataWorkspaceTable(CreateDataWorkspaceTableRequest) returns (CreateDataWorkspaceTableResponse);
+  rpc InsertDataWorkspaceRows(InsertDataWorkspaceRowsRequest) returns (InsertDataWorkspaceRowsResponse);
+  rpc UpdateDataWorkspaceRows(UpdateDataWorkspaceRowsRequest) returns (UpdateDataWorkspaceRowsResponse);
+  rpc DeleteDataWorkspaceRows(DeleteDataWorkspaceRowsRequest) returns (DeleteDataWorkspaceRowsResponse);
 
   // Navigation operations (locations and routes)
   rpc CreateLocation(CreateLocationRequest) returns (CreateLocationResponse);
@@ -240,6 +218,9 @@ service ToolService {
   rpc DeleteContact(DeleteContactRequest) returns (DeleteContactResponse);
   rpc SearchContacts(SearchContactsRequest) returns (SearchContactsResponse);
 
+  // Microsoft 365: To Do, OneDrive, OneNote, Planner (connections-service / Graph)
+  rpc M365GraphInvoke(M365GraphInvokeRequest) returns (M365GraphInvokeResponse);
+
   // Account discovery (email/calendar/contacts bound to agent or user)
   rpc ListUserAccounts(ListUserAccountsRequest) returns (ListUserAccountsResponse);
 
@@ -255,9 +236,12 @@ service ToolService {
   rpc DeleteAgentMemory(DeleteAgentMemoryRequest) returns (DeleteAgentMemoryResponse);
   rpc AppendAgentMemory(AppendAgentMemoryRequest) returns (AppendAgentMemoryResponse);
   rpc GetAgentRunHistory(GetAgentRunHistoryRequest) returns (GetAgentRunHistoryResponse);
+  rpc GetExecutionTrace(GetExecutionTraceRequest) returns (GetExecutionTraceResponse);
   rpc GetSkillsByIds(GetSkillsByIdsRequest) returns (GetSkillsByIdsResponse);
+  // Optional metadata: active-connection-types = JSON array of connection_type strings (e.g. ["email","calendar"]).
   rpc SearchSkills(SearchSkillsRequest) returns (SearchSkillsResponse);
   rpc ExecuteConnector(ExecuteConnectorRequest) returns (ExecuteConnectorResponse);
+  rpc ExecuteGitHubEndpoint(ExecuteGitHubEndpointRequest) returns (ExecuteGitHubEndpointResponse);
   rpc ResolveAgentHandle(ResolveAgentHandleRequest) returns (ResolveAgentHandleResponse);
   rpc EnqueueAgentInvocation(EnqueueAgentInvocationRequest) returns (EnqueueAgentInvocationResponse);
 
@@ -294,6 +278,10 @@ service ToolService {
   rpc UpdatePlaybook(UpdatePlaybookRequest) returns (UpdatePlaybookResponse);
   rpc DeletePlaybook(DeletePlaybookRequest) returns (DeletePlaybookResponse);
   rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+  rpc ListSkillSummaries(ListSkillSummariesRequest) returns (ListSkillSummariesResponse);
+  rpc GetSkillBySlug(GetSkillBySlugRequest) returns (GetSkillBySlugResponse);
+  rpc GetSkillsBySlugs(GetSkillsBySlugsRequest) returns (GetSkillsBySlugsResponse);
+  rpc GetCandidateForSlug(GetCandidateForSlugRequest) returns (GetCandidateForSlugResponse);
   rpc CreateSkill(CreateSkillRequest) returns (CreateSkillResponse);
   rpc UpdateSkill(UpdateSkillRequest) returns (UpdateSkillResponse);
 
@@ -323,15 +311,21 @@ service ToolService {
   rpc GetMyProfile(GetMyProfileRequest) returns (GetMyProfileResponse);
   rpc UpsertUserFact(UpsertUserFactRequest) returns (UpsertUserFactResponse);
   rpc GetUserFacts(GetUserFactsRequest) returns (GetUserFactsResponse);
+  rpc ReadScratchpad(ReadScratchpadRequest) returns (ReadScratchpadResponse);
+  rpc WriteScratchpadPad(WriteScratchpadPadRequest) returns (WriteScratchpadPadResponse);
 
   // Local proxy (Bastion Local Proxy daemon)
   rpc InvokeDeviceTool(InvokeDeviceToolRequest) returns (InvokeDeviceToolResponse);
+  rpc SetDeviceWorkspace(SetDeviceWorkspaceRequest) returns (SetDeviceWorkspaceResponse);
   rpc GetDeviceCapabilities(GetDeviceCapabilitiesRequest) returns (GetDeviceCapabilitiesResponse);
 
   // External MCP servers (user-configured; execution and discovery in tools-service)
   rpc ExecuteMcpTool(ExecuteMcpToolRequest) returns (ExecuteMcpToolResponse);
   rpc GetMcpServerTools(GetMcpServerToolsRequest) returns (GetMcpServerToolsResponse);
   rpc DiscoverMcpServer(DiscoverMcpServerRequest) returns (DiscoverMcpServerResponse);
+
+  // Profile guarantee
+  rpc EnsureDefaultProfile(EnsureDefaultProfileRequest) returns (EnsureDefaultProfileResponse);
 }
 
 // Document Messages
@@ -360,6 +354,28 @@ message FindDocumentsByTagsResponse {
   int32 total_count = 2;
 }
 
+// Rerank messages
+message RerankRequest {
+  string query = 1;
+  repeated string documents = 2;
+  int32 top_n = 3;
+  string user_id = 4;
+  string model = 5;
+}
+
+message RerankResultItem {
+  int32 index = 1;
+  float relevance_score = 2;
+  string document = 3;
+}
+
+message RerankResponse {
+  repeated RerankResultItem results = 1;
+  string model = 2;
+  bool success = 3;
+  string error = 4;
+}
+
 message DocumentResult {
   string document_id = 1;
   string title = 2;
@@ -386,6 +402,8 @@ message DocumentContentResponse {
   string document_id = 1;
   string content = 2;
   string format = 3;  // "text", "markdown", "html"
+  // Absolute resolved path on document-service disk (API gateway uses for metadata.canonical_path).
+  optional string canonical_path = 4;
 }
 
 message DocumentChunksResponse {
@@ -957,7 +975,7 @@ message ListTodosRequest {
   repeated string states = 3;
   repeated string tags = 4;
   string query = 5;
-  int32 limit = 6;
+  int32 limit = 6;  // 0 = no cap (all matches); >0 caps result count
   bool include_archives = 7;
   bool include_body = 8;
   int32 closed_since_days = 9;  // only DONE items closed in the last N days (0 = omit filter)
@@ -1668,6 +1686,9 @@ message UpdateDocumentContentRequest {
   string document_id = 2;
   string content = 3;  // New content (replace entire content) or content to append
   bool append = 4;  // If true, append to existing content; if false, replace entire content
+  // Advisory UX/versioning only. "user_api" = REST/editor save (no agent takeover toast).
+  // Omit or any other value: agent/tool path (WebSocket content_source=agent).
+  optional string write_initiator = 5;
 }
 
 message UpdateDocumentContentResponse {
@@ -1718,6 +1739,7 @@ message EditorOperationProto {
   optional string note = 11;
   optional float confidence = 12;
   optional string search_text = 13;  // For replace/delete: text to find (with context for robust matching)
+  optional string section_scope = 14;  // Heading line (e.g. "## Chapter 3") constraining match/insert to that section
 }
 
 message ContentEditProto {
@@ -1982,6 +2004,21 @@ message GetWorkspaceSchemaResponse {
   optional string error = 4;
 }
 
+message ResolveWorkspaceLinkRequest {
+  string user_id = 1;
+  string ref_json = 2;
+}
+
+message ResolveWorkspaceLinkResponse {
+  bool success = 1;
+  string error = 2;
+  string label = 3;
+  string preview_json = 4;
+  bool row_found = 5;
+  string table_id = 6;
+  string row_id = 7;
+}
+
 message TableSchema {
   string table_id = 1;
   string name = 2;
@@ -1998,6 +2035,7 @@ message ColumnInfo {
   string type = 2;  // e.g., "text", "number", "date", "boolean"
   bool is_nullable = 3;
   string description = 4;  // Human-readable column meaning for agents
+  string column_ref_json = 5;  // For REFERENCE: JSON of {target_table_id, label_field, target_key}
 }
 
 message QueryDataWorkspaceRequest {
@@ -2022,6 +2060,65 @@ message QueryDataWorkspaceResponse {
   string returning_rows_json = 9;  // For write with RETURNING
   bytes arrow_results = 10;  // Arrow IPC RecordBatch when has_arrow_data is true
   bool has_arrow_data = 11;
+}
+
+message CreateDataWorkspaceTableRequest {
+  string workspace_id = 1;
+  string database_id = 2;
+  string table_name = 3;
+  string description = 4;
+  string user_id = 5;
+  string columns_json = 6; // JSON list of {name,type,nullable,description}
+  string metadata_json = 7; // Optional metadata json
+}
+
+message CreateDataWorkspaceTableResponse {
+  bool success = 1;
+  string table_id = 2;
+  string error_message = 3;
+  string table_json = 4; // JSON dict with created table (for callers)
+}
+
+message InsertDataWorkspaceRowsRequest {
+  string workspace_id = 1;
+  string table_id = 2;
+  string user_id = 3;
+  string rows_json = 4; // JSON list of row objects
+}
+
+message InsertDataWorkspaceRowsResponse {
+  bool success = 1;
+  int32 rows_inserted = 2;
+  string inserted_row_ids_json = 3; // JSON list of row_id strings
+  string error_message = 4;
+}
+
+message UpdateDataWorkspaceRowsRequest {
+  string workspace_id = 1;
+  string table_id = 2;
+  string user_id = 3;
+  string updates_json = 4; // JSON list of {row_id,row_data}
+}
+
+message UpdateDataWorkspaceRowsResponse {
+  bool success = 1;
+  int32 rows_updated = 2;
+  string updated_row_ids_json = 3; // JSON list of row_id strings
+  string error_message = 4;
+}
+
+message DeleteDataWorkspaceRowsRequest {
+  string workspace_id = 1;
+  string table_id = 2;
+  string user_id = 3;
+  string row_ids_json = 4; // JSON list of row_id strings
+}
+
+message DeleteDataWorkspaceRowsResponse {
+  bool success = 1;
+  int32 rows_deleted = 2;
+  string deleted_row_ids_json = 3; // JSON list of row_id strings
+  string error_message = 4;
 }
 
 // Face Analysis Messages
@@ -2660,6 +2757,19 @@ message SearchContactsResponse {
   string error = 3;
 }
 
+message M365GraphInvokeRequest {
+  string user_id = 1;
+  int32 connection_id = 2;
+  string operation = 3;
+  string params_json = 4;
+}
+
+message M365GraphInvokeResponse {
+  bool success = 1;
+  string result_json = 2;
+  string error = 3;
+}
+
 message ListUserAccountsRequest {
   string user_id = 1;
   string agent_profile_id = 2;  // empty = return all user connections
@@ -2841,6 +2951,51 @@ message ListSkillsResponse {
   string error = 3;
 }
 
+message ListSkillSummariesRequest {
+  string user_id = 1;
+  bool include_builtin = 2;    // default true
+}
+
+message ListSkillSummariesResponse {
+  bool success = 1;
+  string summaries_json = 2;   // JSON array of lightweight skill summaries (no procedure/schemas)
+  string error = 3;
+}
+
+message GetSkillBySlugRequest {
+  string user_id = 1;
+  string slug = 2;
+}
+
+message GetSkillBySlugResponse {
+  bool success = 1;
+  string skill_json = 2;       // full skill object or empty on miss
+  string error = 3;
+}
+
+message GetSkillsBySlugsRequest {
+  string user_id = 1;
+  repeated string slugs = 2;
+}
+
+message GetSkillsBySlugsResponse {
+  bool success = 1;
+  string skills_json = 2;     // JSON array of skill objects
+  string error = 3;
+}
+
+message GetCandidateForSlugRequest {
+  string user_id = 1;
+  string slug = 2;
+}
+
+message GetCandidateForSlugResponse {
+  bool success = 1;
+  string skill_json = 2;      // candidate skill or empty
+  bool has_candidate = 3;
+  string error = 4;
+}
+
 message CreateSkillRequest {
   string user_id = 1;
   string name = 2;
@@ -2921,6 +3076,20 @@ message ExecuteConnectorRequest {
 message ExecuteConnectorResponse {
   bool success = 1;
   string result_json = 2;  // JSON: { records, count, formatted, error? }
+  string error = 3;
+}
+
+message ExecuteGitHubEndpointRequest {
+  string user_id = 1;
+  int64 connection_id = 2;   // external_connections.id (GitHub OAuth, code_platform)
+  string endpoint_id = 3;    // e.g. repo_pulls, user_repos
+  string params_json = 4;    // JSON object of endpoint parameters
+  int32 max_pages = 5;
+}
+
+message ExecuteGitHubEndpointResponse {
+  bool success = 1;
+  string result_json = 2;    // JSON: { records, count, formatted, error?, raw_response? }
   string error = 3;
 }
 
@@ -3261,6 +3430,48 @@ message GetAgentRunHistoryResponse {
   int32 total = 3;
   string agent_name = 4;  // populated when agent_profile_id provided
   string error = 5;
+}
+
+message ExecutionStepRecord {
+  int32 step_index = 1;
+  string step_name = 2;
+  string step_type = 3;
+  string action_name = 4;
+  string status = 5;
+  string started_at = 6;
+  string completed_at = 7;
+  optional int32 duration_ms = 8;
+  string inputs_json = 9;    // truncated JSON string
+  string outputs_json = 10;  // truncated JSON string
+  string error_details = 11;
+  string tool_call_trace_json = 12;  // JSON array of tool calls (truncated when large)
+  int32 input_tokens = 13;
+  int32 output_tokens = 14;
+}
+
+message GetExecutionTraceRequest {
+  string user_id = 1;
+  string execution_id = 2;
+  optional bool include_io = 3;         // default true when unset in handler
+  optional bool include_tool_calls = 4; // default false when unset in handler
+}
+
+message GetExecutionTraceResponse {
+  bool success = 1;
+  string execution_id = 2;
+  string agent_name = 3;
+  string query = 4;
+  string status = 5;
+  string started_at = 6;
+  string completed_at = 7;
+  optional int32 duration_ms = 8;
+  optional int32 tokens_input = 9;
+  optional int32 tokens_output = 10;
+  optional string cost_usd = 11;
+  string model_used = 12;
+  string error_details = 13;
+  repeated ExecutionStepRecord steps = 14;
+  string error = 15;
 }
 
 // Agent Factory meta-tool messages (create profile, playbook, schedule, bind data source)
@@ -3702,12 +3913,45 @@ message UpsertUserFactResponse {
 
 message GetUserFactsRequest {
   string user_id = 1;
+  string query = 2;
+  // When true, return all facts (no theme / adaptive filter). Default false = themed retrieval when query is set.
+  bool use_full_fact_list = 3;
 }
 
 message GetUserFactsResponse {
   bool success = 1;
   string facts_json = 2;
   string error = 3;
+}
+
+message ReadScratchpadRequest {
+  string user_id = 1;
+  int32 pad_index = 2;  // -1 = return all pads; 0-3 = single pad
+}
+
+message ScratchpadPad {
+  int32 index = 1;
+  string label = 2;
+  string body = 3;
+}
+
+message ReadScratchpadResponse {
+  bool success = 1;
+  string error = 2;
+  repeated ScratchpadPad pads = 3;
+  int32 active_index = 4;
+}
+
+message WriteScratchpadPadRequest {
+  string user_id = 1;
+  int32 pad_index = 2;
+  string body = 3;
+  string label = 4;  // empty string = keep existing label
+}
+
+message WriteScratchpadPadResponse {
+  bool success = 1;
+  string error = 2;
 }
 
 message InvokeDeviceToolRequest {
@@ -3719,6 +3963,20 @@ message InvokeDeviceToolRequest {
 }
 
 message InvokeDeviceToolResponse {
+  bool success = 1;
+  string result_json = 2;
+  string error = 3;
+  string formatted = 4;
+}
+
+message SetDeviceWorkspaceRequest {
+  string user_id = 1;
+  string device_id = 2;
+  string workspace_root = 3;
+  int32 timeout_seconds = 4;
+}
+
+message SetDeviceWorkspaceResponse {
   bool success = 1;
   string result_json = 2;
   string error = 3;
@@ -3768,4 +4026,13 @@ message DiscoverMcpServerResponse {
   bool success = 1;
   string tools_json = 2; // JSON array of {name, description, input_schema?}
   string error = 3;
+}
+
+message EnsureDefaultProfileRequest {
+  string user_id = 1;
+}
+
+message EnsureDefaultProfileResponse {
+  string profile_id = 1;
+  bool was_created = 2;
 }

@@ -3,13 +3,17 @@ Teams API - REST endpoints for team management, invitations, and posts
 """
 
 import logging
+import mimetypes
 import os
 import re
 import uuid
+from io import BytesIO
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
 from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
 from pydantic import BaseModel, Field
 
 from services.team_service import TeamService
@@ -19,6 +23,9 @@ from services.messaging.messaging_service import messaging_service
 from utils.auth_middleware import get_current_user
 from models.api_models import AuthenticatedUserResponse
 from config import settings
+from clients.document_service_client import get_document_service_client
+from services import ds_upload_library_fs as dsf
+from services.database_manager.database_helpers import fetch_one
 from models.team_models import (
     CreateTeamRequest, UpdateTeamRequest, AddMemberRequest, UpdateMemberRoleRequest,
     CreatePostRequest, AddReactionRequest, CreateCommentRequest,
@@ -275,30 +282,32 @@ async def upload_team_avatar(
         
         # Sanitize filename
         sanitized_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename)
-        
-        # Create team avatars directory
-        uploads_base = Path(settings.UPLOAD_DIR)
-        avatars_dir = uploads_base / "Teams" / team_id / "avatars"
-        avatars_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate unique filename
         file_ext = Path(sanitized_filename).suffix
         unique_filename = f"avatar_{uuid.uuid4()}{file_ext}"
-        file_path = avatars_dir / unique_filename
-        
-        # Save file
-        with open(file_path, "wb") as f:
-            f.write(content)
-        
-        # Update team's avatar_url in database
-        avatar_url = f"/api/teams/{team_id}/avatar/{unique_filename}"
+        rel_name = f"avatars/{unique_filename}"
+
+        buf = BytesIO(content)
+        wrapped = StarletteUploadFile(filename=rel_name, file=buf)
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        try:
+            up = await dsc.upload_via_document_service(
+                wrapped,
+                doc_type="image",
+                user_id=current_user.user_id,
+                team_id=team_id,
+                collection_type="team",
+                exempt_from_vectorization=True,
+            )
+        except Exception as e:
+            logger.error(f"Team avatar upload failed: {e}")
+            raise HTTPException(status_code=500, detail="Failed to upload avatar")
+
+        avatar_url = f"/api/teams/{team_id}/avatar/doc/{up.document_id}"
         updates = {"avatar_url": avatar_url}
         team = await team_service.update_team(team_id, updates, current_user.user_id)
         
         if not team:
-            # Cleanup file if update failed
-            if file_path.exists():
-                file_path.unlink()
             raise HTTPException(status_code=500, detail="Failed to update avatar URL")
         
         return {
@@ -315,36 +324,89 @@ async def upload_team_avatar(
         raise HTTPException(status_code=500, detail="Failed to upload avatar")
 
 
+@router.get("/api/teams/{team_id}/avatar/doc/{document_id}")
+async def get_team_avatar_by_document(
+    team_id: str,
+    document_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Serve team avatar from document-service."""
+    try:
+        role = await team_service.check_team_access(team_id, current_user.user_id)
+        if not role:
+            raise HTTPException(status_code=403, detail="Not a team member")
+
+        row = await fetch_one(
+            """
+            SELECT user_id FROM document_metadata
+            WHERE document_id = $1 AND team_id = $2 AND collection_type = 'team'
+            LIMIT 1
+            """,
+            document_id,
+            team_id,
+            rls_context={"user_id": current_user.user_id, "user_role": "user"},
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Avatar not found")
+        path_uid = row["user_id"] or current_user.user_id
+
+        async def _gen():
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            async for chunk in dsc.download_document_stream(document_id, path_uid):
+                if chunk.data:
+                    yield chunk.data
+
+        return StreamingResponse(_gen(), media_type="image/jpeg")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve team avatar (doc): {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve avatar")
+
+
 @router.get("/api/teams/{team_id}/avatar/{filename}")
 async def get_team_avatar(
     team_id: str,
     filename: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Serve team avatar image"""
+    """Serve team avatar by filename (legacy) or resolve team library document."""
     try:
         # Check team access (must be team member to view avatar)
         role = await team_service.check_team_access(team_id, current_user.user_id)
         if not role:
             raise HTTPException(status_code=403, detail="Not a team member")
-        
-        uploads_base = Path(settings.UPLOAD_DIR)
-        file_path = uploads_base / "Teams" / team_id / "avatars" / filename
-        
-        if not file_path.exists():
+
+        row = await fetch_one(
+            """
+            SELECT document_id, user_id FROM document_metadata
+            WHERE team_id = $1 AND collection_type = 'team'
+              AND (filename = $2 OR filename = $3)
+            LIMIT 1
+            """,
+            team_id,
+            f"avatars/{filename}",
+            filename,
+            rls_context={"user_id": current_user.user_id, "user_role": "user"},
+        )
+        if not row:
             raise HTTPException(status_code=404, detail="Avatar not found")
-        
-        # Determine media type
-        import mimetypes
-        media_type, _ = mimetypes.guess_type(str(file_path))
+        doc_id = row["document_id"]
+        path_uid = row["user_id"] or current_user.user_id
+
+        media_type, _ = mimetypes.guess_type(filename)
         if not media_type:
             media_type = "image/jpeg"
-        
-        return FileResponse(
-            path=str(file_path),
-            media_type=media_type,
-            filename=filename
-        )
+
+        async def _gen():
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            async for chunk in dsc.download_document_stream(doc_id, path_uid):
+                if chunk.data:
+                    yield chunk.data
+
+        return StreamingResponse(_gen(), media_type=media_type)
     
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -760,6 +822,76 @@ async def reject_invitation(
 # IMPORTANT: More specific routes must come before general ones
 # Attachment routes must come before general posts routes
 
+@router.get("/api/teams/{team_id}/posts/attachments/doc/{document_id}")
+async def get_post_attachment_by_document(
+    team_id: str,
+    document_id: str,
+    request: Request,
+    token: Optional[str] = Query(None, description="Optional authentication token (for direct image access)"),
+):
+    """Stream a team post attachment by document id (document-service)."""
+    from services.auth_service import auth_service
+    from urllib.parse import unquote
+
+    auth_token = token
+    if not auth_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            auth_token = auth_header[7:]
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        current_user = await auth_service.get_current_user(auth_token)
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"Token validation failed: {e}")
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    try:
+        role = await team_service.check_team_access(team_id, current_user.user_id)
+        if not role:
+            raise HTTPException(status_code=403, detail="Not a team member")
+
+        row = await fetch_one(
+            """
+            SELECT user_id, filename FROM document_metadata
+            WHERE document_id = $1 AND team_id = $2 AND collection_type = 'team'
+            LIMIT 1
+            """,
+            document_id,
+            team_id,
+            rls_context={"user_id": current_user.user_id, "user_role": "user"},
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="File not found")
+        path_uid = row["user_id"] or current_user.user_id
+        fn = row.get("filename") or "attachment"
+        media_type, _ = mimetypes.guess_type(str(fn))
+        if not media_type:
+            media_type = "application/octet-stream"
+
+        async def _gen():
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            async for chunk in dsc.download_document_stream(document_id, path_uid):
+                if chunk.data:
+                    yield chunk.data
+
+        return StreamingResponse(
+            _gen(),
+            media_type=media_type,
+            headers={"Content-Disposition": f'inline; filename="{unquote(os.path.basename(fn))}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve post attachment (doc): {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/api/teams/{team_id}/posts/attachments/{filename}")
 async def get_post_attachment(
     team_id: str,
@@ -786,102 +918,81 @@ async def get_post_attachment(
         current_user = await auth_service.get_current_user(auth_token)
         if not current_user:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"Token validation failed: {e}")
         raise HTTPException(status_code=401, detail="Authentication required")
-    
-    # Debug: print to stdout (always visible) - MUST appear if route is called
-    import sys
-    print(f"🔍 GET ATTACHMENT CALLED: team_id={team_id}, filename={filename}, user={current_user.user_id}", file=sys.stderr, flush=True)
-    logger.info(f"🔍 GET ATTACHMENT CALLED: team_id={team_id}, filename={filename}, user={current_user.user_id}")
     
     try:
         # Check team access
         role = await team_service.check_team_access(team_id, current_user.user_id)
         if not role:
-            print(f"❌ ACCESS DENIED: user {current_user.user_id} not a member of team {team_id}")
             raise HTTPException(status_code=403, detail="Not a team member")
-        print(f"✅ ACCESS GRANTED: user {current_user.user_id} has role {role} in team {team_id}")
-        
-        # Get file path
-        from pathlib import Path
-        from fastapi.responses import FileResponse
+
         from urllib.parse import unquote
-        import os
-        
-        # Decode URL-encoded filename
+
         decoded_filename = unquote(filename)
-        
-        # SECURITY: Strip any path components to prevent path traversal
-        # This prevents attacks like ../../etc/passwd
         safe_filename = os.path.basename(decoded_filename)
-        
-        if not safe_filename or safe_filename in ('.', '..'):
+
+        if not safe_filename or safe_filename in (".", ".."):
             logger.warning(f"Invalid filename attempt: {decoded_filename}")
             raise HTTPException(status_code=400, detail="Invalid filename")
-        
-        uploads_base = Path(settings.UPLOAD_DIR)
-        team_posts_dir = uploads_base / "Teams" / team_id / "posts"
-        file_path = team_posts_dir / safe_filename
-        
-        # SECURITY: Verify the resolved path is still within team_posts_dir
-        # This is a defense-in-depth measure against path traversal
-        try:
-            file_path_resolved = file_path.resolve()
-            team_posts_dir_resolved = team_posts_dir.resolve()
-            
-            if not str(file_path_resolved).startswith(str(team_posts_dir_resolved)):
-                logger.error(f"Path traversal attempt detected: {filename} -> {file_path_resolved}")
-                raise HTTPException(status_code=403, detail="Access denied")
-        except Exception as e:
-            logger.error(f"Path validation error: {e}")
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        # Log for debugging (both print and logger)
-        print(f"📁 FILE PATH: {file_path}")
-        print(f"📁 DIRECTORY EXISTS: {team_posts_dir.exists()}")
-        logger.info(f"Serving attachment: team_id={team_id}, filename={filename}, safe_filename={safe_filename}, path={file_path}")
-        
-        # Check if directory exists
-        if not team_posts_dir.exists():
-            print(f"❌ DIRECTORY NOT FOUND: {team_posts_dir}")
-            logger.warning(f"Team posts directory does not exist: {team_posts_dir}")
+
+        rls = {"user_id": current_user.user_id, "user_role": "user"}
+        row = await fetch_one(
+            """
+            SELECT document_id, user_id FROM document_metadata
+            WHERE team_id = $1::uuid AND collection_type = 'team'
+              AND (filename = $2 OR filename = $3 OR filename LIKE $4)
+            LIMIT 1
+            """,
+            team_id,
+            f"posts/{safe_filename}",
+            safe_filename,
+            f"%/{safe_filename}",
+            rls_context=rls,
+        )
+        if not row:
+            stem = Path(safe_filename).stem
+            try:
+                uuid.UUID(stem)
+                row = await fetch_one(
+                    """
+                    SELECT document_id, user_id FROM document_metadata
+                    WHERE team_id = $1::uuid AND collection_type = 'team'
+                      AND document_id = $2
+                    LIMIT 1
+                    """,
+                    team_id,
+                    stem,
+                    rls_context=rls,
+                )
+            except ValueError:
+                row = None
+        if not row:
             raise HTTPException(status_code=404, detail="File not found")
-        
-        # Check if file exists
-        if not file_path.exists():
-            # List files in directory for debugging
-            existing_files = list(team_posts_dir.glob("*")) if team_posts_dir.exists() else []
-            file_list = [f.name for f in existing_files]
-            print(f"❌ FILE NOT FOUND: {file_path}")
-            print(f"📋 EXISTING FILES: {file_list}")
-            logger.warning(
-                f"File not found: {file_path}. "
-                f"Directory exists: {team_posts_dir.exists()}. "
-                f"Files in directory: {file_list}"
-            )
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        print(f"✅ FILE FOUND: {file_path}, serving...")
-        
-        # Determine media type
-        import mimetypes
-        media_type, _ = mimetypes.guess_type(str(file_path))
+
+        doc_id = row["document_id"]
+        path_uid = row["user_id"] or current_user.user_id
+        media_type, _ = mimetypes.guess_type(decoded_filename)
         if not media_type:
             media_type = "application/octet-stream"
-        
-        return FileResponse(
-            path=str(file_path),
-            media_type=media_type,
-            filename=decoded_filename
-        )
+
+        async def _gen():
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            async for chunk in dsc.download_document_stream(doc_id, path_uid):
+                if chunk.data:
+                    yield chunk.data
+
+        return StreamingResponse(_gen(), media_type=media_type)
     
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ EXCEPTION IN GET ATTACHMENT: {e}")
         logger.error(f"Failed to serve post attachment: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -946,82 +1057,56 @@ async def upload_post_attachment(
                 detail=f"File too large. Maximum size: {max_size / (1024*1024):.1f}MB"
             )
         
-        # Sanitize filename
-        import re
         sanitized_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename)
-        
-        # Create team posts directory
-        from pathlib import Path
-        uploads_base = Path(settings.UPLOAD_DIR)
-        team_posts_dir = uploads_base / "Teams" / team_id / "posts"
-        team_posts_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate unique filename
-        import uuid
         file_ext = Path(sanitized_filename).suffix
         unique_filename = f"{uuid.uuid4()}{file_ext}"
-        file_path = team_posts_dir / unique_filename
-        
-        # Save file
-        print(f"💾 UPLOADING FILE: {file_path} (size: {file_size} bytes)")
-        try:
-            with open(file_path, "wb") as f:
-                f.write(content)
-                f.flush()
-                # Ensure file is synced to disk
-                import os
-                os.fsync(f.fileno())
-            print(f"✅ FILE WRITTEN: {file_path}")
-        except Exception as e:
-            print(f"❌ FILE WRITE FAILED: {file_path} - {e}")
-            logger.error(f"Failed to write file {file_path}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-        
-        # Verify file was saved
-        if not file_path.exists():
-            print(f"❌ FILE VERIFICATION FAILED: {file_path} does not exist after write")
-            logger.error(f"File was not saved successfully: {file_path}")
-            raise HTTPException(status_code=500, detail="Failed to save file")
-        
-        # Verify file size matches
-        actual_size = file_path.stat().st_size
-        if actual_size != file_size:
-            print(f"⚠️ FILE SIZE MISMATCH: expected {file_size}, got {actual_size}")
-            logger.warning(f"File size mismatch: expected {file_size}, got {actual_size}")
-        
-        print(f"✅ FILE SAVED: {file_path} (size: {file_size} bytes, actual: {actual_size} bytes)")
-        logger.info(f"Saved attachment: {file_path} (size: {file_size} bytes, actual: {actual_size} bytes)")
-        
-        # Get image dimensions if it's an image
+        rel_name = f"posts/{unique_filename}"
+
         width = None
         height = None
         if file.content_type and file.content_type.startswith("image/"):
             try:
                 from PIL import Image
-                with Image.open(file_path) as img:
+
+                with Image.open(BytesIO(content)) as img:
                     width, height = img.size
             except Exception as e:
                 logger.warning(f"Failed to get image dimensions: {e}")
-        
-        # Return relative path for API access
-        relative_path = f"/api/teams/{team_id}/posts/attachments/{unique_filename}"
-        
+
+        buf = BytesIO(content)
+        wrapped = StarletteUploadFile(filename=rel_name, file=buf)
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        try:
+            up = await dsc.upload_via_document_service(
+                wrapped,
+                doc_type="",
+                user_id=current_user.user_id,
+                team_id=team_id,
+                collection_type="team",
+                exempt_from_vectorization=True,
+            )
+        except Exception as e:
+            logger.error(f"Team attachment upload failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+        relative_path = f"/api/teams/{team_id}/posts/attachments/doc/{up.document_id}"
         response_data = {
             "file_path": relative_path,
+            "document_id": up.document_id,
+            "storage_filename": rel_name,
             "filename": sanitized_filename,
             "file_size": file_size,
             "mime_type": file.content_type or "application/octet-stream",
             "width": width,
-            "height": height
+            "height": height,
         }
-        
+
         logger.info(
-            f"Uploaded attachment for team {team_id}: "
-            f"unique_filename={unique_filename}, "
-            f"file_path={relative_path}, "
-            f"actual_file_path={file_path}, "
-            f"file_exists={file_path.exists()}, "
-            f"response={response_data}"
+            "Uploaded team %s attachment document_id=%s path=%s",
+            team_id,
+            up.document_id,
+            relative_path,
         )
         
         return response_data
@@ -1047,29 +1132,18 @@ async def list_post_attachments_debug(
         if not role:
             raise HTTPException(status_code=403, detail="Not a team member")
         
-        from pathlib import Path
-        
-        uploads_base = Path(settings.UPLOAD_DIR)
-        team_posts_dir = uploads_base / "Teams" / team_id / "posts"
-        
-        files = []
-        if team_posts_dir.exists():
-            for file_path in team_posts_dir.iterdir():
-                if file_path.is_file():
-                    files.append({
-                        "filename": file_path.name,
-                        "size": file_path.stat().st_size,
-                        "path": str(file_path)
-                    })
-        
+        team_posts_dir = Path(settings.UPLOAD_DIR) / "Teams" / team_id / "posts"
+        names = await dsf.list_dir_names(current_user.user_id, team_posts_dir)
+        files = [{"filename": n, "size": None, "path": str(team_posts_dir / n)} for n in names]
+
         return {
             "team_id": team_id,
             "upload_dir_env": settings.UPLOAD_DIR,
-            "uploads_base": str(uploads_base),
+            "uploads_base": str(settings.UPLOAD_DIR),
             "directory": str(team_posts_dir),
-            "exists": team_posts_dir.exists(),
+            "exists": bool(names),
             "files": files,
-            "count": len(files)
+            "count": len(files),
         }
     
     except Exception as e:

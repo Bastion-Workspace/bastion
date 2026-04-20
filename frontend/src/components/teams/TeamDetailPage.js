@@ -59,7 +59,7 @@ const TeamDetailPage = () => {
 
   if (isLoading && !currentTeam) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4, display: 'flex', justifyContent: 'center' }}>
+      <Container maxWidth="lg" sx={{ py: 4, display: 'flex', justifyContent: 'center' }}>
         <CircularProgress />
       </Container>
     );
@@ -67,7 +67,7 @@ const TeamDetailPage = () => {
 
   if (error && !currentTeam) {
     return (
-      <Container maxWidth="lg" sx={{ mt: 4 }}>
+      <Container maxWidth="lg" sx={{ py: 3 }}>
         <Alert severity="error">{error}</Alert>
       </Container>
     );
@@ -78,7 +78,7 @@ const TeamDetailPage = () => {
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 1, mb: 4 }}>
+    <Container maxWidth="lg" sx={{ py: 2 }}>
       {/* Header */}
       <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
         <IconButton onClick={() => navigate('/teams')} sx={{ mr: 2 }}>
@@ -112,8 +112,28 @@ const TeamDetailPage = () => {
       </Box>
 
       {/* Tabs */}
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
-        <Tabs value={activeTab} onChange={(e, newValue) => setActiveTab(newValue)}>
+      <Box
+        sx={{
+          mb: 3,
+          borderRadius: 1,
+          border: '1px solid',
+          borderColor: 'divider',
+          bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
+          overflow: 'hidden',
+        }}
+      >
+        <Tabs
+          value={activeTab}
+          onChange={(e, newValue) => setActiveTab(newValue)}
+          sx={{
+            minHeight: 48,
+            '& .MuiTab-root': {
+              minHeight: 48,
+              bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
+              '&.Mui-selected': { bgcolor: 'background.default' },
+            },
+          }}
+        >
           <Tab label="Feed" />
           <Tab label="Members" />
           <Tab label="Settings" icon={<Settings />} iconPosition="end" />

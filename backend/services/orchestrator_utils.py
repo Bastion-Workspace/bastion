@@ -22,9 +22,3 @@ def normalize_thread_id(
     if branch_suffix:
         return f"{base}:branch_{branch_suffix}"
     return base
-
-
-def validate_thread_id(user_id: str, thread_id: str) -> None:
-    """Assert thread_id is correctly scoped to user_id."""
-    if not thread_id.startswith(f"{user_id}:"):
-        raise ValueError("Thread isolation error: thread_id not scoped to user_id")

@@ -9,8 +9,9 @@ import {
   TableHead,
   TableRow,
   IconButton,
-  TextField,
+  InputBase,
   Button,
+  Chip,
   Tooltip,
   Typography,
   CircularProgress,
@@ -35,19 +36,27 @@ import {
   ArrowUpward as ArrowUpwardIcon,
   ArrowDownward as ArrowDownwardIcon,
   Functions as FunctionsIcon,
-  Refresh as RefreshIcon
+  Refresh as RefreshIcon,
+  TableRows as TableRowsIcon,
+  GridOn as GridOnIcon,
+  OpenInNew as OpenInNewIcon
 } from '@mui/icons-material';
 
 import dataWorkspaceService from '../../services/dataWorkspaceService';
 import FormulaBar from './FormulaBar';
+import LinkPickerDialog from './LinkPickerDialog';
+import { parseRefFromCell, formatRefLabel } from './referenceLinkUtils';
 
-const DataTableView = ({ 
-  tableId, 
+const DataTableView = ({
+  tableId,
   databaseId = null,
-  schema, 
+  schema,
   onDataChange,
   onRowsLoaded,
-  readOnly = false 
+  onEditTableSchema,
+  onOpenLinkedRow,
+  modalContainer,
+  readOnly = false
 }) => {
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -66,12 +75,22 @@ const DataTableView = ({
   const [sortDirection, setSortDirection] = useState('asc'); // 'asc' or 'desc'
   const [selectedCell, setSelectedCell] = useState(null); // { rowId, columnName, rowIndex, columnIndex }
   const [recalculating, setRecalculating] = useState(false);
+  /** Edit every cell on the current page only (matches loaded `rows`; tab order follows the grid). */
+  const [quickPageEdit, setQuickPageEdit] = useState(false);
+  /** Local overrides while quick-editing: { [rowId]: { [columnName]: value } } */
+  const [pageEditDrafts, setPageEditDrafts] = useState({});
+  const [linkPicker, setLinkPicker] = useState(null);
 
   useEffect(() => {
     if (tableId) {
       loadData();
     }
   }, [tableId, databaseId, page]);
+
+  useEffect(() => {
+    setQuickPageEdit(false);
+    setPageEditDrafts({});
+  }, [page, sortColumn, sortDirection]);
 
   const loadData = async () => {
     try {
@@ -111,15 +130,19 @@ const DataTableView = ({
   };
 
   const sortRows = (rowsToSort, columnName, direction) => {
+    const colMeta = schema.columns.find((c) => c.name === columnName);
     return [...rowsToSort].sort((a, b) => {
-      const aVal = a.row_data[columnName];
-      const bVal = b.row_data[columnName];
-      
-      // Handle null/undefined values
+      let aVal = a.row_data[columnName];
+      let bVal = b.row_data[columnName];
+
+      if (colMeta?.type === 'REFERENCE') {
+        aVal = formatRefLabel(aVal);
+        bVal = formatRefLabel(bVal);
+      }
+
       if (aVal === null || aVal === undefined) return 1;
       if (bVal === null || bVal === undefined) return -1;
-      
-      // Compare values
+
       let comparison = 0;
       if (typeof aVal === 'number' && typeof bVal === 'number') {
         comparison = aVal - bVal;
@@ -128,7 +151,7 @@ const DataTableView = ({
       } else {
         comparison = String(aVal).localeCompare(String(bVal));
       }
-      
+
       return direction === 'asc' ? comparison : -comparison;
     });
   };
@@ -153,6 +176,7 @@ const DataTableView = ({
   }, [sortColumn, sortDirection]);
 
   const handleStartEdit = (row) => {
+    if (quickPageEdit) return;
     setEditingRow(row.row_id);
     setEditingData({ ...row.row_data });
     setEditingCell(null); // Clear any cell editing
@@ -165,8 +189,8 @@ const DataTableView = ({
   };
 
   const handleCellDoubleClick = (row, column) => {
-    if (readOnly || editingRow) return; // Don't allow cell edit if already editing row
-    
+    if (readOnly || editingRow || quickPageEdit) return;
+
     const columnIndex = schema.columns.findIndex(c => c.name === column.name);
     setSelectedCell({
       rowId: row.row_id,
@@ -313,23 +337,31 @@ const DataTableView = ({
         } else if (col.type === 'INTEGER' || col.type === 'REAL') acc[col.name] = 0;
         else if (col.type === 'BOOLEAN') acc[col.name] = false;
         else if (col.type === 'TIMESTAMP') acc[col.name] = new Date().toISOString();
-        else acc[col.name] = '';
+        else if (col.type === 'REFERENCE') {
+          /* no default link */
+        } else acc[col.name] = '';
         return acc;
       }, {});
 
       const response = await dataWorkspaceService.insertTableRow(tableId, newRowData);
-      
-      // Use response from server or create a temporary row
+
       const newRow = response || {
         row_id: `row_new_${Date.now()}`,
         row_data: newRowData
       };
-      
-      setRows([...rows, newRow]);
-      setTotalRows(totalRows + 1);
-      setEditingRow(newRow.row_id);
-      setEditingData(newRowData);
-      
+
+      setRows([...rows, { ...newRow, formula_data: newRow.formula_data || {} }]);
+      setTotalRows((n) => n + 1);
+
+      if (quickPageEdit) {
+        setEditingRow(null);
+        setEditingData({});
+        setEditingCell(null);
+      } else {
+        setEditingRow(newRow.row_id);
+        setEditingData(newRow.row_data || newRowData);
+      }
+
       if (onDataChange) onDataChange();
     } catch (err) {
       console.error('Failed to add row:', err);
@@ -342,6 +374,177 @@ const DataTableView = ({
       ...editingData,
       [columnName]: value
     });
+  };
+
+  /** Flat, grid-integrated editor — avoids outlined “bubble” inputs in cells */
+  const gridCellInputSx = {
+    width: '100%',
+    fontSize: '0.8125rem',
+    lineHeight: 1.4,
+    px: 0.75,
+    py: 0.5,
+    minHeight: 30,
+    boxSizing: 'border-box',
+    borderRadius: 0,
+    border: '1px solid',
+    borderColor: 'divider',
+    bgcolor: (theme) =>
+      theme.palette.mode === 'dark' ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.02)',
+    transition: 'border-color 0.12s ease, box-shadow 0.12s ease, background-color 0.12s ease',
+    '&:hover': {
+      borderColor: 'action.active',
+      bgcolor: 'action.hover'
+    },
+    '&.Mui-focused': {
+      borderColor: 'primary.main',
+      boxShadow: (theme) => `inset 0 0 0 1px ${theme.palette.primary.main}`,
+      bgcolor: 'background.paper'
+    }
+  };
+
+  const handleBooleanEditChange = async (row, columnName, checked) => {
+    if (quickPageEdit) {
+      await commitQuickCell(row, columnName, checked);
+      return;
+    }
+    if (editingCell?.rowId === row.row_id && editingCell?.columnName === columnName) {
+      try {
+        setError(null);
+        await dataWorkspaceService.updateTableCell(tableId, row.row_id, columnName, checked, null);
+        await loadData();
+        setEditingCell(null);
+        setEditingData({});
+        if (onDataChange) onDataChange();
+      } catch (err) {
+        console.error('Failed to save cell:', err);
+        setError(err.message || 'Failed to save cell');
+      }
+      return;
+    }
+    handleCellChange(columnName, checked);
+  };
+
+  const clearDraftCell = (rowId, columnName) => {
+    setPageEditDrafts((prev) => {
+      const rowDraft = prev[rowId] ? { ...prev[rowId] } : null;
+      if (!rowDraft) return prev;
+      delete rowDraft[columnName];
+      const next = { ...prev };
+      if (Object.keys(rowDraft).length === 0) {
+        delete next[rowId];
+      } else {
+        next[rowId] = rowDraft;
+      }
+      return next;
+    });
+  };
+
+  const handleQuickDraftChange = (rowId, columnName, value) => {
+    setPageEditDrafts((prev) => ({
+      ...prev,
+      [rowId]: { ...prev[rowId], [columnName]: value }
+    }));
+  };
+
+  const valuesMatchPersisted = (row, columnName, raw) => {
+    if (typeof raw === 'boolean') {
+      return Boolean(row.row_data[columnName]) === raw;
+    }
+    const str = raw == null ? '' : String(raw);
+    const trimmed = str.trim();
+    const prevFormula = getCellFormula(row, columnName);
+    if (trimmed.startsWith('=')) {
+      return String(prevFormula || '').trim() === trimmed;
+    }
+    if (prevFormula != null && String(prevFormula).length > 0) {
+      return false;
+    }
+    const prev = row.row_data[columnName];
+    if (prev === null || prev === undefined) {
+      return trimmed === '';
+    }
+    const col = schema.columns.find((c) => c.name === columnName);
+    if (col?.type === 'REFERENCE') {
+      const enc = (x) => JSON.stringify(parseRefFromCell(x));
+      return enc(prev) === enc(raw);
+    }
+    if (col && (col.type === 'INTEGER' || col.type === 'REAL')) {
+      const n = Number(str);
+      const p = Number(prev);
+      return !Number.isNaN(n) && n === p;
+    }
+    if (typeof prev === 'boolean') {
+      return (trimmed === 'true' || trimmed === '1') === prev;
+    }
+    return String(prev) === str;
+  };
+
+  const commitQuickCell = async (row, columnName, rawDisplay) => {
+    try {
+      setError(null);
+      if (valuesMatchPersisted(row, columnName, rawDisplay)) {
+        clearDraftCell(row.row_id, columnName);
+        return;
+      }
+      const formulaValue =
+        typeof rawDisplay === 'string' && isFormula(rawDisplay) ? rawDisplay : null;
+      const actualValue =
+        formulaValue != null
+          ? null
+          : typeof rawDisplay === 'boolean'
+            ? rawDisplay
+            : rawDisplay;
+
+      await dataWorkspaceService.updateTableCell(
+        tableId,
+        row.row_id,
+        columnName,
+        actualValue,
+        formulaValue
+      );
+      await loadData();
+      clearDraftCell(row.row_id, columnName);
+      if (onDataChange) onDataChange();
+    } catch (err) {
+      console.error('Failed to save cell:', err);
+      setError(err.message || 'Failed to save cell');
+    }
+  };
+
+  const focusQuickInput = (rowId, columnName) => {
+    const id = `qe-${rowId}-${columnName}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+    requestAnimationFrame(() => {
+      const el = document.getElementById(id);
+      if (el && typeof el.focus === 'function') {
+        el.focus();
+        if (typeof el.select === 'function') {
+          el.select();
+        }
+      }
+    });
+  };
+
+  const toggleQuickPageEdit = () => {
+    if (quickPageEdit) {
+      const hasDrafts = Object.values(pageEditDrafts).some(
+        (r) => r && Object.keys(r).length > 0
+      );
+      if (
+        hasDrafts &&
+        !window.confirm(
+          'Some cells still have local edits that were not saved (tab away or press Enter to save each cell). Exit quick edit anyway?'
+        )
+      ) {
+        return;
+      }
+      setQuickPageEdit(false);
+      setPageEditDrafts({});
+      return;
+    }
+    handleCancelEdit();
+    handleCancelCellEdit();
+    setPageEditDrafts({});
+    setQuickPageEdit(true);
   };
 
   const handleSelectRow = (rowId) => {
@@ -363,13 +566,147 @@ const DataTableView = ({
   };
 
   const renderCell = (row, column) => {
-    const isEditingRow = editingRow === row.row_id;
-    const isEditingCell = editingCell?.rowId === row.row_id && editingCell?.columnName === column.name;
-    const isEditing = isEditingRow || isEditingCell;
+    const isEditingRowOnly = editingRow === row.row_id;
+    const isEditingCellMode =
+      editingCell?.rowId === row.row_id && editingCell?.columnName === column.name;
+    const isLegacyEditing = isEditingRowOnly || isEditingCellMode;
+    const isGridQuick = quickPageEdit && !readOnly;
+    const isEditing = isLegacyEditing || isGridQuick;
+
     const cellFormula = getCellFormula(row, column.name);
-    const value = isEditing ? editingData[column.name] : row.row_data[column.name];
     const hasFormula = cellFormula !== null;
-    
+
+    let value;
+    if (isLegacyEditing) {
+      value = editingData[column.name];
+    } else if (isGridQuick) {
+      const d = pageEditDrafts[row.row_id]?.[column.name];
+      value = d !== undefined ? d : (cellFormula ?? row.row_data[column.name]);
+    } else {
+      value = row.row_data[column.name];
+    }
+
+    const quickInputId = `qe-${row.row_id}-${column.name}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    if (column.type === 'REFERENCE') {
+      const refValue = isLegacyEditing
+        ? editingData[column.name]
+        : isGridQuick
+          ? pageEditDrafts[row.row_id]?.[column.name] !== undefined
+            ? pageEditDrafts[row.row_id][column.name]
+            : (cellFormula ?? row.row_data[column.name])
+          : (cellFormula ?? row.row_data[column.name]);
+      const label = formatRefLabel(refValue);
+      const inner = parseRefFromCell(refValue);
+
+      if (!isEditing) {
+        return (
+          <Box
+            onClick={() => handleCellClick(row, column)}
+            onDoubleClick={() => handleCellDoubleClick(row, column)}
+            sx={{
+              cursor: readOnly ? 'default' : 'pointer',
+              minHeight: 28,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.25,
+              px: 0.25,
+              overflow: 'hidden',
+              '&:hover': readOnly ? {} : { backgroundColor: 'action.hover' }
+            }}
+          >
+            <Chip
+              size="small"
+              label={label || '—'}
+              variant={inner ? 'filled' : 'outlined'}
+              sx={{
+                maxWidth: '72%',
+                height: 22,
+                '& .MuiChip-label': { px: 0.75, fontSize: '0.75rem' }
+              }}
+            />
+            {!readOnly && column.ref?.target_table_id && (
+              <Tooltip title="Change link">
+                <IconButton
+                  size="small"
+                  sx={{ p: 0.25 }}
+                  aria-label="Choose linked row"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setLinkPicker({ row, column });
+                  }}
+                >
+                  <EditIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Tooltip>
+            )}
+            {!readOnly && inner?.table_id && typeof onOpenLinkedRow === 'function' && (
+              <Tooltip title="Open linked table">
+                <IconButton
+                  size="small"
+                  sx={{ p: 0.25 }}
+                  aria-label="Open linked table"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenLinkedRow({
+                      targetTableId: inner.table_id,
+                      targetRowId: inner.row_id
+                    });
+                  }}
+                >
+                  <OpenInNewIcon sx={{ fontSize: 16 }} />
+                </IconButton>
+              </Tooltip>
+            )}
+          </Box>
+        );
+      }
+
+      const openPicker = () => {
+        if (!column.ref?.target_table_id) {
+          setError('Reference column has no target table. Edit table schema.');
+          return;
+        }
+        setLinkPicker({ row, column });
+      };
+
+      const clearLink = async () => {
+        try {
+          setError(null);
+          if (isGridQuick) {
+            await commitQuickCell(row, column.name, null);
+          } else {
+            await dataWorkspaceService.updateTableCell(tableId, row.row_id, column.name, null, null);
+            await loadData();
+            if (editingCell?.rowId === row.row_id && editingCell?.columnName === column.name) {
+              setEditingCell(null);
+              setEditingData({});
+            }
+            if (editingRow === row.row_id) {
+              setEditingData((prev) => ({ ...prev, [column.name]: null }));
+            }
+            if (onDataChange) onDataChange();
+          }
+        } catch (err) {
+          setError(err.message || 'Failed to clear link');
+        }
+      };
+
+      return (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexWrap: 'wrap', minHeight: 30 }}>
+          <Chip size="small" label={label || 'None'} sx={{ height: 22 }} />
+          <Button size="small" variant="outlined" onClick={openPicker} disabled={readOnly || !column.ref?.target_table_id}>
+            Choose…
+          </Button>
+          {inner && !readOnly && (
+            <Button size="small" color="warning" onClick={() => void clearLink()}>
+              Clear
+            </Button>
+          )}
+        </Box>
+      );
+    }
+
     if (!isEditing) {
       let displayValue = value;
       if (column.type === 'BOOLEAN') {
@@ -379,31 +716,33 @@ const DataTableView = ({
       } else if (value === null || value === undefined) {
         displayValue = '-';
       }
-      
+
       return (
         <Box
           onClick={() => handleCellClick(row, column)}
           onDoubleClick={() => handleCellDoubleClick(row, column)}
           sx={{
             cursor: readOnly ? 'default' : 'pointer',
-            minHeight: 24,
+            minHeight: 28,
             display: 'flex',
             alignItems: 'center',
             gap: 0.5,
-            '&:hover': readOnly ? {} : {
-              backgroundColor: 'action.hover',
-              borderRadius: 0.5
-            }
+            px: 0.25,
+            overflow: 'hidden',
+            '&:hover': readOnly ? {} : { backgroundColor: 'action.hover' }
           }}
         >
           {hasFormula && (
             <FunctionsIcon fontSize="small" sx={{ color: 'primary.main', fontSize: 16 }} />
           )}
-          <Typography 
-            variant="body2" 
-            sx={{ 
+          <Typography
+            variant="body2"
+            noWrap
+            title={String(displayValue)}
+            sx={{
               color: column.color || 'inherit',
-              fontWeight: column.color ? 600 : 400
+              fontWeight: column.color ? 600 : 400,
+              fontSize: '0.8125rem'
             }}
           >
             {String(displayValue)}
@@ -412,134 +751,165 @@ const DataTableView = ({
       );
     }
 
-    // Editing mode (row or cell)
+    const syncSelectedCell = () => {
+      const columnIndex = schema.columns.findIndex((c) => c.name === column.name);
+      setSelectedCell({
+        rowId: row.row_id,
+        columnName: column.name,
+        rowIndex: row.row_index,
+        columnIndex
+      });
+    };
+
     if (column.type === 'BOOLEAN') {
       return (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', minHeight: 30 }}>
           <Checkbox
             checked={Boolean(value)}
-            onChange={(e) => handleCellChange(column.name, e.target.checked)}
+            onChange={(e) => handleBooleanEditChange(row, column.name, e.target.checked)}
+            onFocus={() => isGridQuick && syncSelectedCell()}
             size="small"
-            autoFocus={isEditingCell}
+            autoFocus={isEditingCellMode && !isGridQuick}
+            tabIndex={isGridQuick ? 0 : undefined}
           />
-          {isEditingCell && (
-            <Box sx={{ display: 'flex', gap: 0.5 }}>
-              <IconButton
-                size="small"
-                color="primary"
-                onClick={() => handleSaveCellEdit(row.row_id, column.name)}
-              >
-                <SaveIcon fontSize="small" />
-              </IconButton>
-              <IconButton
-                size="small"
-                onClick={handleCancelCellEdit}
-              >
-                <CancelIcon fontSize="small" />
-              </IconButton>
-            </Box>
-          )}
-        </Box>
-      );
-    } else if (column.type === 'INTEGER' || column.type === 'REAL') {
-      const isFormulaValue = isFormula(value);
-      return (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <TextField
-            value={value || ''}
-            onChange={(e) => handleCellChange(column.name, e.target.value)}
-            onKeyDown={(e) => {
-              if (isEditingCell) {
-                if (e.key === 'Enter') {
-                  handleSaveCellEdit(row.row_id, column.name);
-                } else if (e.key === 'Escape') {
-                  handleCancelCellEdit();
-                }
-              }
-            }}
-            type="text"
-            size="small"
-            fullWidth
-            autoFocus={isEditingCell}
-            placeholder={isFormulaValue ? "Enter formula (e.g., =A1+B1)" : "Enter number or formula (e.g., =A1+B1)"}
-            InputProps={{
-              startAdornment: isFormulaValue && !isEditingCell ? (
-                <FunctionsIcon fontSize="small" sx={{ color: 'primary.main', mr: 1 }} />
-              ) : null
-            }}
-          />
-          {isEditingCell && (
-            <Box sx={{ display: 'flex', gap: 0.5 }}>
-              <Tooltip title="Enter formula">
-                <IconButton
-                  size="small"
-                  onClick={() => {
-                    const currentValue = editingData[column.name] || '';
-                    handleCellChange(column.name, currentValue.startsWith('=') ? currentValue : '=');
-                  }}
-                >
-                  <FunctionsIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-              <IconButton
-                size="small"
-                color="primary"
-                onClick={() => handleSaveCellEdit(row.row_id, column.name)}
-              >
-                <SaveIcon fontSize="small" />
-              </IconButton>
-              <IconButton
-                size="small"
-                onClick={handleCancelCellEdit}
-              >
-                <CancelIcon fontSize="small" />
-              </IconButton>
-            </Box>
-          )}
-        </Box>
-      );
-    } else {
-      return (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <TextField
-            value={value || ''}
-            onChange={(e) => handleCellChange(column.name, e.target.value)}
-            onKeyDown={(e) => {
-              if (isEditingCell) {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSaveCellEdit(row.row_id, column.name);
-                } else if (e.key === 'Escape') {
-                  handleCancelCellEdit();
-                }
-              }
-            }}
-            size="small"
-            fullWidth
-            autoFocus={isEditingCell}
-            multiline={column.type === 'TEXT'}
-            maxRows={3}
-          />
-          {isEditingCell && (
-            <Box sx={{ display: 'flex', gap: 0.5 }}>
-              <IconButton
-                size="small"
-                color="primary"
-                onClick={() => handleSaveCellEdit(row.row_id, column.name)}
-              >
-                <SaveIcon fontSize="small" />
-              </IconButton>
-              <IconButton
-                size="small"
-                onClick={handleCancelCellEdit}
-              >
-                <CancelIcon fontSize="small" />
-              </IconButton>
-            </Box>
-          )}
         </Box>
       );
     }
+
+    if (column.type === 'INTEGER' || column.type === 'REAL') {
+      const isFormulaValue = isFormula(value);
+      return (
+        <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0 }}>
+          {isFormulaValue ? (
+            <FunctionsIcon fontSize="inherit" sx={{ color: 'primary.main', mr: 0.5, flexShrink: 0, fontSize: 16 }} />
+          ) : null}
+          <InputBase
+            value={value ?? ''}
+            onChange={(e) =>
+              isGridQuick
+                ? handleQuickDraftChange(row.row_id, column.name, e.target.value)
+                : handleCellChange(column.name, e.target.value)
+            }
+            onFocus={() => isGridQuick && syncSelectedCell()}
+            onBlur={
+              isGridQuick
+                ? (e) => {
+                    void commitQuickCell(row, column.name, e.target.value);
+                  }
+                : undefined
+            }
+            onKeyDown={(e) => {
+              if (isGridQuick) {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void (async () => {
+                    await commitQuickCell(row, column.name, e.currentTarget.value);
+                    const rIdx = rows.findIndex((r) => r.row_id === row.row_id);
+                    if (rIdx >= 0 && rIdx < rows.length - 1) {
+                      focusQuickInput(rows[rIdx + 1].row_id, column.name);
+                    }
+                  })();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  clearDraftCell(row.row_id, column.name);
+                }
+                return;
+              }
+              if (isEditingRowOnly) {
+                if (e.key === 'Enter') e.stopPropagation();
+                return;
+              }
+              if (e.key === 'Enter') {
+                handleSaveCellEdit(row.row_id, column.name);
+              } else if (e.key === 'Escape') {
+                handleCancelCellEdit();
+              }
+            }}
+            fullWidth
+            autoFocus={isEditingCellMode && !isGridQuick}
+            placeholder={isFormulaValue ? '=formula' : 'Number or =formula'}
+            inputProps={{
+              id: isGridQuick ? quickInputId : undefined,
+              'aria-label': column.name,
+              spellCheck: false
+            }}
+            sx={gridCellInputSx}
+          />
+        </Box>
+      );
+    }
+
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 0, minHeight: 30 }}>
+        <InputBase
+          value={value ?? ''}
+          onChange={(e) =>
+            isGridQuick
+              ? handleQuickDraftChange(row.row_id, column.name, e.target.value)
+              : handleCellChange(column.name, e.target.value)
+          }
+          onFocus={() => isGridQuick && syncSelectedCell()}
+          onBlur={
+            isGridQuick
+              ? (e) => {
+                  void commitQuickCell(row, column.name, e.target.value);
+                }
+              : undefined
+          }
+          onKeyDown={(e) => {
+            if (isGridQuick) {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                void (async () => {
+                  await commitQuickCell(row, column.name, e.currentTarget.value);
+                  const rIdx = rows.findIndex((r) => r.row_id === row.row_id);
+                  if (rIdx >= 0 && rIdx < rows.length - 1) {
+                    focusQuickInput(rows[rIdx + 1].row_id, column.name);
+                  }
+                })();
+              } else if (e.key === 'Escape') {
+                e.preventDefault();
+                clearDraftCell(row.row_id, column.name);
+              }
+              return;
+            }
+            if (isEditingRowOnly) {
+              if (e.key === 'Enter') e.stopPropagation();
+              return;
+            }
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleSaveCellEdit(row.row_id, column.name);
+            } else if (e.key === 'Escape') {
+              handleCancelCellEdit();
+            }
+          }}
+          fullWidth
+          multiline={false}
+          autoFocus={isEditingCellMode && !isGridQuick}
+          placeholder={column.name}
+          inputProps={{
+            id: isGridQuick ? quickInputId : undefined,
+            'aria-label': column.name,
+            maxLength: 8192,
+            spellCheck: false
+          }}
+          sx={{
+            ...gridCellInputSx,
+            '& input': {
+              textOverflow: 'ellipsis',
+              overflow: 'hidden',
+              whiteSpace: 'nowrap'
+            },
+            '&:focus-within input': {
+              textOverflow: 'clip',
+              overflowX: 'auto',
+              whiteSpace: 'nowrap'
+            }
+          }}
+        />
+      </Box>
+    );
   };
 
   if (loading) {
@@ -567,6 +937,45 @@ const DataTableView = ({
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <LinkPickerDialog
+        open={!!linkPicker}
+        onClose={() => setLinkPicker(null)}
+        databaseId={databaseId}
+        targetTableId={linkPicker?.column?.ref?.target_table_id}
+        targetTableName=""
+        labelField={linkPicker?.column?.ref?.label_field || 'name'}
+        container={modalContainer}
+        onSelect={async (cellObj) => {
+          const ctx = linkPicker;
+          setLinkPicker(null);
+          if (!ctx) return;
+          const { row: r, column: col } = ctx;
+          try {
+            setError(null);
+            if (quickPageEdit) {
+              await commitQuickCell(r, col.name, cellObj);
+              return;
+            }
+            if (editingCell?.rowId === r.row_id && editingCell?.columnName === col.name) {
+              await dataWorkspaceService.updateTableCell(tableId, r.row_id, col.name, cellObj, null);
+              await loadData();
+              setEditingCell(null);
+              setEditingData({});
+              if (onDataChange) onDataChange();
+              return;
+            }
+            if (editingRow === r.row_id) {
+              handleCellChange(col.name, cellObj);
+              return;
+            }
+            await dataWorkspaceService.updateTableCell(tableId, r.row_id, col.name, cellObj, null);
+            await loadData();
+            if (onDataChange) onDataChange();
+          } catch (err) {
+            setError(err.message || 'Failed to save link');
+          }
+        }}
+      />
       {/* Formula Bar */}
       {!readOnly && (
         <FormulaBar
@@ -578,20 +987,59 @@ const DataTableView = ({
       )}
       
       {/* Toolbar */}
-      <Box sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: 1, borderColor: 'divider' }}>
-        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+      <Box sx={{ px: 2, py: 1.25, display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 1, borderBottom: 1, borderColor: 'divider' }}>
+        <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center', flexWrap: 'wrap' }}>
           <Typography variant="body2" color="text.secondary">
-            {totalRows} rows total
+            {totalRows === 1 ? '1 row total' : `${totalRows} rows total`}
           </Typography>
+          {quickPageEdit && (
+            <Typography variant="caption" color="primary">
+              Quick edit: this page only ({rows.length} rows). Tab between cells; blur or Enter saves; Esc reverts drafts. Add Row appends here and stays in quick edit. Change page or sort exits.
+            </Typography>
+          )}
+          {editingCell && !quickPageEdit && (
+            <Typography variant="caption" color="primary">
+              Cell edit: Enter save · Esc cancel
+            </Typography>
+          )}
           {selectedRows.size > 0 && (
             <Typography variant="body2" color="primary">
               ({selectedRows.size} selected)
             </Typography>
           )}
         </Box>
-        <Box sx={{ display: 'flex', gap: 1 }}>
+        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
           {!readOnly && (
             <>
+              {typeof onEditTableSchema === 'function' && (
+                <Tooltip title="Add, remove, or reorder columns">
+                  <Button
+                    variant="outlined"
+                    startIcon={<TableRowsIcon />}
+                    onClick={onEditTableSchema}
+                    size="small"
+                  >
+                    Table schema
+                  </Button>
+                </Tooltip>
+              )}
+              <Tooltip
+                title={
+                  quickPageEdit
+                    ? 'Finish quick edit'
+                    : `Edit every cell on this page (${rows.length} rows). Tab between cells; blur or Enter saves.`
+                }
+              >
+                <Button
+                  variant={quickPageEdit ? 'contained' : 'outlined'}
+                  color={quickPageEdit ? 'secondary' : 'primary'}
+                  startIcon={<GridOnIcon />}
+                  onClick={toggleQuickPageEdit}
+                  size="small"
+                >
+                  {quickPageEdit ? 'Done' : 'Quick edit page'}
+                </Button>
+              </Tooltip>
               <Button
                 variant="outlined"
                 startIcon={<RefreshIcon />}
@@ -615,12 +1063,26 @@ const DataTableView = ({
       </Box>
 
       {/* Data Table */}
-      <TableContainer component={Paper} sx={{ flexGrow: 1, overflow: 'auto' }}>
-        <Table stickyHeader size="small">
+      <TableContainer component={Paper} variant="outlined" sx={{ flexGrow: 1, overflow: 'auto', borderRadius: 0 }}>
+        <Table
+          stickyHeader
+          size="small"
+          sx={{
+            borderCollapse: 'separate',
+            '& .MuiTableCell-root': {
+              borderRight: 1,
+              borderColor: 'divider',
+              verticalAlign: 'middle'
+            },
+            '& .MuiTableCell-root:last-of-type': {
+              borderRight: 0
+            }
+          }}
+        >
           <TableHead>
             <TableRow>
               {!readOnly && (
-                <TableCell padding="checkbox">
+                <TableCell padding="checkbox" sx={{ bgcolor: 'background.paper' }}>
                   <Checkbox
                     indeterminate={selectedRows.size > 0 && selectedRows.size < rows.length}
                     checked={rows.length > 0 && selectedRows.size === rows.length}
@@ -629,19 +1091,28 @@ const DataTableView = ({
                 </TableCell>
               )}
               {schema.columns.map((column) => (
-                <TableCell 
+                <TableCell
                   key={column.name}
-                  sx={{ 
+                  sx={{
                     fontWeight: 600,
-                    backgroundColor: column.color ? `${column.color}20` : 'inherit',
-                    borderBottom: column.color ? `2px solid ${column.color}` : undefined,
-                    cursor: 'pointer',
+                    fontSize: '0.75rem',
+                    bgcolor: column.color ? `${column.color}18` : 'background.paper',
+                    borderBottom: (theme) =>
+                      column.color ? `2px solid ${column.color}` : `2px solid ${theme.palette.divider}`,
+                    cursor: quickPageEdit ? 'not-allowed' : 'pointer',
                     userSelect: 'none',
+                    opacity: quickPageEdit ? 0.65 : 1,
                     '&:hover': {
-                      backgroundColor: column.color ? `${column.color}30` : 'action.hover'
+                      bgcolor: quickPageEdit
+                        ? undefined
+                        : column.color
+                          ? `${column.color}28`
+                          : 'action.hover'
                     }
                   }}
-                  onClick={() => handleColumnSort(column.name)}
+                  onClick={() => {
+                    if (!quickPageEdit) handleColumnSort(column.name);
+                  }}
                 >
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                     <span>
@@ -661,15 +1132,34 @@ const DataTableView = ({
                   </Box>
                 </TableCell>
               ))}
-              {!readOnly && <TableCell align="center">Actions</TableCell>}
+              {!readOnly && (
+                <TableCell
+                  align="center"
+                  sx={{
+                    fontWeight: 600,
+                    fontSize: '0.75rem',
+                    width: 108,
+                    bgcolor: 'background.paper',
+                    borderBottom: (theme) => `2px solid ${theme.palette.divider}`
+                  }}
+                >
+                  Actions
+                </TableCell>
+              )}
             </TableRow>
           </TableHead>
           <TableBody>
             {rows.map((row) => (
-              <TableRow 
-                key={row.row_id} 
-                hover={!editingRow}
+              <TableRow
+                key={row.row_id}
+                hover={!editingRow && !quickPageEdit}
                 selected={selectedRows.has(row.row_id)}
+                sx={{
+                  ...(editingRow === row.row_id
+                    ? { bgcolor: 'action.selected' }
+                    : null),
+                  ...(quickPageEdit ? { bgcolor: 'action.hover' } : null)
+                }}
               >
                 {!readOnly && (
                   <TableCell padding="checkbox">
@@ -680,10 +1170,13 @@ const DataTableView = ({
                   </TableCell>
                 )}
                 {schema.columns.map((column) => (
-                  <TableCell 
+                  <TableCell
                     key={column.name}
-                    sx={{ 
-                      backgroundColor: column.color ? `${column.color}10` : 'inherit'
+                    sx={{
+                      py: 0.5,
+                      px: 1,
+                      maxWidth: 280,
+                      bgcolor: column.color ? `${column.color}0d` : 'transparent'
                     }}
                   >
                     {renderCell(row, column)}
@@ -691,7 +1184,22 @@ const DataTableView = ({
                 ))}
                 {!readOnly && (
                   <TableCell align="center">
-                    {editingRow === row.row_id ? (
+                    {quickPageEdit ? (
+                      <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
+                        <Tooltip title="Delete row">
+                          <IconButton
+                            size="small"
+                            color="error"
+                            onClick={() => {
+                              setRowToDelete(row.row_id);
+                              setDeleteDialogOpen(true);
+                            }}
+                          >
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      </Box>
+                    ) : editingRow === row.row_id ? (
                       <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
                         <Tooltip title="Save">
                           <IconButton
@@ -713,7 +1221,7 @@ const DataTableView = ({
                       </Box>
                     ) : (
                       <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
-                        <Tooltip title="Edit">
+                        <Tooltip title="Edit row">
                           <IconButton
                             size="small"
                             onClick={() => handleStartEdit(row)}
@@ -721,7 +1229,7 @@ const DataTableView = ({
                             <EditIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
-                        <Tooltip title="Delete">
+                        <Tooltip title="Delete row">
                           <IconButton
                             size="small"
                             color="error"
@@ -746,17 +1254,31 @@ const DataTableView = ({
       {/* Pagination */}
       {totalRows > rowsPerPage && (
         <Box sx={{ p: 2, display: 'flex', justifyContent: 'center', borderTop: 1, borderColor: 'divider' }}>
-          <Pagination
-            count={Math.ceil(totalRows / rowsPerPage)}
-            page={page}
-            onChange={(e, value) => setPage(value)}
-            color="primary"
-          />
+          {quickPageEdit ? (
+            <Tooltip title="Click Done to exit quick edit, then change page">
+              <span>
+                <Pagination
+                  count={Math.ceil(totalRows / rowsPerPage)}
+                  page={page}
+                  onChange={(e, value) => setPage(value)}
+                  color="primary"
+                  disabled
+                />
+              </span>
+            </Tooltip>
+          ) : (
+            <Pagination
+              count={Math.ceil(totalRows / rowsPerPage)}
+              page={page}
+              onChange={(e, value) => setPage(value)}
+              color="primary"
+            />
+          )}
         </Box>
       )}
 
       {/* Delete Confirmation Dialog */}
-      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)}>
+      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} container={modalContainer}>
         <DialogTitle>Delete Row?</DialogTitle>
         <DialogContent>
           <Typography>

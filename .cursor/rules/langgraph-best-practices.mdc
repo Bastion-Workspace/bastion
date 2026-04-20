@@ -11,9 +11,9 @@ Follow these LangGraph best practices for building robust, maintainable agent sy
 
 ### Single Responsibility Agents
 - Each agent handles **ONE specific domain** (research, chat, coding, weather, etc.)
-- Keep agent files under **500 lines** - split complex agents into focused modules
-- Use [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py) as the foundation
-- Store agent logic in [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/) directory
+- Keep agent files under **700 lines** - split complex agents into focused modules
+- Use [llm-orchestrator/orchestrator/agents/base_agent.py](mdc:llm-orchestrator/orchestrator/agents/base_agent.py) as the foundation
+- Store agent logic in [llm-orchestrator/orchestrator/agents/](mdc:llm-orchestrator/orchestrator/agents/) directory
 
 ### Structured Agent Communication
 - **ALWAYS use Pydantic models** from [backend/models/agent_response_models.py](mdc:backend/models/agent_response_models.py)
@@ -36,7 +36,7 @@ except ValidationError as e:
 ## LangGraph State Management
 
 ### Conversation State Pattern
-- Use [backend/services/langgraph_enhanced_state.py](mdc:backend/services/langgraph_enhanced_state.py) for state definitions
+- Define agent state as a `TypedDict` in each agent module (see LLM Orchestrator Agent Requirements below)
 - Store cross-agent data in `state["shared_memory"]` 
 - Use `state["agent_results"]` for current agent outputs
 - Maintain conversation history in `state["messages"]`
@@ -95,9 +95,9 @@ if has_pending_permission and user_approves:
 - **External**: Tools that touch database, vector store, web, email, files, or any service outside the orchestrator — implementation in Tools Service ([backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py)), orchestrator has thin gRPC wrappers only
 
 ### Centralized Tool Management
-- Use [backend/services/langgraph_tools/centralized_tool_registry.py](mdc:backend/services/langgraph_tools/centralized_tool_registry.py)
+- Tool implementations live in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/) and are exposed via [backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py)
+- Agent Factory playbook steps bind tools via [tool_resolution.py](mdc:llm-orchestrator/orchestrator/engines/tool_resolution.py) and the Action I/O Registry
 - Group tools by domain in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/) directory
-- Provide async wrapper functions for class methods to work with registry
 
 Example tool wrapper:
 ```python
@@ -158,7 +158,7 @@ def _route_from_intent(self, state: Dict[str, Any]) -> str:
 - ✅ NEVER include headers in `original_text` for `replace_range`/`delete_range`
 - ✅ Use `insert_after_heading` when adding content below headers
 - ✅ Provide EXACT, VERBATIM text from file (minimum 10-20 words)
-- ✅ Always use centralized resolver: `resolve_editor_operation()` from `orchestrator.utils.editor_operation_resolver`
+- ✅ Always use centralized resolver: `resolve_operation()` from `backend.utils.editor_operations_resolver`
 - ✅ Trust resolver to protect frontmatter automatically
 
 **Key requirements:**
@@ -385,7 +385,7 @@ initial_state = {
 - Fiction Editing Agent
 - Any agent accessing `active_editor`
 
-**See:** `dev-notes/AGENT_INTEGRATION_GUIDE.md` for detailed bug investigation and examples.
+**See:** [AGENT_FACTORY_ARCHITECTURE.md](mdc:docs/dev-notes/AGENT_FACTORY_ARCHITECTURE.md) for how orchestration and checkpointing work today.
 
 #### 9. Workflow Requirements Checklist
 - [ ] Inherits from `BaseAgent`
@@ -1063,10 +1063,9 @@ assert result.get("formatted_context") == "TEST_VALUE_SHOULD_SURVIVE", \
 
 **These principles prevent hours of debugging "disappearing data" bugs!**
 
-### Base Agent Extension (Backend Agents)
-- Extend [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py)
-- Override `_process_request()` method for agent-specific logic
-- Use `self.tool_registry` for tool access
+### Base Agent Extension
+- Extend [llm-orchestrator/orchestrator/agents/base_agent.py](mdc:llm-orchestrator/orchestrator/agents/base_agent.py)
+- Use `self._get_llm()` for all LLM calls
 - Implement proper error handling and logging
 
 ### Frontmatter Reference Management (CRITICAL)
@@ -1364,25 +1363,23 @@ if success:
 ## File Organization
 
 ### Agent Files
-- New interactive agents belong in [llm-orchestrator/orchestrator/agents/](mdc:llm-orchestrator/orchestrator/agents/) (extend [base_agent.py](mdc:llm-orchestrator/orchestrator/agents/base_agent.py)); [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/) is legacy/narrow scope only.
+- New interactive agents belong in [llm-orchestrator/orchestrator/agents/](mdc:llm-orchestrator/orchestrator/agents/) (extend [base_agent.py](mdc:llm-orchestrator/orchestrator/agents/base_agent.py)).
 - Use descriptive names: e.g. `custom_agent_runner.py`, domain-specific modules under `agents/` (one concern per agent file).
-- Split large agents (>500 lines) into focused modules
+- Split large agents (>700 lines) into focused modules
 
-### Subgraph Files
-- Create dedicated subgraph modules in [backend/services/langgraph_subgraphs/](mdc:backend/services/langgraph_subgraphs/)
-- Use clear naming: `research_subgraph.py`, `permission_subgraph.py`, `analysis_subgraph.py`
-- Include state transformation utilities in subgraph modules
+### LangGraph workflows (orchestrator)
 
-### Tool Files  
+- Prefer cohesive modules under [llm-orchestrator/orchestrator/engines/](mdc:llm-orchestrator/orchestrator/engines/) (e.g. playbook graph builder, pipeline executor) and [llm-orchestrator/orchestrator/agents/](mdc:llm-orchestrator/orchestrator/agents/) (`custom_agent_runner.py`).
+- There is **no** `backend/services/langgraph_subgraphs/` package in this repo; keep subgraph guidance generic or point at live orchestrator paths.
+
+### Tool files
 - Organize tools by domain in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/)
 - Provide both class and async function interfaces
 - Register tools with descriptive names and clear documentation
 
-### Model Files
-- Define all Pydantic models in [backend/models/](mdc:backend/models/)
-- Use typed models for agent inputs/outputs
-- Include validation and serialization logic
-- **Create subgraph-specific state models** in [backend/models/subgraph_models.py](mdc:backend/models/subgraph_models.py)
+### Model files
+- Define Pydantic models in [backend/models/](mdc:backend/models/) or [llm-orchestrator/orchestrator/models/](mdc:llm-orchestrator/orchestrator/models/) depending on ownership (backend persistence vs orchestrator tool contracts).
+- Use typed models for agent inputs/outputs and include validation where appropriate.
 
 ## Debugging and Monitoring
 

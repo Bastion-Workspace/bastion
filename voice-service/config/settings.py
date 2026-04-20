@@ -29,6 +29,9 @@ class Settings:
     # ElevenLabs
     ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY")
 
+    # Hedra TTS (and other generations)
+    HEDRA_API_KEY: Optional[str] = os.getenv("HEDRA_API_KEY")
+
     # OpenAI TTS
     OPENAI_API_KEY: Optional[str] = os.getenv("OPENAI_API_KEY")
     OPENAI_TTS_MODEL: str = os.getenv("OPENAI_TTS_MODEL", "tts-1")
@@ -44,7 +47,7 @@ class Settings:
     )
 
     VALID_STT_PROVIDERS = frozenset({"whisper"})
-    VALID_TTS_PROVIDERS = frozenset({"elevenlabs", "openai", "piper"})
+    VALID_TTS_PROVIDERS = frozenset({"elevenlabs", "hedra", "openai", "piper"})
 
     @classmethod
     def validate(cls) -> None:
@@ -60,6 +63,10 @@ class Settings:
         if cls.VOICE_TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:
             raise ValueError(
                 "ELEVENLABS_API_KEY is required when VOICE_TTS_PROVIDER=elevenlabs"
+            )
+        if cls.VOICE_TTS_PROVIDER == "hedra" and not cls.HEDRA_API_KEY:
+            raise ValueError(
+                "HEDRA_API_KEY is required when VOICE_TTS_PROVIDER=hedra"
             )
         if cls.VOICE_TTS_PROVIDER == "openai" and not cls.OPENAI_API_KEY:
             raise ValueError(

@@ -42,11 +42,11 @@ You build playbooks in the **Workflow Composer** by adding steps, setting their 
 
 **Tools** are the actions an agent can perform: search documents, read or update a file, run SQL, send a notification, call an external API, and so on. Each tool has defined inputs and outputs so the Composer can suggest and validate wiring between steps.
 
-You don’t implement tools in the UI — you choose from the registered set and wire their outputs into later steps. The **Tools reference** topic in this section lists categories and how to use tools in playbooks; the full catalog lives in the repository docs (*AGENT_FACTORY_TOOLS.md*).
+You don’t implement tools in the UI — you choose from the registered set and wire their outputs into later steps. The **Tools reference** topic in this section lists categories and how to use tools in playbooks; the full catalog lives in the repository docs (*AGENT_FACTORY_TOOLS.md*). **Agent profile settings** explains identity, model preference, schedules, monitors, memory, and related options that apply across runs.
 
 ### Skills
 
-**Skills** are reusable bundles of behavior (e.g. “multi-round research”, “entity extraction”) that you attach to a profile. They influence how the agent reasons and which tools it tends to use. The technical guide describes the skill registry and schema; in the UI you pick skills when editing a profile.
+**Skills** are reusable procedural knowledge (instructions plus optional required tools): e.g. multi-round research, entity extraction. You can attach them at the **agent profile** level and/or pin them on individual **LLM agent**, **deep agent**, and **LLM task** steps in the Workflow Composer. **Skill discovery** (Off, Auto, Catalog, Full) on agent steps controls pre-run matching to the prompt, whether a compact **skills catalog** is injected into the system message (**Catalog** and **Full**), and whether **acquire_skill** / **search_and_acquire_skills** are available (**Catalog** and **Full**). See **Skills** for authoring, versioning, sharing, and runtime behavior; **Tools reference** has the full discovery matrix; **Playbook steps and flow control** describes the Composer layout.
 
 ### Data connections (connectors)
 
@@ -67,7 +67,10 @@ Results can be written to the **Knowledge Graph** (Neo4j) and **vector store** (
 ## Where to go next
 
 - **Playbooks overview** — What playbooks are, how they run, and how data flows between steps.
-- **Playbook steps and flow control** — Step types (tool, llm_task, llm_agent, deep_agent, approval, branch, loop, parallel) and when to use each.
+- **Playbook steps and flow control** — Step types (tool, llm_task, llm_agent, deep_agent, approval, branch, loop, parallel) and when to use each; **subagents** on LLM agent and deep agent steps (delegation modes, Role / Accepts / Returns, scratchpad).
+- **Skills** — Creating, editing, candidates, sharing, and how skills attach to steps.
+- **Agent profile settings** — Identity, model, history, persona, Data Workspace, connections, schedules, monitors, budget, memory.
+- **Schedules and monitors** — Cron, event triggers, `{trigger_input}`, and approval policy for background runs.
 - **Tools reference** — Categories of tools and how to use them in playbooks.
 - **Prompt variables and conditional blocks** — What variables you can use in prompts and step inputs (e.g. `{query}`, `{editor}`, `{today}`), how to reference previous steps, and how to hide sections when data is missing using `{{#var}}...{{/var}}`.
 - **Data Connectors overview** — What connectors are and when to use them.

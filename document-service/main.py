@@ -1,58 +1,74 @@
 """
-Document Service - Main Entry Point
+Document Service - Main Entry Point (standalone: vendored backend pipeline + NER).
 """
 
 import asyncio
 import logging
+import os
 import signal
-import grpc
+import sys
 from concurrent import futures
 
-# Setup logging before imports
+import grpc
+
+# Shims must precede ds_* so `services.*` and `utils.*` resolve to stubs.
+sys.path.insert(0, "/app/ds/shims")
+sys.path.insert(0, "/app/ds")
+sys.path.insert(0, "/app")
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-from config.settings import settings
+from ds_config import settings, validate_runtime
 from service.grpc_service import DocumentServiceImplementation
 
-import sys
-
-sys.path.insert(0, "/app")
 from protos import document_service_pb2_grpc
 
 
 class GracefulShutdown:
-    """Handle graceful shutdown"""
-
-    def __init__(self, server):
+    def __init__(self, server, file_watcher=None, service_impl=None):
         self.server = server
+        self.file_watcher = file_watcher
+        self.service_impl = service_impl
         self.shutdown_event = asyncio.Event()
 
     def signal_handler(self, signum, frame):
-        """Handle shutdown signal"""
         logger.info("Received signal %s, initiating graceful shutdown...", signum)
         asyncio.create_task(self.shutdown())
 
     async def shutdown(self):
-        """Shutdown server gracefully"""
         logger.info("Stopping server...")
+        if self.service_impl:
+            try:
+                await self.service_impl.shutdown_neo4j_maintenance()
+            except Exception as e:
+                logger.warning("Neo4j maintenance shutdown: %s", e)
+        if self.file_watcher:
+            try:
+                await self.file_watcher.stop()
+            except Exception as e:
+                logger.warning("File watcher stop: %s", e)
+            try:
+                from ds_services.file_watcher_service import reset_file_watcher
+
+                reset_file_watcher()
+            except Exception:
+                pass
         await self.server.stop(grace=5)
         logger.info("Server shutdown complete")
         self.shutdown_event.set()
 
 
 async def serve():
-    """Start the gRPC server"""
+    file_watcher = None
     try:
-        settings.validate()
+        validate_runtime()
         logger.info("Starting %s on port %s", settings.SERVICE_NAME, settings.GRPC_PORT)
 
         service_impl = DocumentServiceImplementation()
-
-        logger.info("Initializing service components...")
         await service_impl.initialize()
 
         options = [
@@ -70,13 +86,29 @@ async def serve():
 
         server.add_insecure_port(f"[::]:{settings.GRPC_PORT}")
 
-        shutdown_handler = GracefulShutdown(server)
+        if os.getenv("DATABASE_URL") and os.getenv("DS_ENABLE_FILE_WATCHER", "true").lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            try:
+                from ds_services.file_watcher_service import get_file_watcher
+
+                file_watcher = await get_file_watcher()
+                await file_watcher.start()
+                logger.info("File system watcher started")
+            except Exception as e:
+                logger.warning("File watcher not started: %s", e)
+                file_watcher = None
+
+        shutdown_handler = GracefulShutdown(
+            server, file_watcher=file_watcher, service_impl=service_impl
+        )
         signal.signal(signal.SIGINT, shutdown_handler.signal_handler)
         signal.signal(signal.SIGTERM, shutdown_handler.signal_handler)
 
         await server.start()
         logger.info("Document Service ready on port %s", settings.GRPC_PORT)
-        logger.info("spaCy model: %s", settings.SPACY_MODEL)
 
         await shutdown_handler.shutdown_event.wait()
 
@@ -86,7 +118,6 @@ async def serve():
 
 
 def main():
-    """Main entry point"""
     try:
         asyncio.run(serve())
     except KeyboardInterrupt:

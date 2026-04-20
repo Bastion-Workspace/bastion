@@ -29,6 +29,7 @@ import {
 import { GroupAdd } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import { invalidateAgentHandlesQuery } from '../../services/agentFactoryService';
 
 const PATTERNS = [
   { id: 'general', label: 'General', mission: 'Collaborate and coordinate as a team.' },
@@ -44,6 +45,13 @@ const ROLE_OPTIONS = [
   { value: 'specialist', label: 'Specialist' },
 ];
 
+const GOVERNANCE_OPTIONS = [
+  { value: 'hierarchical', label: 'Hierarchical (CEO + reports)' },
+  { value: 'committee', label: 'Committee (flat; parallel heartbeats)' },
+  { value: 'round_robin', label: 'Round-robin leader' },
+  { value: 'consensus', label: 'Consensus (quorum actions)' },
+];
+
 export default function QuickTeamWizard({ open, onClose, onSuccess }) {
   const queryClient = useQueryClient();
   const [step, setStep] = useState(0);
@@ -52,6 +60,7 @@ export default function QuickTeamWizard({ open, onClose, onSuccess }) {
   const [teamName, setTeamName] = useState('');
   const [missionStatement, setMissionStatement] = useState('');
   const [roleOverrides, setRoleOverrides] = useState({});
+  const [governanceMode, setGovernanceMode] = useState('hierarchical');
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState('');
 
@@ -98,7 +107,10 @@ export default function QuickTeamWizard({ open, onClose, onSuccess }) {
 
   const canNextStep0 = selectedIds.length >= 2;
   const canSubmit =
-    step === 1 && teamName.trim() && selectedProfiles.length >= 2 && ceoId;
+    step === 1
+    && teamName.trim()
+    && selectedProfiles.length >= 2
+    && (governanceMode === 'hierarchical' ? !!ceoId : true);
 
   const handleNext = () => {
     setError('');
@@ -125,34 +137,65 @@ export default function QuickTeamWizard({ open, onClose, onSuccess }) {
     setError('');
     setCreating(true);
     try {
+      const gp0 =
+        governanceMode === 'consensus'
+          ? { quorum_pct: 60 }
+          : {};
       const team = await apiService.agentFactory.createLine({
         name: teamName.trim(),
         description: '',
         mission_statement: missionStatement.trim() || undefined,
         status: 'active',
+        governance_mode: governanceMode,
+        governance_policy: gp0,
       });
       const teamId = team?.id;
       if (!teamId) throw new Error('Team creation did not return an id');
 
-      const ordered = [...selectedProfiles].sort((a, b) =>
-        a.id === ceoId ? -1 : b.id === ceoId ? 1 : 0
-      );
-      let ceoMembershipId = null;
-      for (let i = 0; i < ordered.length; i++) {
-        const p = ordered[i];
-        const isCeo = p.id === ceoId;
-        const role = roleOverrides[p.id] || (isCeo ? 'ceo' : 'worker');
-        const reportsTo = isCeo ? null : ceoMembershipId;
-        const res = await apiService.agentFactory.addLineMember(teamId, {
-          agent_profile_id: p.id,
-          role,
-          reports_to: reportsTo,
+      if (governanceMode === 'hierarchical') {
+        const ordered = [...selectedProfiles].sort((a, b) =>
+          a.id === ceoId ? -1 : b.id === ceoId ? 1 : 0
+        );
+        let ceoMembershipId = null;
+        for (let i = 0; i < ordered.length; i++) {
+          const p = ordered[i];
+          const isCeo = p.id === ceoId;
+          const role = roleOverrides[p.id] || (isCeo ? 'ceo' : 'worker');
+          const reportsTo = isCeo ? null : ceoMembershipId;
+          const res = await apiService.agentFactory.addLineMember(teamId, {
+            agent_profile_id: p.id,
+            role,
+            reports_to: reportsTo,
+          });
+          if (isCeo && res?.id) ceoMembershipId = res.id;
+        }
+      } else {
+        for (const p of selectedProfiles) {
+          await apiService.agentFactory.addLineMember(teamId, {
+            agent_profile_id: p.id,
+            role: roleOverrides[p.id] || 'worker',
+            reports_to: null,
+          });
+        }
+        const lineFull = await apiService.agentFactory.getLine(teamId);
+        const mids = (lineFull?.members || []).map((m) => m.id).filter(Boolean);
+        const gp = { ...(lineFull?.governance_policy || {}) };
+        if (governanceMode === 'round_robin' && mids.length) {
+          gp.rotation_order = mids;
+          gp.current_leader_idx = 0;
+        }
+        if (governanceMode === 'consensus') {
+          gp.quorum_pct = gp.quorum_pct ?? 60;
+        }
+        await apiService.agentFactory.updateLine(teamId, {
+          governance_mode: governanceMode,
+          governance_policy: gp,
         });
-        if (isCeo && res?.id) ceoMembershipId = res.id;
       }
 
       queryClient.invalidateQueries('agentFactoryTeams');
       queryClient.invalidateQueries('agentFactoryLines');
+      invalidateAgentHandlesQuery(queryClient);
       if (onSuccess) onSuccess(team);
       onClose();
     } catch (e) {
@@ -170,6 +213,7 @@ export default function QuickTeamWizard({ open, onClose, onSuccess }) {
       setTeamName('');
       setMissionStatement('');
       setRoleOverrides({});
+      setGovernanceMode('hierarchical');
       setError('');
       onClose();
     }
@@ -276,8 +320,23 @@ export default function QuickTeamWizard({ open, onClose, onSuccess }) {
               multiline
               rows={2}
             />
+            <FormControl fullWidth size="small" margin="normal">
+              <InputLabel id="qt-gov-label">Governance</InputLabel>
+              <Select
+                labelId="qt-gov-label"
+                label="Governance"
+                value={governanceMode}
+                onChange={(e) => setGovernanceMode(e.target.value)}
+              >
+                {GOVERNANCE_OPTIONS.map((g) => (
+                  <MenuItem key={g.value} value={g.value}>
+                    {g.label}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
             <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
-              Members and roles
+              {governanceMode === 'hierarchical' ? 'Members and roles' : 'Members (flat; adjust hierarchy in line settings)'}
             </Typography>
             <List dense disablePadding>
               {selectedProfiles.map((p) => (
@@ -287,22 +346,28 @@ export default function QuickTeamWizard({ open, onClose, onSuccess }) {
                     secondary={p.handle ? `@${p.handle}` : null}
                     primaryTypographyProps={{ variant: 'body2' }}
                   />
-                  <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <Select
-                      value={roleOverrides[p.id] ?? (p.id === ceoId ? 'ceo' : 'worker')}
-                      onChange={(e) =>
-                        setRoleOverrides((prev) => ({ ...prev, [p.id]: e.target.value }))
-                      }
-                      variant="outlined"
-                      sx={{ height: 32 }}
-                    >
-                      {ROLE_OPTIONS.map((opt) => (
-                        <MenuItem key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
+                  {governanceMode === 'hierarchical' ? (
+                    <FormControl size="small" sx={{ minWidth: 120 }}>
+                      <Select
+                        value={roleOverrides[p.id] ?? (p.id === ceoId ? 'ceo' : 'worker')}
+                        onChange={(e) =>
+                          setRoleOverrides((prev) => ({ ...prev, [p.id]: e.target.value }))
+                        }
+                        variant="outlined"
+                        sx={{ height: 32 }}
+                      >
+                        {ROLE_OPTIONS.map((opt) => (
+                          <MenuItem key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  ) : (
+                    <Typography variant="caption" color="text.secondary">
+                      worker
+                    </Typography>
+                  )}
                 </ListItem>
               ))}
             </List>

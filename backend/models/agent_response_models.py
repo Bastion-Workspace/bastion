@@ -1,5 +1,5 @@
 """
-Pydantic Models for Structured Agent Responses - Roosevelt's "Type Safety" 
+Pydantic models for structured agent responses
 Best-of-breed structured outputs for LLM responses with validation
 """
 
@@ -239,7 +239,7 @@ class ChatResponse(BaseModel):
         default=None,
         description="Reason for escalation if needed"
     )
-    # ROOSEVELT'S NATURAL COLLABORATION: Removed collaboration fields
+    # Collaboration fields removed from this model
     # Let the LLM handle collaboration decisions with full conversation context
 
 
@@ -934,7 +934,7 @@ def get_outline_clarification_structured_output() -> OutlineClarificationRequest
 class DocumentSummary(BaseModel):
     """Individual document summary for multi-document comparison - LangGraph compatible
     
-    **ROOSEVELT'S STRUCTURED SUMMARIZATION**: Each document gets a comprehensive summary
+    Structured per-document summarization output
     capturing key details for comparison analysis.
     """
     title: str = Field(description="Document title or filename")
@@ -972,7 +972,7 @@ class DocumentSummary(BaseModel):
 class ComparisonAnalysisResult(BaseModel):
     """Structured output for multi-document comparison analysis - LangGraph compatible
     
-    **ROOSEVELT'S STRUCTURED COMPARISON**: Best-of-breed comparative analysis with
+    Structured comparative analysis with
     structured fields for similarities, differences, conflicts, and recommendations.
     """
     task_status: TaskStatus = Field(description="Status of the comparison task")

@@ -1,6 +1,7 @@
 import { EditorView, ViewPlugin, Decoration, WidgetType } from '@codemirror/view';
 import { StateField, StateEffect } from '@codemirror/state';
 import { documentDiffStore } from '../../../services/documentDiffStore';
+import { devLog } from '../../../utils/devConsole';
 
 // State effects for managing live diffs
 const addLiveDiff = StateEffect.define();
@@ -512,7 +513,7 @@ const LiveEditDiffPluginClass = class {
       // ✅ SINGLETON PATTERN: If a plugin already exists for this document, reuse it
       if (documentId && documentPluginRegistry.has(documentId)) {
         const existingPlugin = documentPluginRegistry.get(documentId);
-        console.log('🔍 Reusing existing plugin instance for document:', documentId, 'Registry size:', documentPluginRegistry.size);
+        devLog('🔍 Reusing existing plugin instance for document:', documentId, 'Registry size:', documentPluginRegistry.size);
         
         // Update the view reference
         existingPlugin.view = view;
@@ -520,16 +521,16 @@ const LiveEditDiffPluginClass = class {
         // ✅ FIX: Only schedule decoration update if there are operations AND decorations haven't been applied yet
         // This prevents duplicate decorations when extension is recreated (e.g., tab switch, editor remount)
         if (existingPlugin.operations.size > 0 && !existingPlugin.pendingUpdate) {
-          console.log('🔍 Scheduling decoration update for reused plugin (operations:', existingPlugin.operations.size, ')');
+          devLog('🔍 Scheduling decoration update for reused plugin (operations:', existingPlugin.operations.size, ')');
           existingPlugin.scheduleDecorationUpdate();
         } else if (existingPlugin.operations.size > 0) {
-          console.log('🔍 Skipping decoration update - already pending');
+          devLog('🔍 Skipping decoration update - already pending');
         }
         
         return existingPlugin;
       }
 
-      console.log('🔍 Creating NEW plugin instance for document:', documentId, 'Registry size before:', documentPluginRegistry.size, 'Time:', Date.now());
+      devLog('🔍 Creating NEW plugin instance for document:', documentId, 'Registry size before:', documentPluginRegistry.size, 'Time:', Date.now());
 
       this.view = view;
       this.documentId = documentId || null; // Store document identity
@@ -546,20 +547,20 @@ const LiveEditDiffPluginClass = class {
 
       // Only log in development mode
       if (import.meta.env.DEV) {
-        console.log('🔍 Live diff extension plugin initialized for view:', view, 'documentId:', documentId, 'creationTime:', this.creationTime);
+        devLog('🔍 Live diff extension plugin initialized for view:', view, 'documentId:', documentId, 'creationTime:', this.creationTime);
       }
       
       // Register this instance
       if (documentId) {
         documentPluginRegistry.set(documentId, this);
-        console.log('📝 Registered plugin instance for document:', documentId, 'Registry size:', documentPluginRegistry.size);
+        devLog('📝 Registered plugin instance for document:', documentId, 'Registry size:', documentPluginRegistry.size);
       }
       
       // Restore persisted diffs for THIS document
       if (this.documentId) {
         const savedDiffs = documentDiffStore.getDiffs(this.documentId);
         if (savedDiffs && savedDiffs.operations && Array.isArray(savedDiffs.operations) && savedDiffs.operations.length > 0) {
-          console.log(`Restoring ${savedDiffs.operations.length} diffs for document ${this.documentId}`);
+          devLog(`Restoring ${savedDiffs.operations.length} diffs for document ${this.documentId}`);
           // skipSave=true, preserveExisting=true - load all proposals without wiping any
           this.addOperations(savedDiffs.operations, savedDiffs.messageId, true, true);
         }
@@ -567,7 +568,7 @@ const LiveEditDiffPluginClass = class {
         // ✅ Subscribe to store changes to sync with other plugin instances
         this.handleStoreChange = this.handleStoreChange.bind(this);
         documentDiffStore.subscribe(this.handleStoreChange);
-        console.log('📢 Plugin subscribed to documentDiffStore for document:', this.documentId);
+        devLog('📢 Plugin subscribed to documentDiffStore for document:', this.documentId);
       }
       
       // Listen for live diff events
@@ -597,13 +598,13 @@ const LiveEditDiffPluginClass = class {
       // ✅ Unregister from singleton registry
       if (this.documentId && documentPluginRegistry.get(this.documentId) === this) {
         documentPluginRegistry.delete(this.documentId);
-        console.log('📝 Unregistered plugin instance for document:', this.documentId, 'Registry size:', documentPluginRegistry.size);
+        devLog('📝 Unregistered plugin instance for document:', this.documentId, 'Registry size:', documentPluginRegistry.size);
       }
       
       // ✅ Unsubscribe from store
       if (this.documentId && this.handleStoreChange) {
         documentDiffStore.unsubscribe(this.handleStoreChange);
-        console.log('📢 Plugin unsubscribed from documentDiffStore for document:', this.documentId);
+        devLog('📢 Plugin unsubscribed from documentDiffStore for document:', this.documentId);
       }
       
       window.removeEventListener('editorOperationsLive', this.handleLiveDiffEvent);
@@ -640,7 +641,7 @@ const LiveEditDiffPluginClass = class {
     try {
       // Only log in development mode
       if (import.meta.env.DEV) {
-        console.log('🔍 Live diff extension handleLiveDiffEvent called:', event.type, event.detail);
+        devLog('🔍 Live diff extension handleLiveDiffEvent called:', event.type, event.detail);
       }
       if (event.type === 'editorOperationsLive') {
         const { operations, messageId, documentId, preserveExisting } = event.detail || {};
@@ -648,13 +649,13 @@ const LiveEditDiffPluginClass = class {
         // Only process operations for THIS document
         if (documentId && documentId !== this.documentId) {
           if (import.meta.env.DEV) {
-            console.log(`Ignoring operations for different document (${documentId} vs ${this.documentId})`);
+            devLog(`Ignoring operations for different document (${documentId} vs ${this.documentId})`);
           }
           return;
         }
         
         if (import.meta.env.DEV) {
-          console.log('🔍 Live diff extension received editorOperationsLive:', { 
+          devLog('🔍 Live diff extension received editorOperationsLive:', { 
             operationsCount: operations?.length, 
             messageId,
             documentId: documentId,
@@ -665,7 +666,7 @@ const LiveEditDiffPluginClass = class {
         }
         if (Array.isArray(operations) && operations.length > 0) {
           // Clearing of old operations now happens in addOperations() (only when !preserveExisting)
-          console.log('🔍 Calling addOperations with', operations.length, 'operations');
+          devLog('🔍 Calling addOperations with', operations.length, 'operations');
           this.addOperations(operations, messageId, false, preserveExisting ?? false);
           
           // ✅ NOTE: ChatSidebarContext saves to documentDiffStore BEFORE dispatching event
@@ -695,14 +696,14 @@ const LiveEditDiffPluginClass = class {
     // Only respond to changes for THIS document
     if (documentId !== this.documentId) return;
     
-    console.log('📢 Plugin received store change notification:', { documentId, changeType });
+    devLog('📢 Plugin received store change notification:', { documentId, changeType });
     
     if (changeType === 'remove' || changeType === 'clear') {
       // Sync our operations with the store
       const storeDiffs = documentDiffStore.getDiffs(this.documentId);
       const storeOps = storeDiffs?.operations || [];
       
-      console.log('📢 Syncing plugin operations with store:', {
+      devLog('📢 Syncing plugin operations with store:', {
         pluginOpsCount: this.operations.size,
         storeOpsCount: storeOps.length
       });
@@ -714,20 +715,65 @@ const LiveEditDiffPluginClass = class {
       const toRemove = [];
       this.operations.forEach((op, id) => {
         if (!validIds.has(id) && !validIds.has(op.operationId)) {
-          toRemove.push(id);
+          const startEnd = `${op.start}-${op.end}`;
+          const hasMatchByRange = storeOps.some(sOp =>
+            sOp.messageId === op.messageId && `${sOp.start}-${sOp.end}` === startEnd
+          );
+          if (!hasMatchByRange) {
+            toRemove.push(id);
+          }
         }
       });
       
       if (toRemove.length > 0) {
-        console.log('📢 Removing', toRemove.length, 'operations from plugin that are no longer in store');
+        devLog('📢 Removing', toRemove.length, 'operations from plugin that are no longer in store');
         toRemove.forEach(id => this.operations.delete(id));
         this.scheduleDecorationUpdate();
       }
+    } else if (changeType === 'set') {
+      const storeDiffs = documentDiffStore.getDiffs(this.documentId);
+      const storeOps = storeDiffs?.operations || [];
+
+      const storeIds = new Set(
+        storeOps.map(op => op.operationId || op.id || `${op.start}-${op.end}`)
+      );
+
+      const toRemove = [];
+      this.operations.forEach((op, id) => {
+        if (!storeIds.has(id) && !storeIds.has(op.operationId)) {
+          const hasMatch = storeOps.some(
+            sOp =>
+              sOp.messageId === op.messageId &&
+              `${sOp.start}-${sOp.end}` === `${op.start}-${op.end}`
+          );
+          if (!hasMatch) toRemove.push(id);
+        }
+      });
+      if (toRemove.length > 0) {
+        toRemove.forEach(id => this.operations.delete(id));
+      }
+
+      if (storeOps.length === 0) {
+        if (toRemove.length > 0) this.scheduleDecorationUpdate();
+        return;
+      }
+
+      const existingIds = new Set();
+      this.operations.forEach((op, id) => {
+        existingIds.add(id);
+        if (op.operationId) existingIds.add(op.operationId);
+      });
+      const newOps = storeOps.filter(op => {
+        const opId = op.operationId || op.id;
+        return opId && !existingIds.has(opId);
+      });
+
+      if (newOps.length > 0) {
+        this.addOperations(newOps, storeDiffs.messageId, true, true);
+      } else if (toRemove.length > 0) {
+        this.scheduleDecorationUpdate();
+      }
     }
-    // ❌ REMOVED: Do NOT sync on 'set' - creates cascade!
-    // The plugin already added the operation via the editorOperationsLive event.
-    // Store notifications on 'set' are for OTHER components (like TabbedContentManager),
-    // not for the plugin that just updated the store!
   }
   
   update(update) {
@@ -735,6 +781,7 @@ const LiveEditDiffPluginClass = class {
       const docLength = update.state.doc.length;
       const toRemove = [];
       let needsUpdate = false;
+      let overlapInvalidated = false;
 
       if (update.changes && this.documentId) {
         update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
@@ -752,14 +799,15 @@ const LiveEditDiffPluginClass = class {
                 const currentTextAtPos = update.state.doc.sliceString(opStart, opEnd);
                 if (currentTextAtPos === op.original) {
                   if (import.meta.env.DEV) {
-                    console.log(`Sync edit overlaps diff but content matches - keeping diff.`);
+                    devLog(`Sync edit overlaps diff but content matches - keeping diff.`);
                   }
                   return;
                 }
               }
-              console.log(`User edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] - invalidating. Message: ${op.messageId}`);
+              devLog(`User edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] - invalidating. Message: ${op.messageId}`);
               toRemove.push(id);
               documentDiffStore.removeDiff(this.documentId, id);
+              overlapInvalidated = true;
             }
           });
         });
@@ -829,6 +877,18 @@ const LiveEditDiffPluginClass = class {
       if (needsUpdate) {
         this.scheduleDecorationUpdate();
       }
+
+      if (overlapInvalidated && this.documentId) {
+        try {
+          window.dispatchEvent(
+            new CustomEvent('proposalInvalidatedByCollab', {
+              detail: { documentId: this.documentId },
+            })
+          );
+        } catch (_) {
+          /* ignore */
+        }
+      }
     }
     
     try {
@@ -879,7 +939,7 @@ const LiveEditDiffPluginClass = class {
           }
         });
         if (toRemove.length > 0) {
-          console.log(`🧹 Clearing ${toRemove.length} operations from previous message`);
+          devLog(`🧹 Clearing ${toRemove.length} operations from previous message`);
           toRemove.forEach(id => this.operations.delete(id));
         }
       }
@@ -910,7 +970,7 @@ const LiveEditDiffPluginClass = class {
     
     // Only log in development mode to reduce console noise
     if (import.meta.env.DEV) {
-      console.log('🔍 Live diff extension adding operations:', { 
+      devLog('🔍 Live diff extension adding operations:', { 
         total: operations.length, 
         toAdd: toAdd.length,
         frontmatterEnd,
@@ -957,7 +1017,7 @@ const LiveEditDiffPluginClass = class {
       
       // Only log in development mode
       if (import.meta.env.DEV) {
-        console.log('🔍 Processing operation:', { operationId, start, end, opType, proposedLength: proposed.length });
+        devLog('🔍 Processing operation:', { operationId, start, end, opType, proposedLength: proposed.length });
       }
       
       // Validate range - be more lenient for operations that might be slightly out of bounds
@@ -968,8 +1028,9 @@ const LiveEditDiffPluginClass = class {
         return;
       }
       
-      // Way out of bounds: show at end of document so user can still accept/reject
-      const wayOutOfBounds = start > docLength + 100 || end > docLength + 100;
+      // Way out of bounds: show at end of document so user can still accept/reject.
+      // Backend marks JIT-unresolved ops with unresolved=true at EOF (document unchanged but anchor mismatch).
+      const wayOutOfBounds = start > docLength + 100 || end > docLength + 100 || op.unresolved === true;
       if (wayOutOfBounds) {
         console.warn('Operation range way out of bounds — showing at end of document:', { start, end, docLength });
         start = docLength;
@@ -1022,7 +1083,7 @@ const LiveEditDiffPluginClass = class {
       const currentContent = this.view.state.doc.toString();
       documentDiffStore.saveSnapshot(this.documentId, storedOperations, currentContent);
     } else if (skipSave) {
-      console.log('⏭️ Skipped store update (restoring from storage)');
+      devLog('⏭️ Skipped store update (restoring from storage)');
     }
     
     this.scheduleDecorationUpdate();
@@ -1053,7 +1114,7 @@ const LiveEditDiffPluginClass = class {
     // ✅ FIX: Check if decorations are already applied for current operations
     const currentHash = this._hashOperations();
     if (this.decorationsApplied && this.lastOperationsHash === currentHash) {
-      console.log('🔍 Skipping decoration update - already applied for these operations');
+      devLog('🔍 Skipping decoration update - already applied for these operations');
       return;
     }
 
@@ -1212,7 +1273,7 @@ const LiveEditDiffPluginClass = class {
             // ✅ FIX: Mark decorations as applied and save operations hash
             this.decorationsApplied = true;
             this.lastOperationsHash = this._hashOperations();
-            console.log('🔍 Decorations applied successfully, hash:', this.lastOperationsHash);
+            devLog('🔍 Decorations applied successfully, hash:', this.lastOperationsHash);
           }
         });
       }
@@ -1430,7 +1491,7 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(LiveEditDiffPluginClass);
  */
 export function createLiveEditDiffExtension(documentId = null) {
   try {
-    console.log('🔍 Creating live edit diff extension for document:', documentId);
+    devLog('🔍 Creating live edit diff extension for document:', documentId);
     
     // Store documentId in a closure variable that the plugin class can access
     const pluginDocumentId = documentId;
@@ -1448,7 +1509,7 @@ export function createLiveEditDiffExtension(documentId = null) {
       liveDiffField,
       ViewPlugin.fromClass(DocumentAwareDiffPlugin)
     ];
-    console.log('🔍 Live edit diff extension created:', extension.length, 'items');
+    devLog('🔍 Live edit diff extension created:', extension.length, 'items');
     return extension;
   } catch (e) {
     console.error('❌ Error creating live edit diff extension:', e);

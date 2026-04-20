@@ -1,5 +1,5 @@
 """
-Pending Query Manager - Roosevelt's Hybrid Clarification System
+Pending query manager for hybrid clarification flows
 Manages ambiguous queries awaiting clarification with intelligent resolution
 """
 
@@ -71,7 +71,7 @@ class CancellationResult:
 
 class PendingQueryManager:
     """
-    Roosevelt's Hybrid Clarification System
+    Tracks pending clarifications and query lifecycle.
     
     Manages the full lifecycle of ambiguous queries:
     1. Storage of pending queries awaiting clarification
@@ -188,7 +188,7 @@ class PendingQueryManager:
         context_enhancement: Dict[str, Any] = None
     ) -> Optional[ResolvedQuery | CancellationResult]:
         """
-        Roosevelt's Intelligent Query Resolution
+        Resolve or cancel a pending query using LLM classification.
         
         Attempts to resolve pending queries using the clarification.
         Uses sophisticated matching to find the most relevant pending query.
@@ -400,7 +400,7 @@ class PendingQueryManager:
         context_enhancement: Dict[str, Any]
     ) -> Optional[CancellationResult]:
         """
-        Roosevelt's LLM-based Cancellation Assessment
+        Use LLM output to decide if a user message cancels a pending query.
         
         Uses the LLM to intelligently detect when user wants to cancel research planning
         and gracefully return to chat mode.
@@ -456,7 +456,7 @@ Respond with valid JSON only:
                 model = await settings_service.get_classification_model()
                 if not model:
                     model = await settings_service.get_llm_model()
-            except:
+            except Exception:
                 model = await settings_service.get_llm_model()
             
             if not model:

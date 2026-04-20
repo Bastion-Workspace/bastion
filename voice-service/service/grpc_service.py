@@ -126,7 +126,10 @@ class VoiceServiceImplementation(voice_service_pb2_grpc.VoiceServiceServicer):
             provider = get_tts_provider(request.provider or "")
             out_fmt = (request.output_format or "ogg").strip().lower()
             # ElevenLabs byte-stream API emits MP3 (unless caller requested WAV buffer path).
-            if provider.provider_name() == "elevenlabs" and out_fmt != "wav":
+            if (
+                provider.provider_name() in ("elevenlabs", "hedra")
+                and out_fmt != "wav"
+            ):
                 label_fmt = "mp3"
             else:
                 label_fmt = out_fmt
@@ -178,7 +181,7 @@ class VoiceServiceImplementation(voice_service_pb2_grpc.VoiceServiceServicer):
                 )
             else:
                 voices_list = []
-                for name in ("elevenlabs", "openai", "piper"):
+                for name in ("elevenlabs", "hedra", "openai", "piper"):
                     try:
                         p = get_tts_provider(name)
                         if await p.is_available():

@@ -1,3 +1,4 @@
-grpcio>=1.76.0
-grpcio-tools>=1.76.0
+grpcio==1.80.0
+# Required for generated *_pb2.py (grpcio does not install protobuf); must match protoc from grpcio-tools in Dockerfile builder
+protobuf>=6.31.1,<7
 yt-dlp>=2024.1.0

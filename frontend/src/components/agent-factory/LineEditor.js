@@ -1,36 +1,39 @@
 /**
- * Line editor: internal tabs (Dashboard, Timeline, Tasks, Analytics) and settings/goals/task drawers.
+ * Line editor: tabs (Dashboard, Timeline, Tasks, Analytics, Goals, Settings) and task detail drawer.
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Box, Tabs, Tab, IconButton, CircularProgress } from '@mui/material';
-import { Settings as SettingsIcon } from '@mui/icons-material';
+import { Box, Tabs, Tab, CircularProgress } from '@mui/material';
 import LineDashboardPanel from './LineDashboardPanel';
 import LineTimelinePanel from './LineTimelinePanel';
 import LineTasksPanel from './LineTasksPanel';
 import LineAnalyticsPanel from './LineAnalyticsPanel';
-import LineSettingsDrawer from './LineSettingsDrawer';
-import GoalEditorDrawer from './GoalEditorDrawer';
+import LineSettingsPanel from './LineSettingsPanel';
+import GoalEditorPanel from './GoalEditorPanel';
 import TaskDetailDrawer from './TaskDetailDrawer';
 
-const TAB_KEYS = ['dashboard', 'timeline', 'tasks', 'analytics'];
+const LINE_EDITOR_TAB_KEYS = ['dashboard', 'timeline', 'tasks', 'analytics', 'goals', 'settings'];
+
 const AF_LINE_TAB_KEY = 'af-line-internal-tab';
 
 function readStoredTab() {
   try {
     const v = localStorage.getItem(AF_LINE_TAB_KEY);
     const idx = parseInt(v, 10);
-    if (Number.isFinite(idx) && idx >= 0 && idx < TAB_KEYS.length) return idx;
+    if (Number.isFinite(idx) && idx >= 0 && idx < LINE_EDITOR_TAB_KEYS.length) return idx;
   } catch (_) {}
   return 0;
 }
 
 export default function LineEditor({ lineId, onCloseEntityTab }) {
   const [tab, setTab] = useState(readStoredTab);
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [goalsOpen, setGoalsOpen] = useState(false);
   const [taskDrawerOpen, setTaskDrawerOpen] = useState(false);
   const [taskDrawerTaskId, setTaskDrawerTaskId] = useState(null);
+
+  const goToTab = useCallback((key) => {
+    const idx = LINE_EDITOR_TAB_KEYS.indexOf(key);
+    if (idx >= 0) setTab(idx);
+  }, []);
 
   useEffect(() => {
     try {
@@ -75,29 +78,36 @@ export default function LineEditor({ lineId, onCloseEntityTab }) {
           px: 1,
           borderBottom: 1,
           borderColor: 'divider',
-          bgcolor: 'background.paper',
+          bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
         }}
       >
-        <Tabs value={tab} onChange={handleTabChange} variant="scrollable" scrollButtons="auto" sx={{ flex: 1, minWidth: 0 }}>
+        <Tabs
+          value={tab}
+          onChange={handleTabChange}
+          variant="scrollable"
+          scrollButtons="auto"
+          sx={{
+            flex: 1,
+            minWidth: 0,
+            '& .MuiTab-root': {
+              bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
+              '&.Mui-selected': { bgcolor: 'background.default' },
+            },
+          }}
+        >
           <Tab label="Dashboard" />
           <Tab label="Timeline" />
           <Tab label="Tasks" />
           <Tab label="Analytics" />
+          <Tab label="Goals" />
+          <Tab label="Settings" />
         </Tabs>
-        <IconButton aria-label="Line settings" onClick={() => setSettingsOpen(true)} size="small" sx={{ mr: 0.5 }}>
-          <SettingsIcon />
-        </IconButton>
       </Box>
 
       <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
         {tab === 0 && (
           <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
-            <LineDashboardPanel
-              lineId={lineId}
-              onSelectTab={setTab}
-              onOpenSettings={() => setSettingsOpen(true)}
-              onOpenGoalsDrawer={() => setGoalsOpen(true)}
-            />
+            <LineDashboardPanel lineId={lineId} onGoToTab={goToTab} />
           </Box>
         )}
         {tab === 1 && (
@@ -115,15 +125,18 @@ export default function LineEditor({ lineId, onCloseEntityTab }) {
             <LineAnalyticsPanel lineId={lineId} />
           </Box>
         )}
+        {tab === 4 && (
+          <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <GoalEditorPanel lineId={lineId} />
+          </Box>
+        )}
+        {tab === 5 && (
+          <Box sx={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+            <LineSettingsPanel lineId={lineId} onDeleted={handleLineDeleted} />
+          </Box>
+        )}
       </Box>
 
-      <LineSettingsDrawer
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        lineId={lineId}
-        onDeleted={handleLineDeleted}
-      />
-      <GoalEditorDrawer open={goalsOpen} onClose={() => setGoalsOpen(false)} lineId={lineId} />
       <TaskDetailDrawer
         open={taskDrawerOpen}
         onClose={closeTaskDrawer}

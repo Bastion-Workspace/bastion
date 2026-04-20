@@ -168,6 +168,7 @@ export default defineConfig({
         rewrite: (p) => p.replace(/^\/dav/, '') || '/',
       },
       '/health': { target: 'http://backend:8000', changeOrigin: true },
+      // Legacy /static/images/* -> backend 301 to /api/web-sources/images/* (same as production nginx)
       '/static/images': { target: 'http://backend:8000', changeOrigin: true },
     },
     watch: { usePolling: true },

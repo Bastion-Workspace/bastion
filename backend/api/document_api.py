@@ -6,7 +6,6 @@ Extracted from main.py for better modularity
 import asyncio
 import logging
 import os
-import glob
 import mimetypes
 from pathlib import Path
 from datetime import datetime
@@ -15,7 +14,7 @@ from io import BytesIO
 
 import aiofiles
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request, Body
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from models.api_models import (
@@ -25,11 +24,13 @@ from models.api_models import (
     ProcessingStatus, DocumentType, DocumentInfo, DocumentCategory, AuthenticatedUserResponse
 )
 from services.service_container import get_service_container
+from services.document_sharing_service import document_sharing_service
 from services.user_document_service import UserDocumentService
 from services.auth_service import auth_service
 from utils.auth_middleware import get_current_user, require_admin
 from utils.websocket_manager import get_websocket_manager
 from config import settings
+from clients.document_service_client import get_document_service_client
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,44 @@ async def _get_folder_service():
     """Get folder service from service container"""
     container = await get_service_container()
     return container.folder_service
+
+
+async def _upload_and_process_routed(
+    file: UploadFile,
+    *,
+    doc_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    team_id: Optional[str] = None,
+) -> DocumentUploadResponse:
+    """Upload via document-service (gRPC)."""
+    dsc = get_document_service_client()
+    await dsc.initialize(required=True)
+    return await dsc.upload_via_document_service(
+        file,
+        doc_type=doc_type,
+        user_id=user_id,
+        folder_id=folder_id,
+        team_id=team_id,
+    )
+
+
+async def _fire_document_service_reprocess(
+    document_id: str, user_id: Optional[str], *, force_reprocess: bool = True
+) -> None:
+    """Background reprocess via document-service gRPC."""
+    try:
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        await dsc.reprocess_via_document_service(
+            document_id, user_id, force_reprocess=force_reprocess
+        )
+    except Exception:
+        logger.exception(
+            "document-service reprocess failed (document_id=%s, user_id=%s)",
+            document_id,
+            user_id,
+        )
 
 
 async def check_document_access(
@@ -101,10 +140,18 @@ async def check_document_access(
         
         return doc_info
     
-    # User collection: only owner has access
+    # User collection: owner or active share (read/write; never delete via share)
     if doc_user_id != current_user.user_id:
+        folder_id = getattr(doc_info, "folder_id", None)
+        if await document_sharing_service.check_share_access(
+            doc_id,
+            folder_id,
+            current_user.user_id,
+            required_permission,
+        ):
+            return doc_info
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
     return doc_info
 
 
@@ -121,7 +168,7 @@ async def upload_document(
     tags: str = Form(None),  # Comma-separated tags
     current_user: AuthenticatedUserResponse = Depends(require_admin())
 ):
-    """Upload and process a document to global collection (admin only) - **BULLY!** Now with category and tags!"""
+    """Upload and process a document to the global collection (admin only), with category and tags."""
     document_service = await _get_document_service()
     folder_service = await _get_folder_service()
     try:
@@ -139,10 +186,12 @@ async def upload_document(
                 raise HTTPException(status_code=404, detail="Global folder not found or access denied")
         
         # Process document (no user_id = global collection)
-        # **ROOSEVELT FIX**: Pass folder_id to ensure files land in correct subfolder on disk
-        result = await document_service.upload_and_process(file, doc_type, folder_id=folder_id)
+        # Pass folder_id so files land in the correct subfolder
+        result = await _upload_and_process_routed(
+            file, doc_type=doc_type, folder_id=folder_id
+        )
         
-        # **ROOSEVELT METADATA UPDATE**: Update category and tags if provided
+        # Update category and tags when provided
         if result.document_id and (category or tags):
             from models.api_models import DocumentUpdateRequest, DocumentCategory
             
@@ -324,7 +373,7 @@ async def upload_multiple_documents(
             
             for file in files:
                 try:
-                    single_result = await document_service.upload_and_process(file)
+                    single_result = await _upload_and_process_routed(file)
                     upload_results.append(single_result)
                     if single_result.status != ProcessingStatus.FAILED:
                         successful_uploads += 1
@@ -391,12 +440,14 @@ async def import_image(
         
         logger.info(f"🖼️ User {current_user.username} importing image: {request.image_url}")
         
-        # Extract filename from URL (e.g., /api/images/filename.png or /static/images/filename.png -> filename.png)
+        # Extract filename from URL (e.g., /api/images/, /static/images/, /api/web-sources/images/ -> basename)
         image_url = request.image_url
         if image_url.startswith('/api/images/'):
             filename_from_url = image_url.replace('/api/images/', '').split('/')[-1]
         elif image_url.startswith('/static/images/'):
             filename_from_url = image_url.replace('/static/images/', '').split('/')[-1]
+        elif image_url.startswith("/api/web-sources/images/"):
+            filename_from_url = image_url.replace("/api/web-sources/images/", "").split("/")[-1]
         else:
             # Fallback: try to extract filename from any path
             filename_from_url = image_url.split('/')[-1]
@@ -418,7 +469,7 @@ async def import_image(
                 raise HTTPException(status_code=403, detail="Only admins can import to global folders")
         
         # Read image file from static images directory
-        images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
+        images_path = Path(settings.WEB_SOURCES_ROOT) / "images"
         image_file_path = images_path / filename_from_url
         
         # Also check subdirectories (some images may be in document_id subdirectories)
@@ -449,11 +500,11 @@ async def import_image(
         )
         
         # Import the image using the document service
-        result = await document_service.upload_and_process(
-            image_file, 
-            doc_type='image', 
-            user_id=current_user.user_id, 
-            folder_id=folder_id
+        result = await _upload_and_process_routed(
+            image_file,
+            doc_type="image",
+            user_id=current_user.user_id,
+            folder_id=folder_id,
         )
         
         logger.info(f"✅ Image imported successfully: {result.document_id}")
@@ -477,7 +528,7 @@ async def upload_user_document(
     tags: str = Form(None),  # Comma-separated tags
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Upload a document to user's private collection - Roosevelt Architecture - **BULLY!** Now with category and tags!"""
+    """Upload a document to the user's private collection, with category and tags."""
     document_service = await _get_document_service()
     folder_service = await _get_folder_service()
     try:
@@ -487,10 +538,9 @@ async def upload_user_document(
         if not file.filename:
             raise HTTPException(status_code=400, detail="No filename provided")
         
-        # **BULLY!** INBOX.ORG SAFEGUARD - Prevent duplicate inbox files
+        # Inbox.org safeguard: prevent duplicate inbox files
         if file.filename.lower() == "inbox.org":
-            from pathlib import Path
-            from services.database_manager.database_helpers import fetch_one, fetch_all
+            from services.database_manager.database_helpers import fetch_all
             
             # First check database for existing inbox.org (most reliable)
             existing_docs = await fetch_all(
@@ -515,21 +565,8 @@ async def upload_user_document(
                 logger.warning(f"🚫 BLOCKED: User {current_user.username} tried to upload inbox.org when one already exists (document_id: {existing_docs[0]['document_id']})")
                 raise HTTPException(status_code=409, detail=error_msg)
             
-            # Also check filesystem as backup (in case DB is out of sync)
-            row = await fetch_one("SELECT username FROM users WHERE user_id = $1", current_user.user_id)
-            username = row['username'] if row else current_user.user_id
-            
-            upload_dir = Path(settings.UPLOAD_DIR)
-            user_base_dir = upload_dir / "Users" / username
-            
-            if user_base_dir.exists():
-                existing_inboxes = list(user_base_dir.rglob("inbox.org"))
-                if existing_inboxes:
-                    # Found existing inbox on disk but not in DB - warn and allow upload (will recover file)
-                    existing_paths = [str(f.relative_to(user_base_dir)) for f in existing_inboxes]
-                    logger.warning(f"⚠️  Found orphaned inbox.org on disk at {existing_paths[0]} - allowing upload to recover file")
-                    # Continue with upload - this will overwrite the orphaned file
-        
+        # Document library files live in document-service; duplicate inbox is enforced via DB only.
+
         # Validate folder access if folder_id is provided
         if folder_id:
             # Check if folder exists and user has access
@@ -544,13 +581,18 @@ async def upload_user_document(
                     detail="Uploading files to Global folders requires Admin privileges"
                 )
         
-        # ROOSEVELT FIX: Pass folder_id to upload_and_process for transaction-level folder assignment
+        # Pass folder_id into upload_and_process for transactional folder assignment
         # This ensures folder assignment happens within the same transaction as document creation
         
         # Process document with user_id and folder_id for immediate folder assignment
-        result = await document_service.upload_and_process(file, doc_type, user_id=current_user.user_id, folder_id=folder_id)
+        result = await _upload_and_process_routed(
+            file,
+            doc_type=doc_type,
+            user_id=current_user.user_id,
+            folder_id=folder_id,
+        )
         
-        # **ROOSEVELT METADATA UPDATE**: Update category and tags if provided
+        # Update category and tags when provided
         if result.document_id and (category or tags):
             from models.api_models import DocumentUpdateRequest, DocumentCategory
             
@@ -573,7 +615,7 @@ async def upload_user_document(
             await document_service.update_document_metadata(result.document_id, update_request)
             logger.info(f"📋 Updated user document metadata: category={category}, tags={tags_list}")
         
-        # ROOSEVELT FIX: Folder assignment is now handled within the upload_and_process transaction
+        # Folder assignment handled inside upload_and_process transaction
         # Send WebSocket notification for optimistic UI update if folder assignment was successful
         if folder_id and result.document_id:
             try:
@@ -868,15 +910,21 @@ async def clear_all_documents(
         logger.info(f"📋 Found {len(all_documents)} documents to delete")
         
         # Step 2: Delete all documents (this will also clean up vector embeddings and knowledge graph entities)
-        logger.info("🗑️ Deleting all documents...")
+        logger.info("🗑️ Deleting all documents via document-service...")
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
         for doc in all_documents:
             try:
-                success = await document_service.delete_document(doc.document_id)
-                if success:
+                owner = getattr(doc, "user_id", None) or current_user.user_id
+                ok, _data, err = await dsc.delete_document_json(
+                    current_user.user_id,
+                    {"document_id": doc.document_id, "user_id": owner},
+                )
+                if ok:
                     deleted_documents += 1
                     logger.info(f"🗑️ Deleted document: {doc.filename} ({doc.document_id})")
                 else:
-                    errors.append(f"Failed to delete document {doc.filename}")
+                    errors.append(f"Failed to delete document {doc.filename}: {err or 'unknown'}")
             except Exception as e:
                 error_msg = f"Error deleting document {doc.filename}: {str(e)}"
                 errors.append(error_msg)
@@ -957,36 +1005,8 @@ async def clear_all_documents(
             errors.append(error_msg)
             logger.error(f"❌ {error_msg}")
         
-        # Step 6: Clean up orphaned files
-        logger.info("🧹 Cleaning up orphaned files...")
-        try:
-            from pathlib import Path
-            upload_dir = Path(settings.UPLOAD_DIR)
-            processed_dir = Path(settings.PROCESSED_DIR) if hasattr(settings, 'PROCESSED_DIR') else None
-            
-            deleted_files = 0
-            
-            # Clean upload directory
-            if upload_dir.exists():
-                for file_path in upload_dir.glob("*"):
-                    if file_path.is_file():
-                        file_path.unlink()
-                        deleted_files += 1
-                logger.info(f"🧹 Cleaned {deleted_files} files from upload directory")
-            
-            # Clean processed directory if it exists
-            if processed_dir and processed_dir.exists():
-                processed_files = 0
-                for file_path in processed_dir.glob("*"):
-                    if file_path.is_file():
-                        file_path.unlink()
-                        processed_files += 1
-                logger.info(f"🧹 Cleaned {processed_files} files from processed directory")
-        except Exception as e:
-            error_msg = f"Error cleaning up files: {str(e)}"
-            errors.append(error_msg)
-            logger.error(f"❌ {error_msg}")
-        
+        # Step 6: Document library files are owned by document-service; skip local upload dir cleanup.
+
         # Prepare response
         success_message = f"✅ Clearance completed: {deleted_documents} documents deleted, {deleted_collections} user collections cleared"
         
@@ -1118,6 +1138,11 @@ async def clear_neo4j(
         knowledge_graph_service = getattr(container, "knowledge_graph_service", None)
         if not knowledge_graph_service:
             raise HTTPException(status_code=503, detail="Knowledge graph service not available")
+        if not knowledge_graph_service.is_connected():
+            raise HTTPException(
+                status_code=503,
+                detail="Neo4j is not connected; clear operation is unavailable",
+            )
         await knowledge_graph_service.clear_all_data()
         
         # Get stats to confirm clearing
@@ -1328,76 +1353,16 @@ async def reprocess_document(doc_id: str, current_user: AuthenticatedUserRespons
         except Exception as e:
             logger.warning(f"⚠️  Failed to clear embeddings for {doc_id}: {e}")
         
-        # Determine file path using new folder structure
-        file_path = None
-        
-        # Try new folder structure first
-        try:
-            from services.service_container import get_service_container
-            container = await get_service_container()
-            folder_service = container.folder_service
-            
-            logger.info(f"🔍 Looking for file: {doc_info.filename}")
-            logger.info(f"🔍 Document folder_id: {doc_info.folder_id if hasattr(doc_info, 'folder_id') else 'None'}")
-            logger.info(f"🔍 Document user_id: {doc_info.user_id if hasattr(doc_info, 'user_id') else 'None'}")
-            
-            # Try without doc_id prefix first (new style)
-            folder_path = await folder_service.get_document_file_path(
-                filename=doc_info.filename,
-                folder_id=doc_info.folder_id if hasattr(doc_info, 'folder_id') else None,
-                user_id=doc_info.user_id if hasattr(doc_info, 'user_id') else None,
-                collection_type="global" if not doc_info.user_id else "user"
+        if doc_info.doc_type == DocumentType.URL:
+            asyncio.create_task(
+                document_service._process_url_async(doc_id, doc_info.filename, "html")
             )
-            
-            logger.info(f"🔍 Checking path (no prefix): {folder_path}")
-            
-            if folder_path and Path(folder_path).exists():
-                file_path = Path(folder_path)
-                logger.info(f"📂 Found file in new structure (no prefix): {file_path}")
-            else:
-                # Try with doc_id prefix (legacy style)
-                filename_with_id = f"{doc_id}_{doc_info.filename}"
-                folder_path = await folder_service.get_document_file_path(
-                    filename=filename_with_id,
-                    folder_id=doc_info.folder_id if hasattr(doc_info, 'folder_id') else None,
-                    user_id=doc_info.user_id if hasattr(doc_info, 'user_id') else None,
-                    collection_type="global" if not doc_info.user_id else "user"
-                )
-                
-                logger.info(f"🔍 Checking path (with prefix): {folder_path}")
-                
-                if folder_path and Path(folder_path).exists():
-                    file_path = Path(folder_path)
-                    logger.info(f"📂 Found file in new structure (with prefix): {file_path}")
-        except Exception as e:
-            logger.warning(f"⚠️ Error checking new folder structure: {e}")
-        
-        # Fallback to legacy structure
-        if not file_path:
-            upload_dir = Path(settings.UPLOAD_DIR)
-            for potential_file in upload_dir.glob(f"{doc_id}_*"):
-                file_path = potential_file
-                logger.info(f"📂 Found file in legacy structure: {file_path}")
-                break
-        
-        if not file_path or not file_path.exists():
-            # If original file not found, check if it's a URL import
-            if doc_info.doc_type == DocumentType.URL:
-                # Re-import from URL (global documents don't have user_id)
-                asyncio.create_task(document_service._process_url_async(doc_id, doc_info.filename, "html"))
-                logger.info(f"🔗 Re-importing URL document: {doc_info.filename}")
-            else:
-                raise HTTPException(status_code=404, detail="Original file not found - cannot reprocess")
+            logger.info("Re-importing URL document: %s", doc_info.filename)
         else:
-            # Re-process the existing file, preserving original user_id/collection type
-            doc_type = document_service._detect_document_type(doc_info.filename)
-            asyncio.create_task(document_service._process_document_async(
-                doc_id, 
-                file_path, 
-                doc_type, 
-                user_id=doc_info.user_id  # Preserve original collection type
-            ))
-            logger.info(f"📄 Re-processing file: {file_path} (user_id={doc_info.user_id}, collection={'global' if not doc_info.user_id else 'user'})")
+            asyncio.create_task(
+                _fire_document_service_reprocess(doc_id, getattr(doc_info, "user_id", None))
+            )
+            logger.info("Queued document-service reprocess for %s", doc_id)
         
         logger.info(f"✅ Document {doc_id} queued for re-processing")
         return {
@@ -1421,7 +1386,7 @@ async def rescan_user_files(
     """
     Scan user's filesystem and recover orphaned files
     
-    **BULLY!** Bring those lost files back into the fold!
+    Restore documents that exist on disk but are missing from the database.
     
     Args:
         dry_run: If true, only report what would be recovered without making changes
@@ -1430,18 +1395,19 @@ async def rescan_user_files(
         Recovery results with statistics
     """
     try:
-        from services.file_recovery_service import get_file_recovery_service
-        
-        logger.info("Rescanning files for user %s", current_user.user_id)
-        
-        recovery_service = await get_file_recovery_service()
-        result = await recovery_service.scan_and_recover_user_files(
-            user_id=current_user.user_id,
-            dry_run=dry_run
+        logger.info("Rescanning files for user %s (document-service)", current_user.user_id)
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, data, err = await dsc.scan_and_recover_json(
+            current_user.user_id,
+            {"user_id": current_user.user_id, "dry_run": dry_run},
         )
-        
-        return result
-        
+        if not ok:
+            raise HTTPException(status_code=500, detail=err or "Rescan failed")
+        return data or {}
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ File rescan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1454,18 +1420,23 @@ async def reprocess_user_document(doc_id: str, current_user: AuthenticatedUserRe
     folder_service = await _get_folder_service()
     try:
         logger.info(f"🔄 Re-processing user document: {doc_id} for user: {current_user.user_id}")
-        
-        # Get document info and verify ownership
+
+        await check_document_access(doc_id, current_user, "write")
+
         doc_info = await document_service.get_document(doc_id)
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found")
-        
-        # Check if user owns this document (this would need to be implemented in the document service)
-        # For now, we'll assume user documents are stored with user_id in the database
-        # This is a simplified check - in a real implementation, you'd verify ownership
-        
+
+        collection_type = getattr(doc_info, "collection_type", None) or "user"
+        team_id = getattr(doc_info, "team_id", None)
+        if team_id is not None and not isinstance(team_id, str):
+            team_id = str(team_id)
+
         # Reset status to processing
         await document_service.document_repository.update_status(doc_id, ProcessingStatus.PROCESSING)
+        await document_service._emit_document_status_update(
+            doc_id, ProcessingStatus.PROCESSING.value, current_user.user_id
+        )
         
         # Clear existing embeddings for this document
         try:
@@ -1474,71 +1445,16 @@ async def reprocess_user_document(doc_id: str, current_user: AuthenticatedUserRe
         except Exception as e:
             logger.warning(f"⚠️  Failed to clear embeddings for {doc_id}: {e}")
         
-        # Determine file path using new folder structure
-        file_path = None
-        
-        # Try new folder structure first
-        try:
-            from services.service_container import get_service_container
-            container = await get_service_container()
-            folder_service = container.folder_service
-            
-            logger.info(f"🔍 Looking for file: {doc_info.filename}")
-            logger.info(f"🔍 Document folder_id: {doc_info.folder_id if hasattr(doc_info, 'folder_id') else 'None'}")
-            logger.info(f"🔍 Document user_id: {doc_info.user_id if hasattr(doc_info, 'user_id') else 'None'}")
-            
-            # Try without doc_id prefix first (new style)
-            folder_path = await folder_service.get_document_file_path(
-                filename=doc_info.filename,
-                folder_id=doc_info.folder_id if hasattr(doc_info, 'folder_id') else None,
-                user_id=current_user.user_id,
-                collection_type="user"
-            )
-            
-            logger.info(f"🔍 Checking path (no prefix): {folder_path}")
-            
-            if folder_path and Path(folder_path).exists():
-                file_path = Path(folder_path)
-                logger.info(f"📂 Found file in new structure (no prefix): {file_path}")
-            else:
-                # Try with doc_id prefix (legacy style)
-                filename_with_id = f"{doc_id}_{doc_info.filename}"
-                folder_path = await folder_service.get_document_file_path(
-                    filename=filename_with_id,
-                    folder_id=doc_info.folder_id if hasattr(doc_info, 'folder_id') else None,
-                    user_id=current_user.user_id,
-                    collection_type="user"
+        if doc_info.doc_type == DocumentType.URL:
+            asyncio.create_task(
+                document_service._process_url_async(
+                    doc_id, doc_info.filename, "html", current_user.user_id
                 )
-                
-                logger.info(f"🔍 Checking path (with prefix): {folder_path}")
-                
-                if folder_path and Path(folder_path).exists():
-                    file_path = Path(folder_path)
-                    logger.info(f"📂 Found file in new structure (with prefix): {file_path}")
-        except Exception as e:
-            logger.warning(f"⚠️ Error checking new folder structure: {e}")
-        
-        # Fallback to legacy structure
-        if not file_path:
-            upload_dir = Path(settings.UPLOAD_DIR)
-            for potential_file in upload_dir.glob(f"{doc_id}_*"):
-                file_path = potential_file
-                logger.info(f"📂 Found file in legacy structure: {file_path}")
-                break
-        
-        if not file_path or not file_path.exists():
-            # If original file not found, check if it's a URL import
-            if doc_info.doc_type == DocumentType.URL:
-                # Re-import from URL with user_id
-                asyncio.create_task(document_service._process_url_async(doc_id, doc_info.filename, "html", current_user.user_id))
-                logger.info(f"🔗 Re-importing URL document: {doc_info.filename}")
-            else:
-                raise HTTPException(status_code=404, detail="Original file not found - cannot reprocess")
+            )
+            logger.info("Re-importing URL document: %s", doc_info.filename)
         else:
-            # Re-process the existing file with user_id
-            doc_type = document_service._detect_document_type(doc_info.filename)
-            asyncio.create_task(document_service._process_document_async(doc_id, file_path, doc_type, current_user.user_id))
-            logger.info(f"📄 Re-processing file: {file_path}")
+            asyncio.create_task(_fire_document_service_reprocess(doc_id, current_user.user_id))
+            logger.info("Queued document-service reprocess for %s", doc_id)
         
         logger.info(f"✅ User document {doc_id} queued for re-processing")
         return {
@@ -1559,97 +1475,41 @@ async def get_document_pdf(
     doc_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Serve the original PDF file for a document"""
-    folder_service = await _get_folder_service()
+    """Serve the original PDF file for a document (document-service stream)."""
     try:
-        logger.info(f"📄 Serving PDF file for document: {doc_id}")
-        
-        # SECURITY: Check access authorization
         doc_info = await check_document_access(doc_id, current_user, "read")
-        if not doc_info:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        # Check if it's a PDF document
-        if not doc_info.filename.lower().endswith('.pdf'):
+        if getattr(doc_info, "is_encrypted", False):
+            raise HTTPException(
+                status_code=423,
+                detail="Document is encrypted; unlock the document before downloading the PDF",
+            )
+        if not doc_info.filename.lower().endswith(".pdf"):
             raise HTTPException(status_code=400, detail="Document is not a PDF")
-        
-        # **ROOSEVELT FIX**: Use folder service to get correct file path
-        from pathlib import Path
-        import os
-        
-        filename = getattr(doc_info, 'filename', None)
-        user_id = getattr(doc_info, 'user_id', None)
-        folder_id = getattr(doc_info, 'folder_id', None)
-        collection_type = getattr(doc_info, 'collection_type', 'user')
-        
-        # SECURITY: Sanitize filename to prevent path traversal
-        if filename:
-            safe_filename = os.path.basename(filename)
-            if not safe_filename or safe_filename in ('.', '..'):
-                logger.error(f"Invalid filename in document metadata: {filename}")
-                raise HTTPException(status_code=500, detail="Invalid file metadata")
-            filename = safe_filename
-        
-        file_path = None
-        
-        if filename:
-            # Try new folder structure first
-            try:
-                file_path_str = await folder_service.get_document_file_path(
-                    filename=filename,
-                    folder_id=folder_id,
-                    user_id=user_id,
-                    collection_type=collection_type
-                )
-                file_path = Path(file_path_str)
-                
-                # SECURITY: Verify resolved path is within uploads directory
-                try:
-                    uploads_base = Path(settings.UPLOAD_DIR).resolve()
-                    file_path_resolved = file_path.resolve()
-                    
-                    if not str(file_path_resolved).startswith(str(uploads_base)):
-                        logger.error(f"Path traversal attempt detected in document: {doc_id} -> {file_path_resolved}")
-                        raise HTTPException(status_code=403, detail="Access denied")
-                except Exception as e:
-                    logger.error(f"Path validation error for document {doc_id}: {e}")
-                    raise HTTPException(status_code=403, detail="Access denied")
-                
-                if not file_path.exists():
-                    logger.warning(f"⚠️ PDF not found at computed path: {file_path}")
-                    file_path = None
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to compute file path with folder service: {e}")
-        
-        # Fall back to legacy flat structure if not found in new structure
-        if file_path is None or not file_path.exists():
-            upload_dir = Path(settings.UPLOAD_DIR)
-            legacy_paths = [
-                upload_dir / f"{doc_id}_{doc_info.filename}",
-                upload_dir / doc_info.filename
-            ]
-            
-            for legacy_path in legacy_paths:
-                if legacy_path.exists():
-                    file_path = legacy_path
-                    logger.info(f"📄 Found PDF in legacy location: {file_path}")
-                    break
-        
-        if file_path is None or not file_path.exists():
-            raise HTTPException(status_code=404, detail="PDF file not found on disk")
-        
-        logger.info(f"✅ Serving PDF file: {file_path}")
-        return FileResponse(
-            path=str(file_path),
-            filename=doc_info.filename,
-            media_type="application/pdf"
+
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+
+        async def _pdf_bytes():
+            async for ch in dsc.download_document_stream(
+                doc_id,
+                current_user.user_id,
+                role=getattr(current_user, "role", "") or "",
+            ):
+                if ch.data:
+                    yield ch.data
+
+        return StreamingResponse(
+            _pdf_bytes(),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{doc_info.filename}"',
+            },
         )
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Failed to serve PDF file: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Failed to serve PDF: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/documents/{doc_id}/file")
@@ -1657,100 +1517,42 @@ async def get_document_file(
     doc_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Serve the original file for a document (audio, images, etc.)"""
-    folder_service = await _get_folder_service()
+    """Serve the original file for a document (document-service stream)."""
     try:
-        logger.info(f"📄 Serving file for document: {doc_id}")
-        
-        # SECURITY: Check access authorization
         doc_info = await check_document_access(doc_id, current_user, "read")
-        if not doc_info:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        # Get file path using folder service
-        from pathlib import Path
-        from fastapi.responses import FileResponse
-        import os
-        import mimetypes
-        
-        filename = getattr(doc_info, 'filename', None)
-        user_id = getattr(doc_info, 'user_id', None)
-        folder_id = getattr(doc_info, 'folder_id', None)
-        collection_type = getattr(doc_info, 'collection_type', 'user')
-        
-        # SECURITY: Sanitize filename to prevent path traversal
-        if filename:
-            safe_filename = os.path.basename(filename)
-            if not safe_filename or safe_filename in ('.', '..'):
-                logger.error(f"Invalid filename in document metadata: {filename}")
-                raise HTTPException(status_code=500, detail="Invalid file metadata")
-            filename = safe_filename
-        
-        file_path = None
-        
-        if filename:
-            # Try new folder structure first
-            try:
-                file_path_str = await folder_service.get_document_file_path(
-                    filename=filename,
-                    folder_id=folder_id,
-                    user_id=user_id,
-                    collection_type=collection_type
-                )
-                file_path = Path(file_path_str)
-                
-                # SECURITY: Verify resolved path is within uploads directory
-                try:
-                    uploads_base = Path(settings.UPLOAD_DIR).resolve()
-                    file_path_resolved = file_path.resolve()
-                    
-                    if not str(file_path_resolved).startswith(str(uploads_base)):
-                        logger.error(f"Path traversal attempt detected in document: {doc_id} -> {file_path_resolved}")
-                        raise HTTPException(status_code=403, detail="Access denied")
-                except Exception as e:
-                    logger.error(f"Path validation error for document {doc_id}: {e}")
-                    raise HTTPException(status_code=403, detail="Access denied")
-                
-                if not file_path.exists():
-                    logger.warning(f"⚠️ File not found at computed path: {file_path}")
-                    file_path = None
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to compute file path with folder service: {e}")
-        
-        # Fall back to legacy flat structure if not found in new structure
-        if file_path is None or not file_path.exists():
-            upload_dir = Path(settings.UPLOAD_DIR)
-            legacy_paths = [
-                upload_dir / f"{doc_id}_{doc_info.filename}",
-                upload_dir / doc_info.filename
-            ]
-            
-            for legacy_path in legacy_paths:
-                if legacy_path.exists():
-                    file_path = legacy_path
-                    logger.info(f"📄 Found file in legacy location: {file_path}")
-                    break
-        
-        if file_path is None or not file_path.exists():
-            raise HTTPException(status_code=404, detail="File not found on disk")
-        
-        # Determine media type from file extension
-        media_type, _ = mimetypes.guess_type(str(file_path))
+        if getattr(doc_info, "is_encrypted", False):
+            raise HTTPException(
+                status_code=423,
+                detail="Document is encrypted; unlock the document before downloading the file",
+            )
+
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+
+        async def _file_bytes():
+            async for ch in dsc.download_document_stream(
+                doc_id,
+                current_user.user_id,
+                role=getattr(current_user, "role", "") or "",
+            ):
+                if ch.data:
+                    yield ch.data
+
+        media_type, _ = mimetypes.guess_type(doc_info.filename or "")
         if not media_type:
             media_type = "application/octet-stream"
-        
-        logger.info(f"✅ Serving file: {file_path} (type: {media_type})")
-        return FileResponse(
-            path=str(file_path),
-            filename=doc_info.filename,
-            media_type=media_type
+        return StreamingResponse(
+            _file_bytes(),
+            media_type=media_type,
+            headers={
+                "Content-Disposition": f'inline; filename="{doc_info.filename}"',
+            },
         )
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Failed to serve file: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Failed to serve file: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.delete("/api/documents/{doc_id}")
@@ -1758,26 +1560,24 @@ async def delete_document(
     doc_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Delete a document and all its embeddings"""
-    document_service = await _get_document_service()
+    """Delete a document and all its embeddings (document-service)."""
     try:
-        logger.info(f"🗑️  Deleting document: {doc_id}")
-        
-        # SECURITY: Check delete authorization
+        logger.info("Deleting document: %s", doc_id)
         await check_document_access(doc_id, current_user, "delete")
-        
-        success = await document_service.delete_document(doc_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        logger.info(f"✅ Document {doc_id} deleted successfully by user {current_user.user_id}")
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, data, err = await dsc.delete_document_json(
+            current_user.user_id,
+            {"document_id": doc_id, "user_id": current_user.user_id},
+        )
+        if not ok or not (data or {}).get("success"):
+            raise HTTPException(status_code=404, detail=err or "Document not found")
         return {"status": "success", "message": f"Document {doc_id} deleted successfully"}
-        
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Failed to delete document: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Failed to delete document: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/api/documents/stats")
@@ -1937,8 +1737,11 @@ async def get_pending_proposals(
     """Get pending edit proposals for a document (for DocumentViewer on open)."""
     await check_document_access(document_id, current_user, "read")
     from services.langgraph_tools.document_editing_tools import list_pending_proposals_for_document
-    proposals = await list_pending_proposals_for_document(document_id, current_user.user_id)
-    return proposals
+    result = await list_pending_proposals_for_document(document_id, current_user.user_id)
+    return {
+        "proposals": result["proposals"],
+        "stale_cleaned": result["stale_cleaned"],
+    }
 
 
 class ApplyEditProposalRequest(BaseModel):
@@ -2052,166 +1855,135 @@ async def get_document_content(
         
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
+
+        encrypted_plain: Optional[str] = None
+        if getattr(document, "is_encrypted", False):
+            etok = request.query_params.get("encryption_session_token")
+            if etok:
+                dsc = get_document_service_client()
+                await dsc.initialize(required=True)
+                ok, dec_data, _err = await dsc.try_decrypt_json(
+                    current_user.user_id,
+                    {
+                        "document_id": doc_id,
+                        "session_token": etok,
+                        "user_id": current_user.user_id,
+                    },
+                )
+                if ok and dec_data is not None:
+                    encrypted_plain = dec_data.get("content")
+            if encrypted_plain is None:
+                user_id_e = getattr(document, "user_id", None)
+                folder_id_e = getattr(document, "folder_id", None)
+                collection_type_e = getattr(document, "collection_type", "user")
+                folder_name_e = None
+                try:
+                    if folder_id_e:
+                        fold_e = await folder_service.get_folder(folder_id_e, user_id_e)
+                        if fold_e:
+                            folder_name_e = getattr(fold_e, "name", None)
+                except Exception:
+                    pass
+                return JSONResponse(
+                    content={
+                        "content": "",
+                        "is_encrypted": True,
+                        "requires_password": True,
+                        "metadata": {
+                            "document_id": document.document_id,
+                            "title": document.title,
+                            "filename": document.filename,
+                            "author": document.author,
+                            "description": document.description,
+                            "category": document.category.value if document.category else None,
+                            "tags": document.tags,
+                            "user_id": user_id_e,
+                            "collection_type": collection_type_e,
+                            "folder_id": folder_id_e,
+                            "folder_name": folder_name_e,
+                            "canonical_path": None,
+                            "is_encrypted": True,
+                        },
+                        "total_length": 0,
+                        "content_source": "encrypted",
+                        "chunk_count": 0,
+                    }
+                )
         
-        # ALWAYS get content from the actual file on disk
-        full_content = None  # None = file not found, "" = empty file, "content" = file with content
+        import grpc as _grpc
+
+        filename = getattr(document, "filename", None)
+        user_id = getattr(document, "user_id", None)
+        folder_id = getattr(document, "folder_id", None)
+        collection_type = getattr(document, "collection_type", "user")
+        full_content = None
         content_source = "file"
-        
+        content_grpc_resp = None
+
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+
         try:
-            from pathlib import Path
-            
-            # Use folder service to find the file in the new structure
-            filename = getattr(document, 'filename', None)
-            user_id = getattr(document, 'user_id', None)
-            folder_id = getattr(document, 'folder_id', None)
-            collection_type = getattr(document, 'collection_type', 'user')
-            
-            # Skip content loading for PDFs - they're served via the /pdf endpoint
-            # But still compute the file path for canonical_path
-            if filename and filename.lower().endswith('.pdf'):
-                logger.info(f"📄 API: Skipping content load for PDF: {filename} (use /pdf endpoint instead)")
-                full_content = ""  # Empty content for PDFs
+            if encrypted_plain is not None:
+                full_content = encrypted_plain
+                content_source = "encrypted_session"
+            elif filename and filename.lower().endswith(".pdf"):
+                full_content = ""
                 content_source = "pdf_binary"
-                # Still compute file path for metadata
-                try:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        collection_type=collection_type
-                    )
-                    file_path = Path(file_path_str)
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to compute file path for PDF: {e}")
-            # Skip content loading for image files - they're binary and served via /api/images/ endpoint
-            elif filename and any(filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']):
-                logger.info(f"🖼️ API: Skipping content load for image: {filename} (use /api/images/ endpoint instead)")
-                full_content = ""  # Empty content for images
+            elif filename and any(
+                filename.lower().endswith(ext)
+                for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg")
+            ):
+                full_content = ""
                 content_source = "image_binary"
-                # Still compute file path for metadata
-                try:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        collection_type=collection_type
-                    )
-                    file_path = Path(file_path_str)
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to compute file path for image: {e}")
-            # Skip content loading for DocX files - they're binary and served via /file endpoint
-            elif filename and filename.lower().endswith('.docx'):
-                logger.info(f"📄 API: Skipping content load for DocX: {filename} (use /file endpoint instead)")
-                full_content = ""  # Empty content for DocX files
+            elif filename and filename.lower().endswith(".docx"):
+                full_content = ""
                 content_source = "docx_binary"
-                # Still compute file path for metadata
-                try:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        collection_type=collection_type
-                    )
-                    file_path = Path(file_path_str)
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to compute file path for DocX: {e}")
-            # Skip content loading for PPTX files - they're binary and served via /file endpoint
-            elif filename and (filename.lower().endswith('.pptx') or filename.lower().endswith('.ppt')):
-                logger.info(f"📄 API: Skipping content load for PPTX: {filename} (use /file endpoint instead)")
-                full_content = ""  # Empty content for PPTX files
+            elif filename and (
+                filename.lower().endswith(".pptx") or filename.lower().endswith(".ppt")
+            ):
+                full_content = ""
                 content_source = "pptx_binary"
+            else:
                 try:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        collection_type=collection_type
+                    content_grpc_resp = await dsc.get_document_content_grpc(
+                        doc_id, user_id or current_user.user_id
                     )
-                    file_path = Path(file_path_str)
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to compute file path for PPTX: {e}")
-            elif filename:
-                # Try new folder structure first
-                try:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        collection_type=collection_type
+                    full_content = (
+                        content_grpc_resp.content
+                        if content_grpc_resp.content is not None
+                        else ""
                     )
-                    file_path = Path(file_path_str)
-                    
-                    if file_path.exists():
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            full_content = f.read()
-                        logger.info(f"✅ API: Loaded content from file: {file_path}")
-                    else:
-                        logger.warning(f"⚠️ File not found at computed path: {file_path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to compute file path with folder service: {e}")
-                
-                # Fall back to searching user directory for org files
-                if full_content is None and filename.endswith('.org'):
-                    # For org files, search user directory tree
-                    username = await folder_service._get_username(user_id) if user_id else None
-                    if username:
-                        user_dir = Path(settings.UPLOAD_DIR) / "Users" / username
-                        if user_dir.exists():
-                            # Search recursively for the org file
-                            matching_files = list(user_dir.rglob(filename))
-                            if matching_files:
-                                file_path = matching_files[0]  # Use first match
-                                if file_path.exists():
-                                    with open(file_path, 'r', encoding='utf-8') as f:
-                                        full_content = f.read()
-                                    logger.info(f"✅ API: Found org file in subdirectory: {file_path}")
-                
-                # Fall back to old paths if still not found
-                if full_content is None:
-                    upload_dir = Path(settings.UPLOAD_DIR)
-                    legacy_paths = [
-                        upload_dir / f"{doc_id}_{filename}",
-                        upload_dir / filename
-                    ]
-                    
-                    # For markdown, also check web_sources
-                    if filename.endswith('.md'):
-                        import glob
-                        legacy_paths.extend([
-                            upload_dir / "web_sources" / "rss_articles" / "*" / filename,
-                            upload_dir / "web_sources" / "scraped_content" / "*" / filename
-                        ])
-                    
-                    import glob
-                    for path_pattern in legacy_paths:
-                        matches = glob.glob(str(path_pattern)) if '*' in str(path_pattern) else [str(path_pattern)]
-                        if matches:
-                            file_path = Path(matches[0])
-                            if file_path.exists():
-                                with open(file_path, 'r', encoding='utf-8') as f:
-                                    full_content = f.read()
-                                logger.info(f"✅ API: Loaded content from legacy path: {file_path}")
-                                break
-            
-            # If file not found, this is an error - vectors are NOT for viewing
-            # **BULLY!** Allow empty files - distinguish between "file not found" vs "empty file"
+                    content_source = "document_service"
+                except _grpc.RpcError as e:
+                    if e.code() == _grpc.StatusCode.NOT_FOUND:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Document content not found for {doc_id}",
+                        ) from e
+                    raise
+
             if full_content is None:
-                logger.error(f"❌ API: File not found for document {doc_id} (filename: {getattr(document, 'filename', 'unknown')})")
-                raise HTTPException(status_code=404, detail=f"Document file not found on disk for {doc_id}")
-            elif full_content == "":
-                logger.info(f"📝 API: Document {doc_id} has empty content (file exists but is empty)")
-                
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Document file not found for {doc_id}",
+                )
+            if full_content == "":
+                logger.info("Document %s has empty body (binary or empty file)", doc_id)
+
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"❌ API: Failed to load file for document {doc_id}: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to load document file: {str(e)}")
+            logger.error("Failed to load file for document %s: %s", doc_id, e)
+            raise HTTPException(
+                status_code=500, detail=f"Failed to load document file: {str(e)}"
+            ) from e
         
-        # **BULLY!** For editing, we need the full content WITH frontmatter
+        # Editing requires full file content including frontmatter
         # Only strip frontmatter for read-only display, not for editing
         display_content = full_content
         
-        # **ROOSEVELT'S CANONICAL PATH FIX**: Ensure we always have canonical_path and folder info
+        # Ensure canonical_path and folder metadata are populated
         # Get folder information for frontend use
         folder_name = None
         try:
@@ -2223,24 +1995,32 @@ async def get_document_content(
         except Exception as e:
             logger.warning(f"⚠️ Could not fetch folder name: {e}")
         
-        # Ensure canonical_path is set - this is critical for relative reference resolution!
+        # Prefer canonical_path from document-service (single source of truth on disk).
         canonical_path_str = None
-        if 'file_path' in locals() and file_path:
-            canonical_path_str = str(file_path)
-        else:
-            # If we got here, we found the content but file_path wasn't preserved
-            # Reconstruct it from the folder service
+        grpc_canonical = ""
+        if content_grpc_resp is not None:
             try:
-                if filename:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_id,
-                        collection_type=collection_type
-                    )
-                    canonical_path_str = file_path_str
+                if content_grpc_resp.HasField("canonical_path"):
+                    grpc_canonical = (content_grpc_resp.canonical_path or "").strip()
+            except (AttributeError, ValueError):
+                grpc_canonical = (getattr(content_grpc_resp, "canonical_path", None) or "").strip()
+        if grpc_canonical:
+            canonical_path_str = grpc_canonical
+        elif filename:
+            try:
+                team_tid = getattr(document, "team_id", None)
+                if team_tid and not isinstance(team_tid, str):
+                    team_tid = str(team_tid)
+                file_path_str = await folder_service.get_document_file_path(
+                    filename=filename,
+                    folder_id=folder_id,
+                    user_id=user_id,
+                    collection_type=collection_type,
+                    team_id=team_tid,
+                )
+                canonical_path_str = str(file_path_str) if file_path_str else None
             except Exception as e:
-                logger.warning(f"⚠️ Could not construct canonical_path: {e}")
+                logger.warning("Could not construct canonical_path: %s", e)
         
         # Get updated_at from database directly (not in DocumentInfo model)
         updated_at = None
@@ -2272,9 +2052,10 @@ async def get_document_content(
             "language": document.language,
             "user_id": getattr(document, 'user_id', None),
             "collection_type": getattr(document, 'collection_type', None),
-            "folder_id": folder_id,  # **ROOSEVELT: Add folder_id**
-            "folder_name": folder_name,  # **ROOSEVELT: Add folder_name for display**
-            "canonical_path": canonical_path_str  # **ROOSEVELT: Reliable canonical path!**
+            "folder_id": folder_id,
+            "folder_name": folder_name,
+            "canonical_path": canonical_path_str,
+            "is_encrypted": getattr(document, "is_encrypted", False),
         }
         
         response_data = {
@@ -2282,7 +2063,9 @@ async def get_document_content(
             "metadata": metadata,
             "total_length": len(display_content),
             "content_source": content_source,
-            "chunk_count": 0  # For PDFs and other files, chunk count is not relevant for viewing
+            "chunk_count": 0,  # For PDFs and other files, chunk count is not relevant for viewing
+            "is_encrypted": getattr(document, "is_encrypted", False),
+            "requires_password": False,
         }
         
         logger.info(f"✅ API: Returning content for {doc_id} from {content_source}: {len(full_content)} characters")
@@ -2301,16 +2084,18 @@ async def exempt_document_from_vectorization(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Exempt a document from vectorization and knowledge graph processing"""
-    document_service = await _get_document_service()
     try:
-        success = await document_service.exempt_document_from_vectorization(
-            doc_id, 
-            current_user.user_id
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, _data, err = await dsc.exempt_document_json(
+            current_user.user_id,
+            {"document_id": doc_id, "user_id": current_user.user_id},
         )
-        if success:
+        if ok:
             return {"status": "success", "message": "Document exempted from search"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to exempt document")
+        raise HTTPException(status_code=500, detail=err or "Failed to exempt document")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to exempt document {doc_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2328,20 +2113,20 @@ async def remove_document_exemption(
         doc_id: Document ID
         inherit: If True, set to inherit from folder. If False, set to explicit vectorize.
     """
-    document_service = await _get_document_service()
     try:
-        success = await document_service.remove_document_exemption(
-            doc_id,
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, _data, err = await dsc.remove_document_exemption_json(
             current_user.user_id,
-            inherit=inherit
+            {"document_id": doc_id, "user_id": current_user.user_id, "inherit": inherit},
         )
-        if success:
+        if ok:
             if inherit:
                 return {"status": "success", "message": "Document now inherits from folder"}
-            else:
-                return {"status": "success", "message": "Document exemption removed and re-processed"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to remove exemption")
+            return {"status": "success", "message": "Document exemption removed and re-processed"}
+        raise HTTPException(status_code=500, detail=err or "Failed to remove exemption")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to remove exemption for document {doc_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2353,22 +2138,24 @@ async def exempt_folder_from_vectorization(
 ):
     """Exempt a folder and all descendants from vectorization"""
     logger.info(f"🚫 API: Exempting folder {folder_id} for user {current_user.user_id}")
-    folder_service = await _get_folder_service()
     try:
-        from services.service_container import get_service_container
-        container = await get_service_container()
-        folder_service = container.folder_service
-
-        success = await folder_service.exempt_folder_from_vectorization(
-            folder_id,
-            current_user.user_id
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, _data, err = await dsc.exempt_folder_json(
+            current_user.user_id,
+            {
+                "folder_id": folder_id,
+                "user_id": current_user.user_id,
+                "role": current_user.role,
+            },
         )
-        if success:
+        if ok:
             logger.info(f"✅ API: Folder {folder_id} exempted successfully")
             return {"status": "success", "message": "Folder and descendants exempted from search"}
-        else:
-            logger.error(f"❌ API: Failed to exempt folder {folder_id} - method returned false")
-            raise HTTPException(status_code=500, detail="Failed to exempt folder")
+        logger.error(f"❌ API: Failed to exempt folder {folder_id}: {err}")
+        raise HTTPException(status_code=500, detail=err or "Failed to exempt folder")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to exempt folder {folder_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2379,20 +2166,22 @@ async def remove_folder_exemption(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Remove exemption from a folder (set to inherit from parent), re-process all documents"""
-    folder_service = await _get_folder_service()
     try:
-        from services.service_container import get_service_container
-        container = await get_service_container()
-        folder_service = container.folder_service
-        
-        success = await folder_service.remove_folder_exemption(
-            folder_id,
-            current_user.user_id
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, _data, err = await dsc.remove_folder_exemption_json(
+            current_user.user_id,
+            {
+                "folder_id": folder_id,
+                "user_id": current_user.user_id,
+                "role": current_user.role,
+            },
         )
-        if success:
+        if ok:
             return {"status": "success", "message": "Folder exemption removed - now inherits from parent"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to remove exemption")
+        raise HTTPException(status_code=500, detail=err or "Failed to remove exemption")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to remove exemption for folder {folder_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2403,20 +2192,22 @@ async def override_folder_exemption(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Set folder to explicitly NOT exempt (override parent exemption)"""
-    folder_service = await _get_folder_service()
     try:
-        from services.service_container import get_service_container
-        container = await get_service_container()
-        folder_service = container.folder_service
-        
-        success = await folder_service.override_folder_exemption(
-            folder_id,
-            current_user.user_id
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        ok, _data, err = await dsc.override_folder_exemption_json(
+            current_user.user_id,
+            {
+                "folder_id": folder_id,
+                "user_id": current_user.user_id,
+                "role": current_user.role,
+            },
         )
-        if success:
+        if ok:
             return {"status": "success", "message": "Folder set to override parent exemption - not exempt"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to set override")
+        raise HTTPException(status_code=500, detail=err or "Failed to set override")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to set override for folder {folder_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -2457,134 +2248,76 @@ async def update_document_content(
         if not str(filename).lower().endswith(editable_exts):
             raise HTTPException(status_code=400, detail="Only .txt, .md, and .org documents can be edited")
 
-        # Locate file path on disk using folder service
-        from pathlib import Path
-        user_id = getattr(doc_info, 'user_id', None)
-        folder_id = getattr(doc_info, 'folder_id', None)
-        collection_type = getattr(doc_info, 'collection_type', 'user')
-        
-        file_path = None
-        try:
-            file_path_str = await folder_service.get_document_file_path(
-                filename=filename,
-                folder_id=folder_id,
-                user_id=user_id,
-                collection_type=collection_type
-            )
-            file_path = Path(file_path_str)
-            
-            if not file_path.exists():
-                logger.warning(f"⚠️ File not found at computed path: {file_path}")
-                file_path = None
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to compute file path with folder service: {e}")
-        
-        # Fall back to legacy paths if not found
-        if file_path is None or not file_path.exists():
-            upload_dir = Path(settings.UPLOAD_DIR)
-            legacy_paths = [
-                upload_dir / f"{doc_id}_{filename}",
-                upload_dir / filename
-            ]
-            
-            # For markdown, also check web_sources
-            if filename.lower().endswith('.md'):
-                import glob
-                legacy_paths.extend([
-                    upload_dir / "web_sources" / "rss_articles" / "*" / filename,
-                    upload_dir / "web_sources" / "scraped_content" / "*" / filename
-                ])
-            
-            import glob
-            for path_pattern in legacy_paths:
-                matches = glob.glob(str(path_pattern)) if '*' in str(path_pattern) else [str(path_pattern)]
-                if matches:
-                    candidate = Path(matches[0])
-                    if candidate.exists():
-                        file_path = candidate
-                        break
-            
-            if file_path is None or not file_path.exists():
-                raise HTTPException(status_code=404, detail="Original file not found on disk")
+        is_encrypted_doc = getattr(doc_info, "is_encrypted", False)
+        encryption_session_token = body.get("encryption_session_token")
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        owner_uid = getattr(doc_info, "user_id", None) or current_user.user_id
 
-        # If content is unchanged, skip disk write and background re-indexing.
-        # This avoids unnecessary chunk deletion + re-embedding for no-op saves.
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                existing_content = f.read()
-            if existing_content == new_content:
-                logger.info(f"📝 No-op save detected for {doc_id}; skipping re-indexing")
-                return {
-                    "status": "success",
-                    "message": "No changes detected. Skipping re-indexing.",
+        if is_encrypted_doc:
+            if not encryption_session_token:
+                raise HTTPException(
+                    status_code=423,
+                    detail="Encryption session required to save",
+                )
+            ok, _data, err = await dsc.write_encrypted_content_from_session_json(
+                current_user.user_id,
+                {
                     "document_id": doc_id,
-                }
-        except UnicodeDecodeError:
-            # If the file isn't valid UTF-8, fall back to the existing behavior
-            # (write + reprocess) rather than rejecting or guessing.
-            logger.warning(f"⚠️ Unable to read existing content as UTF-8 for {doc_id}; proceeding with save")
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to compare existing content for {doc_id}; proceeding with save: {e}")
+                    "user_id": current_user.user_id,
+                    "session_token": encryption_session_token,
+                    "content": new_content,
+                },
+            )
+            if not ok:
+                low = (err or "").lower()
+                if "session" in low or "permission" in low or "active" in low:
+                    raise HTTPException(
+                        status_code=423,
+                        detail=err or "Encryption session expired or invalid",
+                    )
+                raise HTTPException(status_code=400, detail=err or "Save failed")
+            asyncio.create_task(_fire_document_service_reprocess(doc_id, current_user.user_id))
+        else:
+            try:
+                prev = await dsc.get_document_content_grpc(doc_id, owner_uid)
+                if (prev.content or "") == new_content:
+                    return {
+                        "status": "success",
+                        "message": "No changes detected. Skipping re-indexing.",
+                        "document_id": doc_id,
+                    }
+            except Exception:
+                pass
+            upd = await dsc.update_document_content_grpc(
+                doc_id,
+                owner_uid,
+                new_content,
+                append=False,
+                write_initiator="user_api",
+            )
+            if not upd.success:
+                raise HTTPException(
+                    status_code=400,
+                    detail=upd.error or upd.message or "Update failed",
+                )
 
-        # Snapshot current content before overwrite (version history)
-        try:
-            from services.document_version_service import snapshot_before_write
-            await snapshot_before_write(doc_id, current_user.user_id, "manual_save", None, None)
-        except Exception as verr:
-            logger.warning("Version snapshot before save failed (non-fatal): %s", verr)
-
-        # Write content to disk
-        try:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(new_content)
-            logger.info(f"📝 Updated file on disk: {file_path}")
-        except Exception as e:
-            logger.error(f"❌ Failed to write updated content: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to save content: {str(e)}")
-
-        # Update file size
-        try:
-            await document_service.document_repository.update_file_size(doc_id, len(new_content.encode('utf-8')))
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to update file size metadata: {e}")
-
-        # Extract and store document links for file relation graph (text types only)
-        if str(filename).lower().endswith(('.org', '.md', '.txt')):
+        if str(filename).lower().endswith((".org", ".md", ".txt")):
             try:
                 from services.link_extraction_service import get_link_extraction_service
+
                 link_service = await get_link_extraction_service()
-                rls_context = {'user_id': current_user.user_id, 'user_role': current_user.role}
+                rls_context = {
+                    "user_id": current_user.user_id,
+                    "user_role": current_user.role,
+                }
                 await link_service.extract_and_store_links(doc_id, new_content, rls_context)
             except Exception as link_err:
                 logger.warning("Link extraction failed for %s: %s", doc_id, link_err)
 
-        # Check if document is exempt from vectorization BEFORE processing
-        is_exempt = await document_service.document_repository.is_document_exempt(doc_id, current_user.user_id)
-        if is_exempt:
-            logger.info(f"🚫 Document {doc_id} is exempt from vectorization - skipping embedding and entity extraction")
-            await document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
-            return {"status": "success", "message": "Content updated (exempt from search)", "document_id": doc_id}
-
-        # Queue re-embedding and entity extraction in background so save returns immediately
-        await document_service.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)
-        await document_service._emit_document_status_update(doc_id, ProcessingStatus.EMBEDDING.value, current_user.user_id)
-        try:
-            await document_service.embedding_manager.delete_document_chunks(doc_id)
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to delete old chunks for {doc_id}: {e}")
-        if document_service.kg_service:
-            try:
-                await document_service.kg_service.delete_document_entities(doc_id)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to delete old KG entities for {doc_id}: {e}")
-
-        from services.celery_tasks.document_tasks import reprocess_document_after_save_task
-        reprocess_document_after_save_task.apply_async(args=[doc_id, current_user.user_id], queue="default")
-        logger.info(f"Content saved for {doc_id}; re-indexing queued in background")
         return {
             "status": "success",
-            "message": "Content saved. Re-indexing in background.",
+            "message": "Content saved.",
             "document_id": doc_id,
         }
 

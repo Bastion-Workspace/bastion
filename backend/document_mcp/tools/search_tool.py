@@ -200,7 +200,7 @@ class SearchTool:
     def _prepare_search_params(self, input_data: SearchDocumentsInput) -> Dict[str, Any]:
         """Prepare search parameters based on input"""
         # Determine if query expansion should be used
-        # ROOSEVELT'S CHANGE: Default to False - agents handle expansion  
+        # Default False; agents perform query expansion  
         use_query_expansion = False
         
         # Legacy logic: Previously skipped expansion for specific queries  

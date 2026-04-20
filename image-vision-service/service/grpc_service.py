@@ -79,8 +79,13 @@ class ImageVisionServiceImplementation(image_vision_pb2_grpc.ImageVisionServiceS
                     error="Service not initialized"
                 )
             
-            # Detect faces
-            result = await self.vision_engine.detect_faces(request.image_path)
+            raw = getattr(request, "image_data", b"") or b""
+            if len(raw) > 0:
+                result = await self.vision_engine.detect_faces(
+                    image_path="", image_data=bytes(raw)
+                )
+            else:
+                result = await self.vision_engine.detect_faces(request.image_path)
             
             # Convert to protobuf format
             detected_faces = []
@@ -179,10 +184,13 @@ class ImageVisionServiceImplementation(image_vision_pb2_grpc.ImageVisionServiceS
 
             class_filter = list(request.class_filter) if request.class_filter else None
             confidence_threshold = request.confidence_threshold if request.confidence_threshold > 0 else 0.5
+            raw = getattr(request, "image_data", b"") or b""
+            img_bytes = bytes(raw) if len(raw) > 0 else None
             result = await self.vision_engine.detect_objects(
-                image_path=request.image_path,
+                image_path=request.image_path if not img_bytes else "",
                 class_filter=class_filter,
                 confidence_threshold=confidence_threshold,
+                image_data=img_bytes,
             )
 
             objects = []
@@ -205,10 +213,11 @@ class ImageVisionServiceImplementation(image_vision_pb2_grpc.ImageVisionServiceS
                     for o in result["objects"]
                 ]
                 semantic_matches = await self.vision_engine.match_objects_semantically(
-                    image_path=request.image_path,
+                    image_path=request.image_path if not img_bytes else "",
                     regions=regions,
                     object_descriptions=list(request.semantic_descriptions),
                     similarity_threshold=0.25,
+                    image_data=img_bytes,
                 )
                 for m in semantic_matches:
                     objects.append(image_vision_pb2.DetectedObject(
@@ -224,13 +233,14 @@ class ImageVisionServiceImplementation(image_vision_pb2_grpc.ImageVisionServiceS
                     ))
                 # CLIP grid sweep: find regions matching semantic terms that YOLO may have missed
                 sweep_matches = await self.vision_engine.find_semantic_regions(
-                    image_path=request.image_path,
+                    image_path=request.image_path if not img_bytes else "",
                     object_descriptions=list(request.semantic_descriptions),
                     chunk_size=224,
                     stride=224,
                     similarity_threshold=0.28,
                     max_chunks=200,
                     nms_iou_threshold=0.5,
+                    image_data=img_bytes,
                 )
                 for m in sweep_matches:
                     objects.append(image_vision_pb2.DetectedObject(
@@ -285,10 +295,13 @@ class ImageVisionServiceImplementation(image_vision_pb2_grpc.ImageVisionServiceS
                 "bbox_width": request.bbox_width,
                 "bbox_height": request.bbox_height,
             }
+            raw = getattr(request, "image_data", b"") or b""
+            img_bytes = bytes(raw) if len(raw) > 0 else None
             result = await self.vision_engine.extract_object_features(
-                image_path=request.image_path,
+                image_path=request.image_path if not img_bytes else "",
                 bbox=bbox,
                 description=request.description or "",
+                image_data=img_bytes,
             )
 
             return image_vision_pb2.ObjectFeatureExtractionResponse(

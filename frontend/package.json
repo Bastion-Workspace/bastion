@@ -1,6 +1,6 @@
 {
   "name": "bastion-frontend",
-  "version": "0.55.0",
+  "version": "0.70.0",
   "description": "Bastion AI Workspace - React Frontend",
   "private": true,
   "dependencies": {
@@ -26,6 +26,7 @@
     "@mui/x-data-grid": "^6.18.2",
     "recharts": "^2.8.0",
     "react-syntax-highlighter": "^15.5.0",
+    "react-grid-layout": "^1.4.4",
     "react-query": "^3.39.3",
     "framer-motion": "^10.16.16",
     "pdfjs-dist": "^3.11.174",
@@ -37,12 +38,14 @@
     "docx": "^8.5.0",
     "@mui/x-date-pickers": "^6.18.2",
     "date-fns": "^2.30.0",
+    "hls.js": "^1.5.7",
     "@fullcalendar/core": "^6.1.10",
     "@fullcalendar/react": "^6.1.10",
     "@fullcalendar/daygrid": "^6.1.10",
     "@fullcalendar/timegrid": "^6.1.10",
     "@fullcalendar/interaction": "^6.1.10",
     "dompurify": "^3.0.5",
+    "mermaid": "^11.4.0",
     "mammoth": "^1.6.0",
     "@jvmr/pptx-to-html": "^1.0.0",
     "@codemirror/state": "^6.4.1",
@@ -55,6 +58,10 @@
     "@lezer/highlight": "^1.2.0",
     "@uiw/react-codemirror": "^4.23.7",
     "@codemirror/lang-markdown": "^6.2.4",
+    "yjs": "^13.6.0",
+    "y-codemirror.next": "^0.3.5",
+    "y-websocket": "^2.0.4",
+    "y-protocols": "^1.0.6",
     "cytoscape": "^3.33.0",
     "cytoscape-fcose": "^2.2.0",
     "graphology": "^0.25.4",
@@ -63,7 +70,9 @@
     "react-leaflet": "^4.2.1",
     "maplibre-gl": "^4.7.1",
     "pmtiles": "^4.2.0",
-    "@protomaps/basemaps": "^5.0.0"
+    "@protomaps/basemaps": "^5.0.0",
+    "epubjs": "^0.3.93",
+    "spark-md5": "^3.0.2"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

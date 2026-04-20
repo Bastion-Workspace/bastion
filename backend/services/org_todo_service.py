@@ -80,6 +80,29 @@ class OrgTodoService:
     def __init__(self) -> None:
         self._upload_dir = Path(settings.UPLOAD_DIR)
 
+    async def _org_read(self, user_id: str, p: Path, *, utf8_sig: bool = False) -> str:
+        from services import ds_upload_library_fs as dsf
+
+        text = await dsf.read_text(user_id, p)
+        if utf8_sig and text.startswith("\ufeff"):
+            text = text[1:]
+        return text
+
+    async def _org_write(self, user_id: str, p: Path, content: str) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        await dsf.write_text(user_id, p, content)
+
+    async def _org_append(self, user_id: str, p: Path, suffix: str) -> None:
+        from services import ds_upload_library_fs as dsf
+
+        await dsf.append_text(user_id, p, suffix)
+
+    async def _org_exists(self, user_id: str, p: Path) -> bool:
+        from services import ds_upload_library_fs as dsf
+
+        return await dsf.exists(user_id, p)
+
     async def _get_search_service(self):
         from services.org_search_service import get_org_search_service
         return await get_org_search_service()
@@ -153,7 +176,7 @@ class OrgTodoService:
         states: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
         query: str = "",
-        limit: int = 100,
+        limit: int = 100,  # use <= 0 for no cap
         include_archives: bool = False,
         include_body: bool = False,
         closed_since_days: Optional[int] = None,
@@ -172,7 +195,7 @@ class OrgTodoService:
                 org_files = await search._find_user_org_files(user_id, include_archives=include_archives)
             else:
                 resolved = await self._resolve_file_path(user_id, scope)
-                if not resolved or not resolved.exists():
+                if not resolved or not await self._org_exists(user_id, resolved):
                     return {"success": False, "error": f"File not found: {scope}", "results": [], "count": 0}
                 org_files = [resolved]
 
@@ -182,6 +205,7 @@ class OrgTodoService:
             all_results: List[Dict[str, Any]] = []
             for file_path in org_files:
                 file_results = await search._search_org_file(
+                    user_id=user_id,
                     file_path=file_path,
                     query=query,
                     tags=tags,
@@ -211,7 +235,8 @@ class OrgTodoService:
                     and self._parse_closed_date(r.get("closed")) >= cutoff
                 ]
             all_results.sort(key=lambda r: (-int(r.get("heading_match", False)), -r.get("match_count", 0)))
-            limited = all_results[:limit]
+            # limit <= 0 means return all matches (agents and tools should see the full set).
+            limited = all_results if limit <= 0 else all_results[:limit]
             return {
                 "success": True,
                 "results": limited,
@@ -249,10 +274,10 @@ class OrgTodoService:
                 header = None
             else:
                 resolved = await self._resolve_file_path(user_id, file_path)
-                if not resolved or not resolved.exists():
+                if not resolved or not await self._org_exists(user_id, resolved):
                     return {"success": False, "error": f"File not found: {file_path}"}
                 from utils.org_header_parser import parse_org_file_header, filetags_to_list
-                file_content_for_header = resolved.read_text(encoding="utf-8-sig")
+                file_content_for_header = await self._org_read(user_id, resolved, utf8_sig=True)
                 header = parse_org_file_header(file_content_for_header)
 
             ts = await self._org_timestamp(user_id)
@@ -287,7 +312,7 @@ class OrgTodoService:
             if header is not None:
                 lines = file_content_for_header.splitlines()
             else:
-                lines = resolved.read_text(encoding="utf-8").splitlines()
+                lines = (await self._org_read(user_id, resolved)).splitlines()
             insert_at: Optional[int] = None
             if insert_after_line_number is not None and insert_after_line_number >= 0:
                 insert_at = min(insert_after_line_number + 1, len(lines))
@@ -295,12 +320,11 @@ class OrgTodoService:
             if insert_at is not None:
                 lines = lines[:insert_at] + new_block + lines[insert_at:]
                 line_index = insert_at
-                resolved.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                await self._org_write(user_id, resolved, "\n".join(lines) + "\n")
             else:
                 line_index = len(lines)
                 # Ensure new entry starts on its own line (never on same line as :END: or last line)
-                with resolved.open("a", encoding="utf-8") as f:
-                    f.write("\n" + "\n".join(new_block) + "\n")
+                await self._org_append(user_id, resolved, "\n" + "\n".join(new_block) + "\n")
 
             return {
                 "success": True,
@@ -413,10 +437,10 @@ class OrgTodoService:
     ) -> Dict[str, Any]:
         """Toggle TODO <-> DONE (any org heading level) or - [ ] <-> - [x] (markdown)."""
         resolved = await self._resolve_file_path(user_id, file_path)
-        if not resolved or not resolved.exists():
+        if not resolved or not await self._org_exists(user_id, resolved):
             return {"success": False, "error": f"File not found: {file_path}"}
         try:
-            lines = resolved.read_text(encoding="utf-8").splitlines()
+            lines = (await self._org_read(user_id, resolved)).splitlines()
             idx = self._find_line_index(lines, line_number, heading_text)
             if idx is None:
                 return {"success": False, "error": "line_index out of range"}
@@ -459,7 +483,7 @@ class OrgTodoService:
                             del lines[closed_idx]
                 else:
                     return {"success": False, "error": "line is not a task (expected org TODO/DONE or markdown - [ ]/- [x])"}
-            resolved.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await self._org_write(user_id, resolved, "\n".join(lines) + "\n")
             return {"success": True, "file_path": str(resolved), "line_number": idx, "new_line": lines[idx]}
         except Exception as e:
             logger.exception("toggle_todo failed")
@@ -491,10 +515,10 @@ class OrgTodoService:
         new_body: Optional[str] = None,
     ) -> Dict[str, Any]:
         resolved = await self._resolve_file_path(user_id, file_path)
-        if not resolved or not resolved.exists():
+        if not resolved or not await self._org_exists(user_id, resolved):
             return {"success": False, "error": f"File not found: {file_path}"}
         try:
-            lines = resolved.read_text(encoding="utf-8").splitlines()
+            lines = (await self._org_read(user_id, resolved)).splitlines()
             idx = self._find_line_index(lines, line_number, heading_text)
             if idx is None:
                 return {"success": False, "error": "line_index out of range"}
@@ -556,7 +580,7 @@ class OrgTodoService:
                 new_body_lines = new_body.strip().split("\n") if new_body.strip() else []
                 lines = lines[:start] + new_body_lines + lines[end:]
 
-            resolved.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            await self._org_write(user_id, resolved, "\n".join(lines) + "\n")
             return {"success": True, "file_path": str(resolved), "line_number": idx, "new_line": line}
         except Exception as e:
             logger.exception("update_todo failed")
@@ -570,10 +594,10 @@ class OrgTodoService:
         heading_text: Optional[str] = None,
     ) -> Dict[str, Any]:
         resolved = await self._resolve_file_path(user_id, file_path)
-        if not resolved or not resolved.exists():
+        if not resolved or not await self._org_exists(user_id, resolved):
             return {"success": False, "error": f"File not found: {file_path}"}
         try:
-            lines = resolved.read_text(encoding="utf-8").splitlines()
+            lines = (await self._org_read(user_id, resolved)).splitlines()
             idx = self._find_line_index(lines, line_number, heading_text)
             if idx is None:
                 return {"success": False, "error": "line_index out of range"}
@@ -585,7 +609,7 @@ class OrgTodoService:
                     break
             for i in reversed(to_remove):
                 del lines[i]
-            resolved.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            await self._org_write(user_id, resolved, "\n".join(lines) + ("\n" if lines else ""))
             return {"success": True, "file_path": str(resolved), "deleted_line_count": len(to_remove)}
         except Exception as e:
             logger.exception("delete_todo failed")
@@ -601,7 +625,7 @@ class OrgTodoService:
                 from services.org_archive_service import get_org_archive_service
                 archive_service = await get_org_archive_service()
                 resolved = await self._resolve_file_path(user_id, file_path)
-                if not resolved or not resolved.exists():
+                if not resolved or not await self._org_exists(user_id, resolved):
                     return {"success": False, "error": f"File not found: {file_path}"}
                 one_based = line_number + 1
                 result = await archive_service.archive_entry(
@@ -612,7 +636,7 @@ class OrgTodoService:
                 rel_archive = result.get("archive_file", "")
                 archive_full = (resolved.parent.parent / rel_archive) if rel_archive else resolved.parent / f"{resolved.stem}_archive.org"
                 from utils.org_header_parser import parse_org_file_header
-                header = parse_org_file_header(resolved.read_text(encoding="utf-8-sig"))
+                header = parse_org_file_header(await self._org_read(user_id, resolved, utf8_sig=True))
                 return {
                     "success": True,
                     "path": str(resolved),
@@ -630,7 +654,7 @@ class OrgTodoService:
                 result.setdefault("directive_value", "")
                 return result
             resolved = await self._resolve_file_path(user_id, file_path)
-            if not resolved or not resolved.exists():
+            if not resolved or not await self._org_exists(user_id, resolved):
                 return {"success": False, "error": f"File not found: {file_path}"}
             done_states = await _resolve_done_states(user_id)
             pattern = "|".join(re.escape(s) for s in done_states)
@@ -638,7 +662,7 @@ class OrgTodoService:
             from services.org_archive_service import get_org_archive_service
             archive_service = await get_org_archive_service()
             archive_path = await archive_service._get_archive_path(user_id, file_path, resolved)
-            file_content = resolved.read_text(encoding="utf-8-sig")
+            file_content = await self._org_read(user_id, resolved, utf8_sig=True)
             from utils.org_header_parser import parse_org_file_header
             header = parse_org_file_header(file_content)
             directive_found = header.archive is not None
@@ -667,7 +691,6 @@ class OrgTodoService:
                     "directive_value": directive_value,
                 }
             archive_path = Path(archive_path)
-            archive_path.parent.mkdir(parents=True, exist_ok=True)
             ts = await self._org_timestamp(user_id)
             source_file_path = str(resolved)
             lines = file_content.splitlines()
@@ -692,10 +715,11 @@ class OrgTodoService:
                     archived_count += 1
                 else:
                     i += 1
-            resolved.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-            with archive_path.open("a", encoding="utf-8") as f:
-                for line in done_subtrees:
-                    f.write(line + "\n" if not line.endswith("\n") else line)
+            await self._org_write(user_id, resolved, "\n".join(lines) + ("\n" if lines else ""))
+            archive_blob = "".join(
+                (line + "\n" if not line.endswith("\n") else line) for line in done_subtrees
+            )
+            await self._org_append(user_id, archive_path, archive_blob)
             return {
                 "success": True,
                 "path": str(resolved),

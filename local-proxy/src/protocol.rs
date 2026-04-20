@@ -21,6 +21,12 @@ pub enum DaemonToBackend {
         request_id: String,
         error: String,
     },
+    WorkspaceSet {
+        request_id: String,
+        workspace_root: String,
+        file_count: u64,
+        git_detected: bool,
+    },
     Heartbeat,
 }
 
@@ -31,6 +37,10 @@ pub enum BackendToDaemon {
         request_id: String,
         tool: String,
         args: serde_json::Value,
+    },
+    SetWorkspace {
+        request_id: String,
+        workspace_root: String,
     },
     Ping,
 }

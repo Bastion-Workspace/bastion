@@ -27,7 +27,7 @@ order: 1
 
 ### Heartbeat
 
-- A **heartbeat** is a scheduled run of the CEO agent with line context. You configure **interval** (e.g. every 15 minutes) or a **cron expression**. When due, the system enqueues a heartbeat task, invokes the CEO with the summary, and updates **last beat** / **next beat** timestamps.
+- A **heartbeat** is a scheduled run of the CEO agent with line context. You choose a **periodic schedule**: **none** (no automatic cadence), **interval** (every *N* seconds, minimum 60), or **cron** (wall-clock times in an **IANA time zone**). The backend stores the next run in **next beat**; a worker checks about every 60 seconds and enqueues a heartbeat when due, then updates **last beat** / **next beat**.
 - Heartbeats respect **line budget**. If the monthly limit is exceeded, the heartbeat is skipped and you get a notification.
 
 ### Goals and tasks

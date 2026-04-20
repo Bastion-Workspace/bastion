@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "bastion_knowledge_base"
     POSTGRES_USER: str = "bastion_user"
     POSTGRES_PASSWORD: str = "bastion_secure_password"
+    # Optional dedicated role for LangGraph AsyncPostgresSaver (empty = use POSTGRES_*)
+    LANGGRAPH_POSTGRES_USER: str = ""
+    LANGGRAPH_POSTGRES_PASSWORD: str = ""
     
     # Backend Tool Service
     BACKEND_TOOL_SERVICE_HOST: str = "backend"
@@ -51,6 +54,11 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_TIMEOUT_SECONDS: int = 300
 
+    # Optional wall-clock caps for blocking LLM / LangGraph awaits (None or 0 = disabled).
+    # When set, asyncio.wait_for wraps the call; tune above your slowest legitimate playbook.
+    PIPELINE_LLM_INVOKE_TIMEOUT_SEC: Optional[float] = None
+    PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC: Optional[float] = None
+
     # Routing: when True, EDITOR routes are excluded from eligibility so requests with
     # an open document fall through to chat or default Agent Factory profile (for testing).
     DISABLE_EDITOR_ENGINE_ROUTING: bool = False
@@ -65,9 +73,24 @@ class Settings(BaseSettings):
     
     @property
     def postgres_connection_string(self) -> str:
-        """Build PostgreSQL connection string for LangGraph checkpointer"""
+        """Build PostgreSQL connection string using application POSTGRES_* credentials."""
         return (
             f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    @property
+    def langgraph_connection_string(self) -> str:
+        """Connection string for LangGraph AsyncPostgresSaver (dedicated role when configured)."""
+        lg_user = (self.LANGGRAPH_POSTGRES_USER or "").strip()
+        if lg_user:
+            password = self.LANGGRAPH_POSTGRES_PASSWORD or self.POSTGRES_PASSWORD
+            user = lg_user
+        else:
+            user = self.POSTGRES_USER
+            password = self.POSTGRES_PASSWORD
+        return (
+            f"postgresql://{user}:{password}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
 

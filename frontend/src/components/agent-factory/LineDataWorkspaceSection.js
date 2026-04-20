@@ -2,7 +2,7 @@
  * Agent line Data Workspace binding (additive with profile; per-workspace R/O or R/W).
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, forwardRef, useImperativeHandle } from 'react';
 import { useQuery } from 'react-query';
 import {
   Box,
@@ -44,9 +44,13 @@ function normalizeIncoming(raw) {
   };
 }
 
-export default function LineDataWorkspaceSection({ team, onSave, saving }) {
+const LineDataWorkspaceSection = forwardRef(function LineDataWorkspaceSection({ team }, ref) {
   const [config, setConfig] = useState(defaultConfig);
   const [addId, setAddId] = useState('');
+
+  useImperativeHandle(ref, () => ({
+    getConfig: () => config,
+  }), [config]);
 
   const { data: workspaces = [] } = useQuery(
     ['dataWorkspaces', 'line'],
@@ -95,24 +99,36 @@ export default function LineDataWorkspaceSection({ team, onSave, saving }) {
   );
 
   return (
-    <Box component="form" onSubmit={(e) => { e.preventDefault(); onSave(config); }}>
+    <Box>
       <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
-        Binds Data Workspaces for this line in addition to each member agent profile. Read-only allows only SELECT;
-        read/write allows data changes where the user may write. Combined with profile workspace lists for schema injection and tools.
+        Workspaces for this line (merged with each member profile). Read-only allows SQL SELECT only; read/write allows changes where permitted.
       </Typography>
 
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', mb: 2 }}>
-        <FormControl size="small" sx={{ minWidth: 220 }}>
-          <InputLabel id="line-dw-add">Add workspace</InputLabel>
+        <FormControl size="small" sx={{ minWidth: 260 }}>
+          <InputLabel id="line-dw-add" shrink>
+            Workspace
+          </InputLabel>
           <Select
             labelId="line-dw-add"
-            label="Add workspace"
+            label="Workspace"
             value={addId}
             onChange={(e) => setAddId(e.target.value)}
             displayEmpty
+            renderValue={(selected) => {
+              if (!selected) {
+                return (
+                  <Box component="span" sx={{ color: 'text.secondary' }}>
+                    Choose a workspace…
+                  </Box>
+                );
+              }
+              const w = workspaces.find((x) => x.workspace_id === selected);
+              return w?.name || selected;
+            }}
           >
             <MenuItem value="">
-              <em>Select…</em>
+              <em>None</em>
             </MenuItem>
             {availableToAdd.map((w) => (
               <MenuItem key={w.workspace_id} value={w.workspace_id}>
@@ -168,7 +184,7 @@ export default function LineDataWorkspaceSection({ team, onSave, saving }) {
             color="primary"
           />
         }
-        label="Auto-inject schema (merged with profile workspaces when enabled)"
+        label="Auto-inject schema (with profile workspaces when enabled)"
         sx={{ display: 'block', mb: 1 }}
       />
       <TextField
@@ -178,13 +194,12 @@ export default function LineDataWorkspaceSection({ team, onSave, saving }) {
         label="Context instructions (optional)"
         value={config.context_instructions}
         onChange={(e) => setConfig((c) => ({ ...c, context_instructions: e.target.value }))}
-        placeholder="Plain-language rules for interpreting this line's workspace data."
+        placeholder="How to interpret this line's workspace data."
         size="small"
         sx={{ mb: 1 }}
       />
-      <Button type="submit" variant="contained" size="small" disabled={saving}>
-        Save data workspaces
-      </Button>
     </Box>
   );
-}
+});
+
+export default LineDataWorkspaceSection;

@@ -153,8 +153,11 @@ async def serve():
         try:
             from orchestrator.backend_tool_client import close_backend_tool_client
             await close_backend_tool_client()
-        except:
-            pass
+        except Exception:
+            logger.debug(
+                "Backend tool client close failed during error cleanup",
+                exc_info=True,
+            )
         raise
 
 

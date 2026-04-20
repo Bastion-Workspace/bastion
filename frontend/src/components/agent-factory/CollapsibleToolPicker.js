@@ -7,6 +7,7 @@ import React, { useState, useMemo } from 'react';
 import {
   Box,
   Typography,
+  TextField,
   FormControlLabel,
   Checkbox,
   Collapse,
@@ -20,10 +21,23 @@ export default function CollapsibleToolPicker({
   onToggleTool,
 }) {
   const [expandedCategories, setExpandedCategories] = useState({});
+  const [filter, setFilter] = useState('');
+
+  const filteredActions = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return actions;
+    return actions.filter((a) => {
+      const name = typeof a === 'string' ? a : a?.name;
+      const desc = typeof a === 'object' ? (a.short_description || a.description || '') : '';
+      const n = String(name || '').toLowerCase();
+      const d = String(desc || '').toLowerCase();
+      return n.includes(q) || d.includes(q);
+    });
+  }, [actions, filter]);
 
   const byCategory = useMemo(() => {
     const map = {};
-    actions.forEach((a) => {
+    filteredActions.forEach((a) => {
       const name = typeof a === 'string' ? a : a?.name;
       if (!name) return;
       const cat = (typeof a === 'object' && a?.category) ? a.category : 'General';
@@ -36,7 +50,7 @@ export default function CollapsibleToolPicker({
       });
     });
     return map;
-  }, [actions]);
+  }, [filteredActions]);
 
   const categories = useMemo(() => Object.keys(byCategory).sort(), [byCategory]);
 
@@ -66,6 +80,16 @@ export default function CollapsibleToolPicker({
         borderRadius: 1,
       }}
     >
+      <Box sx={{ p: 1, borderBottom: 1, borderColor: 'divider' }}>
+        <TextField
+          size="small"
+          fullWidth
+          placeholder="Search tools by name or description"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          aria-label="Filter tools"
+        />
+      </Box>
       {categories.map((cat) => {
         const tools = byCategory[cat] || [];
         const expanded = !!expandedCategories[cat];

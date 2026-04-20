@@ -7,6 +7,7 @@ Now with multi-operation state management and context-aware routing!
 import logging
 import json
 import asyncio
+import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime
 
@@ -33,12 +34,14 @@ class AsyncOrchestratorRequest(BaseModel):
     editor_preference: Optional[str] = None  # 'prefer' | 'ignore'
     active_data_workspace: Optional[dict] = None  # {workspace_id, table_id, schema, visible_rows, ...}
     data_workspace_preference: Optional[str] = None  # 'auto' | 'ignore'
+    active_artifact: Optional[dict] = None  # {artifact_type, title, code, language} when chat artifact drawer is open
     base_checkpoint_id: Optional[str] = None  # Optional: start from this checkpoint to branch
     locked_agent: Optional[str] = None  # Optional: lock conversation routing to a specific agent
     agent_profile_id: Optional[str] = None  # Agent Factory: route to custom agent when set
     user_chat_model: Optional[str] = None  # Chat sidebar selected model
     is_branch_resend: bool = False
     branch_message_id: Optional[str] = None
+    code_workspace_id: Optional[str] = None  # Bastion Code Space: inject settings.rules_text for custom agents
 
 
 # Deprecated response models removed - no longer needed
@@ -75,17 +78,22 @@ async def stream_orchestrator_response(
             "editor_preference": request.editor_preference,
             "active_data_workspace": request.active_data_workspace,
             "data_workspace_preference": request.data_workspace_preference,
+            "active_artifact": request.active_artifact,
             "pipeline_preference": None,  # Not in AsyncOrchestratorRequest
             "active_pipeline_id": None,  # Not in AsyncOrchestratorRequest
             "locked_agent": request.locked_agent,
             "base_checkpoint_id": request.base_checkpoint_id,
             "agent_profile_id": request.agent_profile_id,
             "user_chat_model": request.user_chat_model,
+            "code_workspace_id": request.code_workspace_id,
         }
         
         # Remove None values
         request_context = {k: v for k, v in request_context.items() if v is not None}
-        
+
+        stream_run_id = str(uuid.uuid4())
+        request_context["client_run_id"] = stream_run_id
+
         # Log active_editor for debugging
         if request.active_editor:
             logger.info(f"📝 ACTIVE EDITOR: Passing to gRPC orchestrator (file={request.active_editor.get('filename', 'unknown')}, type={request.active_editor.get('frontmatter', {}).get('type', 'unknown')})")
@@ -103,12 +111,14 @@ async def stream_orchestrator_response(
                 state=None,
                 is_branch_resend=bool(request.is_branch_resend),
                 branch_message_id=request.branch_message_id,
+                client_run_id=stream_run_id,
             ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
+                "X-Accel-Buffering": "no",
+                "X-Run-Id": stream_run_id,
             }
         )
         

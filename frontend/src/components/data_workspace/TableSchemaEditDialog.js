@@ -43,26 +43,44 @@ function schemaToEditorColumns(schema) {
     isPrimaryKey: col.is_primary_key === true,
     defaultValue: col.default_value != null ? String(col.default_value) : '',
     color: col.color || '',
-    description: col.description || ''
+    description: col.description || '',
+    ref:
+      col.ref && typeof col.ref === 'object'
+        ? {
+            target_table_id: col.ref.target_table_id || '',
+            target_key: col.ref.target_key || 'row_id',
+            label_field: col.ref.label_field || 'name'
+          }
+        : undefined
   }));
 }
 
 function editorColumnsToSchema(columns) {
   return {
-    columns: columns.map((col) => ({
-      name: col.name,
-      type: col.type,
-      nullable: col.nullable,
-      is_primary_key: col.isPrimaryKey,
-      default_value: col.defaultValue || null,
-      color: col.color || null,
-      description: col.description || null,
-      format: null
-    }))
+    columns: columns.map((col) => {
+      const base = {
+        name: col.name,
+        type: col.type,
+        nullable: col.nullable,
+        is_primary_key: col.isPrimaryKey,
+        default_value: col.defaultValue || null,
+        color: col.color || null,
+        description: col.description || null,
+        format: null
+      };
+      if (col.type === 'REFERENCE' && col.ref && col.ref.target_table_id) {
+        base.ref = {
+          target_table_id: col.ref.target_table_id,
+          target_key: col.ref.target_key || 'row_id',
+          label_field: col.ref.label_field || 'name'
+        };
+      }
+      return base;
+    })
   };
 }
 
-const TableSchemaEditDialog = ({ open, onClose, table, onSaved }) => {
+const TableSchemaEditDialog = ({ open, onClose, table, onSaved, container }) => {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [columns, setColumns] = useState([]);
@@ -71,6 +89,7 @@ const TableSchemaEditDialog = ({ open, onClose, table, onSaved }) => {
   const [updateFrequency, setUpdateFrequency] = useState('');
   const [glossary, setGlossary] = useState([]);
   const [relationships, setRelationships] = useState([]);
+  const [peerTables, setPeerTables] = useState([]);
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -114,6 +133,22 @@ const TableSchemaEditDialog = ({ open, onClose, table, onSaved }) => {
     }
   }, [open, table]);
 
+  useEffect(() => {
+    if (!open || !table?.database_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await dataWorkspaceService.listTables(table.database_id);
+        if (!cancelled) setPeerTables(Array.isArray(list) ? list : []);
+      } catch {
+        if (!cancelled) setPeerTables([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, table?.database_id]);
+
   const handleGlossaryAdd = () => setGlossary((prev) => [...prev, { key: '', value: '' }]);
   const handleGlossaryRemove = (index) => setGlossary((prev) => prev.filter((_, i) => i !== index));
   const handleGlossaryChange = (index, field, value) => {
@@ -149,14 +184,32 @@ const TableSchemaEditDialog = ({ open, onClose, table, onSaved }) => {
       if (metadataSource.trim()) metadata.source = metadataSource.trim();
       if (updateFrequency) metadata.update_frequency = updateFrequency;
       if (Object.keys(glossaryObj).length) metadata.glossary = glossaryObj;
-      if (relationships.some((r) => r.column && r.references_table)) {
-        metadata.relationships = relationships
-          .filter((r) => r.column && r.references_table)
-          .map((r) => ({
-            column: r.column,
-            references_table: r.references_table,
-            references_column: r.references_column || 'id'
-          }));
+      const refColNames = new Set(
+        columns.filter((c) => c.type === 'REFERENCE').map((c) => c.name)
+      );
+      const fromRefColumns = columns
+        .filter((c) => c.type === 'REFERENCE' && c.ref?.target_table_id)
+        .map((c) => {
+          const tgt = peerTables.find((t) => t.table_id === c.ref.target_table_id);
+          return {
+            column: c.name,
+            references_table: tgt?.name || c.ref.target_table_id,
+            references_column: c.ref.target_key || 'row_id'
+          };
+        });
+      const manualRelationships = relationships.filter(
+        (r) => r.column && r.references_table && !refColNames.has(r.column)
+      );
+      const mergedRels = [
+        ...fromRefColumns,
+        ...manualRelationships.map((r) => ({
+          column: r.column,
+          references_table: r.references_table,
+          references_column: r.references_column || 'id'
+        }))
+      ];
+      if (mergedRels.length) {
+        metadata.relationships = mergedRels;
       }
       await dataWorkspaceService.updateTable(table.table_id, {
         name: name.trim(),
@@ -176,7 +229,7 @@ const TableSchemaEditDialog = ({ open, onClose, table, onSaved }) => {
   if (!table) return null;
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth PaperProps={{ sx: { height: '85vh' } }}>
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth container={container} PaperProps={{ sx: { height: '85vh' } }}>
       <DialogTitle>Edit table: {table.name}</DialogTitle>
       <DialogContent dividers>
         <Box sx={{ mt: 1 }}>
@@ -198,10 +251,19 @@ const TableSchemaEditDialog = ({ open, onClose, table, onSaved }) => {
             sx={{ mb: 2 }}
           />
           {loaded && (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+              Use <strong>Add column</strong> below to append a field, set its name and type, then save. Removing a column drops that field from storage where supported.
+            </Typography>
+          )}
+          {loaded && (
             <ColumnSchemaEditor
               key={table.table_id}
               initialColumns={columns}
               onChange={setColumns}
+              dialogContainer={container}
+              databaseId={table.database_id}
+              peerTables={peerTables}
+              currentTableId={table.table_id}
             />
           )}
           {loaded && (

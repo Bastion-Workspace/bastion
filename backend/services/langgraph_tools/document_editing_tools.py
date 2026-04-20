@@ -11,6 +11,8 @@ from typing import Dict, Any, Optional, List
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
+from utils.document_processor import get_document_processor
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +65,37 @@ def _normalize_operations(operations: Any) -> List[Dict[str, Any]]:
         else:
             logger.warning("Proposal operation[%s] unexpected type: %s", i, type(op))
     return result
+
+
+def _fallback_append_proposed_text_if_unresolved(content: str, raw_op: Dict[str, Any]) -> Optional[str]:
+    """
+    When a user explicitly accepts an operation that still does not JIT-resolve, append the
+    proposed ``text`` at EOF (matches live-diff copy: Accept will apply at end).
+
+    Returns full new document content, or None if there is nothing safe to append
+    (e.g. delete-only ops or empty insertion text).
+    """
+    from utils.editor_operations_resolver import normalize_insertion_spacing
+
+    op_type = (raw_op.get("op_type") or raw_op.get("action") or "replace_range").strip().lower()
+    if op_type in ("revise", "replace"):
+        op_type = "replace_range"
+    elif op_type == "delete":
+        op_type = "delete_range"
+    elif op_type in ("insert",):
+        op_type = "insert_after"
+
+    if op_type == "delete_range":
+        return None
+    text = raw_op.get("text", "")
+    if text is None:
+        return None
+    if isinstance(text, str) and not text.strip():
+        return None
+    text_s = text if isinstance(text, str) else str(text)
+    insert_pos = len(content)
+    chunk = normalize_insertion_spacing(content, insert_pos, text_s)
+    return content[:insert_pos] + chunk + content[insert_pos:]
 
 
 async def update_document_metadata_tool(
@@ -146,12 +179,15 @@ async def update_document_metadata_tool(
                     filename=doc_info.filename,
                     folder_id=getattr(doc_info, 'folder_id', None),
                     user_id=doc_user_id,
-                    collection_type=doc_collection_type
+                    collection_type=doc_collection_type,
+                    ensure_directory=True,
                 )
                 
-                if file_path and file_path.exists():
-                    # Read current content
-                    current_content = file_path.read_text(encoding='utf-8')
+                from services import ds_upload_library_fs as dsf
+
+                owner_uid = doc_user_id or user_id
+                if file_path and owner_uid and await dsf.exists(owner_uid, file_path):
+                    current_content = await dsf.read_text(owner_uid, file_path)
                     
                     # Parse frontmatter - but preserve the original frontmatter block for complex fields
                     # The simple parser only handles key-value pairs, so we need to preserve the original
@@ -219,8 +255,7 @@ async def update_document_metadata_tool(
                     except Exception as verr:
                         logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
                     
-                    # Write updated content
-                    file_path.write_text(new_content, encoding='utf-8')
+                    await dsf.write_text(owner_uid, file_path, new_content)
                     logger.info(f"✅ Updated file content: {file_path}")
                     
                     # Update file size in database
@@ -364,19 +399,22 @@ async def update_document_content_tool(
             filename=doc_info.filename,
             folder_id=getattr(doc_info, 'folder_id', None),
             user_id=doc_user_id,
-            collection_type=doc_collection_type
+            collection_type=doc_collection_type,
+            ensure_directory=True,
         )
         
-        if not file_path or not file_path.exists():
+        from services import ds_upload_library_fs as dsf
+
+        owner_uid = doc_user_id or user_id
+        if not file_path or not owner_uid or not await dsf.exists(owner_uid, file_path):
             return {
                 "success": False,
                 "error": "File not found",
                 "message": f"Document file not found on disk: {file_path}"
             }
-        
-        # Read current content
-        current_content = file_path.read_text(encoding='utf-8')
-        
+
+        current_content = await dsf.read_text(owner_uid, file_path)
+
         # Parse frontmatter if it exists
         frontmatter, body = parse_frontmatter(current_content)
         has_frontmatter = bool(frontmatter)
@@ -410,25 +448,27 @@ async def update_document_content_tool(
                 new_content = current_content + "\n\n" + content_to_append
             logger.info(f"Appending {len(content_to_append)} chars to existing {len(current_content)} chars")
         else:
-            # Replace entire content
-            # **CRITICAL**: Strip frontmatter from incoming content to prevent duplication
-            content_to_replace = content
-            if content.strip().startswith('---'):
-                # Content has frontmatter - extract body only
-                import re
-                frontmatter_match = re.match(r'^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n', content)
-                if frontmatter_match:
-                    # Extract body after frontmatter
-                    content_to_replace = content[frontmatter_match.end():].strip()
-                    logger.warning(f"⚠️ Content being replaced had frontmatter - stripped it to prevent duplication")
-            
-            if has_frontmatter:
-                # Preserve existing frontmatter, replace body with cleaned content
-                new_content = build_frontmatter(frontmatter) + "\n\n" + content_to_replace
+            # Replace entire content. If the payload opens with ---, treat as a full document
+            # (including YAML) so agent-delivered frontmatter is not discarded in favor of a
+            # round-tripped parse of the previous file's frontmatter.
+            if content.strip().startswith("---"):
+                new_content = content
+                logger.info(
+                    f"Replacing entire content ({len(current_content)} chars) with full-file "
+                    f"payload ({len(new_content)} chars)"
+                )
+            elif has_frontmatter:
+                new_content = build_frontmatter(frontmatter) + "\n\n" + content
+                logger.info(
+                    f"Replacing body only ({len(current_content)} chars on disk) with "
+                    f"{len(content)} chars new body"
+                )
             else:
-                # No existing frontmatter, use cleaned content (which may or may not have had frontmatter)
-                new_content = content_to_replace
-            logger.info(f"Replacing entire content ({len(current_content)} chars) with new content ({len(content_to_replace)} chars)")
+                new_content = content
+                logger.info(
+                    f"Replacing entire content ({len(current_content)} chars) with "
+                    f"{len(content)} chars"
+                )
         
         # Snapshot current content before overwrite (version history)
         try:
@@ -437,8 +477,7 @@ async def update_document_content_tool(
         except Exception as verr:
             logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
         
-        # Write updated content to file
-        file_path.write_text(new_content, encoding='utf-8')
+        await dsf.write_text(owner_uid, file_path, new_content)
         logger.info(f"✅ Updated file content: {file_path} ({len(new_content)} chars)")
         
         # Update file size in database
@@ -452,7 +491,9 @@ async def update_document_content_tool(
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
             await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
-            await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            await document_service._emit_document_status_update(
+                document_id, ProcessingStatus.COMPLETED.value, user_id, content_source="agent"
+            )
             return {
                 "success": True,
                 "document_id": document_id,
@@ -480,8 +521,9 @@ async def update_document_content_tool(
             "tags": getattr(doc_info, 'tags', []),
             "category": getattr(doc_info, 'category', '')
         }
-        
-        chunks = await document_service.document_processor.process_text_content(
+
+        doc_processor = await get_document_processor()
+        chunks = await doc_processor.process_text_content(
             new_content, document_id, metadata
         )
         
@@ -494,7 +536,9 @@ async def update_document_content_tool(
         await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
         
         # Emit WebSocket notification for UI refresh (so open editor tabs update automatically)
-        await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+        await document_service._emit_document_status_update(
+            document_id, ProcessingStatus.COMPLETED.value, user_id, content_source="agent"
+        )
         
         return {
             "success": True,
@@ -602,9 +646,12 @@ async def propose_document_edit_tool(
             user_id=doc_user_id,
             collection_type=doc_collection_type
         )
+        from services import ds_upload_library_fs as dsf
+
+        owner_uid = doc_user_id or user_id
         current_content = ""
-        if file_path and file_path.exists():
-            current_content = file_path.read_text(encoding='utf-8')
+        if file_path and owner_uid and await dsf.exists(owner_uid, file_path):
+            current_content = await dsf.read_text(owner_uid, file_path)
         content_hash = hashlib.sha256(current_content.encode()).hexdigest()
         expires_at = datetime.now(timezone.utc) + timedelta(days=7)
         proposal_id = str(uuid.uuid4())
@@ -761,18 +808,20 @@ async def apply_operations_directly(
             filename=doc_info.filename,
             folder_id=getattr(doc_info, 'folder_id', None),
             user_id=user_id,
-            collection_type=getattr(doc_info, 'collection_type', 'user')
+            collection_type=getattr(doc_info, 'collection_type', 'user'),
+            ensure_directory=True,
         )
         
-        if not file_path or not file_path.exists():
+        from services import ds_upload_library_fs as dsf
+
+        if not file_path or not await dsf.exists(user_id, file_path):
             return {
                 "success": False,
                 "error": "File not found",
                 "message": f"Document file not found on disk: {file_path}"
             }
-        
-        # Read current content
-        current_content = file_path.read_text(encoding='utf-8')
+
+        current_content = await dsf.read_text(user_id, file_path)
         frontmatter, body = parse_frontmatter(current_content)
         has_frontmatter = bool(frontmatter)
         
@@ -816,8 +865,7 @@ async def apply_operations_directly(
         except Exception as verr:
             logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
         
-        # Write updated content to file
-        file_path.write_text(new_content, encoding='utf-8')
+        await dsf.write_text(user_id, file_path, new_content)
         logger.info(f"✅ Applied operations directly: {file_path} ({len(new_content)} chars, {len(sorted_ops)} operations)")
         
         # Update file size in database
@@ -831,7 +879,9 @@ async def apply_operations_directly(
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
             await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
-            await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            await document_service._emit_document_status_update(
+                document_id, ProcessingStatus.COMPLETED.value, user_id, content_source="agent"
+            )
             return {
                 "success": True,
                 "document_id": document_id,
@@ -856,8 +906,9 @@ async def apply_operations_directly(
             "tags": getattr(doc_info, 'tags', []),
             "category": getattr(doc_info, 'category', '')
         }
-        
-        chunks = await document_service.document_processor.process_text_content(
+
+        doc_processor = await get_document_processor()
+        chunks = await doc_processor.process_text_content(
             new_content, document_id, metadata
         )
         
@@ -870,7 +921,9 @@ async def apply_operations_directly(
         await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
         
         # Emit WebSocket notification for UI refresh
-        await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+        await document_service._emit_document_status_update(
+            document_id, ProcessingStatus.COMPLETED.value, user_id, content_source="agent"
+        )
         
         return {
             "success": True,
@@ -995,18 +1048,21 @@ async def apply_document_edit_proposal(
             filename=doc_info.filename,
             folder_id=getattr(doc_info, 'folder_id', None),
             user_id=proposal["user_id"],
-            collection_type=getattr(doc_info, 'collection_type', 'user')
+            collection_type=getattr(doc_info, 'collection_type', 'user'),
+            ensure_directory=True,
         )
         
-        if not file_path or not file_path.exists():
+        from services import ds_upload_library_fs as dsf
+
+        prop_uid = proposal["user_id"]
+        if not file_path or not await dsf.exists(prop_uid, file_path):
             return {
                 "success": False,
                 "error": "File not found",
                 "message": f"Document file not found on disk: {file_path}"
             }
-        
-        # Read current content
-        current_content = file_path.read_text(encoding='utf-8')
+
+        current_content = await dsf.read_text(prop_uid, file_path)
         frontmatter, body = parse_frontmatter(current_content)
         has_frontmatter = bool(frontmatter)
         
@@ -1078,14 +1134,54 @@ async def apply_document_edit_proposal(
                 except Exception as e:
                     logger.error("Error applying operation: %s", e)
                     skipped_ops.append(op)
+
+            # User picked specific ops from the UI (e.g. unresolved / EOF widget). If JIT resolution
+            # still fails for those indices, append proposed text at EOF instead of deleting the proposal.
+            if selected_operation_indices is not None:
+                selected_clean: List[int] = []
+                for x in selected_operation_indices:
+                    try:
+                        xi = int(x)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= xi < n:
+                        selected_clean.append(xi)
+                for raw_idx in sorted(set(selected_clean)):
+                    if raw_idx in applied_raw_indices:
+                        continue
+                    candidate = _fallback_append_proposed_text_if_unresolved(new_content, raw_ops[raw_idx])
+                    if candidate is not None:
+                        new_content = candidate
+                        applied_raw_indices.add(raw_idx)
+                        logger.info(
+                            "Proposal %s: applied op index %s via EOF fallback (resolution failed; user-selected accept)",
+                            proposal_id,
+                            raw_idx,
+                        )
+
             applied_count = len(applied_raw_indices)
             if skipped_ops:
                 logger.warning("Skipped %s operation(s) due to validation failures", len(skipped_ops))
 
             remaining_raw = [raw_ops[i] for i in range(len(raw_ops)) if i not in applied_raw_indices]
             is_partial_proposal_update = bool(
-                selected_operation_indices is not None and len(remaining_raw) > 0
+                selected_operation_indices is not None and len(remaining_raw) > 0 and applied_count > 0
             )
+
+            if applied_count == 0:
+                if selected_operation_indices is not None:
+                    await execute(
+                        "DELETE FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+                        proposal_id,
+                        rls_context=rls,
+                    )
+                    logger.info("Deleted unresolvable proposal %s (0 operations applied)", proposal_id)
+                return {
+                    "success": True,
+                    "document_id": document_id,
+                    "applied_count": 0,
+                    "message": "No operations could be resolved against current document content; proposal removed"
+                }
 
         elif edit_type == "content":
             # Apply content edit
@@ -1120,8 +1216,7 @@ async def apply_document_edit_proposal(
         except Exception as verr:
             logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
         
-        # Write updated content to file
-        file_path.write_text(new_content, encoding='utf-8')
+        await dsf.write_text(prop_uid, file_path, new_content)
         logger.info(f"✅ Applied edit proposal: {file_path} ({len(new_content)} chars)")
         
         # Update file size in database
@@ -1154,6 +1249,7 @@ async def apply_document_edit_proposal(
                     user_id=user_id,
                     filename=None,
                     proposal_data={"has_pending_proposals": has_pending_proposals},
+                    content_source="embedding",
                 )
         except Exception as e:
             logger.warning("Failed to send proposal applied notification: %s", e)
@@ -1187,7 +1283,8 @@ async def apply_document_edit_proposal(
                     "tags": getattr(doc_info, "tags", []),
                     "category": getattr(doc_info, "category", ""),
                 }
-                chunks = await document_service.document_processor.process_text_content(
+                doc_processor = await get_document_processor()
+                chunks = await doc_processor.process_text_content(
                     new_content, document_id, metadata
                 )
                 if chunks:
@@ -1259,9 +1356,11 @@ async def _get_document_content_for_resolution(document_id: str, user_id: str) -
         user_id=user_id,
         collection_type=getattr(doc_info, 'collection_type', 'user')
     )
-    if not file_path or not file_path.exists():
+    from services import ds_upload_library_fs as dsf
+
+    if not file_path or not await dsf.exists(user_id, file_path):
         return None
-    return file_path.read_text(encoding='utf-8')
+    return await dsf.read_text(user_id, file_path)
 
 
 def _dedup_cross_proposal_ops(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1281,7 +1380,8 @@ def _dedup_cross_proposal_ops(proposals: List[Dict[str, Any]]) -> List[Dict[str,
         p_ts = p.get("created_at") or ""
         for op in p.get("operations") or []:
             s, e = op.get("start", -1), op.get("end", -1)
-            if s >= 0 and e > s:
+            # Include point ranges (insert_after_heading etc.: start == end)
+            if s >= 0 and e >= s:
                 claimed.append((s, e, p_ts))
 
     for p in proposals:
@@ -1295,6 +1395,11 @@ def _dedup_cross_proposal_ops(proposals: List[Dict[str, Any]]) -> List[Dict[str,
             superseded = False
             for cs, ce, claim_ts in claimed:
                 if claim_ts != p_ts and claim_ts > p_ts:
+                    # Two point inserts at the same index: newer wins
+                    if s == e and cs == ce and s == cs:
+                        superseded = True
+                        break
+                    # Standard span / mixed overlap
                     if not (e <= cs or s >= ce):
                         superseded = True
                         break
@@ -1302,17 +1407,23 @@ def _dedup_cross_proposal_ops(proposals: List[Dict[str, Any]]) -> List[Dict[str,
                 kept.append(op)
         p["operations"] = kept
 
-    return [
-        p
-        for p in proposals
-        if p.get("edit_type") != "operations" or len(p.get("operations") or []) > 0
-    ]
+    return proposals
 
 
-async def list_pending_proposals_for_document(document_id: str, user_id: str = "system") -> List[Dict[str, Any]]:
-    """List pending proposals for a document. Operations are resolved JIT against current content."""
-    from services.database_manager.database_helpers import fetch_all
+async def list_pending_proposals_for_document(document_id: str, user_id: str = "system") -> Dict[str, Any]:
+    """List pending proposals for a document. Operations are resolved JIT against current content.
+
+    Returns ``{"proposals": [...], "stale_cleaned": N}``. Proposals of type ``operations`` whose
+    operations all resolve with zero confidence are deleted from the database **only when the
+    document content hash no longer matches the hash stored at proposal creation** (real stale
+    anchors after edits). If the document is unchanged but resolution fails, proposals are kept
+    and unresolved ops are surfaced at EOF for the UI.
+
+    Empty-operation proposals with a matching content_hash are kept (resolver failure, not stale).
+    """
+    from services.database_manager.database_helpers import fetch_all, execute
     from utils.editor_operations_resolver import resolve_operations
+
     rows = await fetch_all(
         "SELECT proposal_id, document_id, user_id, edit_type, operations, content_edit, agent_name, summary, requires_preview, content_hash, expires_at, created_at FROM document_edit_proposals WHERE document_id = $1 AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at ASC",
         document_id,
@@ -1320,23 +1431,83 @@ async def list_pending_proposals_for_document(document_id: str, user_id: str = "
     )
     proposals = [_row_to_proposal_dict(row) for row in (rows or [])]
     if not proposals:
-        return proposals
+        return {"proposals": [], "stale_cleaned": 0}
+
     current_content = await _get_document_content_for_resolution(document_id, user_id)
     if current_content is None:
-        return proposals
+        return {"proposals": proposals, "stale_cleaned": 0}
+
+    current_hash = hashlib.sha256(current_content.encode()).hexdigest()
+    doc_len = len(current_content)
+
     for p in proposals:
-        if p.get("edit_type") == "operations" and p.get("operations"):
-            resolved = resolve_operations(current_content, p["operations"])
-            filtered = []
-            for i, op in enumerate(resolved):
-                if op.get("confidence", 0) > 0 and op.get("start", -1) >= 0:
-                    op = dict(op)
-                    op["proposal_operation_index"] = i
-                    filtered.append(op)
-            p["operations"] = filtered
+        if p.get("edit_type") != "operations" or not p.get("operations"):
+            continue
+        resolved = resolve_operations(current_content, p["operations"])
+        filtered = []
+        for i, op in enumerate(resolved):
+            op = dict(op)
+            op["proposal_operation_index"] = i
+            if op.get("confidence", 0) > 0 and op.get("start", -1) >= 0:
+                filtered.append(op)
+            else:
+                # Keep unresolved ops so the UI can show proposed text at EOF (see liveEditDiffExtension).
+                op["unresolved"] = True
+                op["start"] = doc_len
+                op["end"] = doc_len
+                op["resolved_start"] = doc_len
+                op["resolved_end"] = doc_len
+                op["confidence"] = 0.1
+                filtered.append(op)
+        p["operations"] = filtered
 
     proposals = _dedup_cross_proposal_ops(proposals)
-    return proposals
+
+    live: List[Dict[str, Any]] = []
+    stale_ids: List[str] = []
+    for p in proposals:
+        if p.get("edit_type") == "operations" and len(p.get("operations") or []) == 0:
+            stored_hash = p.get("content_hash")
+            if stored_hash and stored_hash == current_hash:
+                logger.warning(
+                    "Keeping proposal %s with zero resolved ops: document unchanged (hash match); "
+                    "likely resolver mismatch, not stale",
+                    p.get("proposal_id"),
+                )
+                live.append(p)
+            else:
+                stale_ids.append(p["proposal_id"])
+        else:
+            live.append(p)
+
+    if stale_ids:
+        rls = {"user_id": user_id, "user_role": "user"}
+        for sid in stale_ids:
+            await execute(
+                "DELETE FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+                sid,
+                rls_context=rls,
+            )
+        logger.info(
+            "Auto-cleaned %d stale proposal(s) for document %s",
+            len(stale_ids),
+            document_id,
+        )
+        if not live:
+            try:
+                from services.service_container import get_service_container
+                container = await get_service_container()
+                if container.websocket_manager:
+                    await container.websocket_manager.send_document_status_update(
+                        document_id=document_id,
+                        status="proposals_stale_cleaned",
+                        user_id=user_id,
+                        proposal_data={"has_pending_proposals": False},
+                    )
+            except Exception as e:
+                logger.warning("Failed to send stale cleanup WebSocket: %s", e)
+
+    return {"proposals": live, "stale_cleaned": len(stale_ids)}
 
 
 async def get_document_edit_proposal(proposal_id: str, user_id: str = "system") -> Optional[Dict[str, Any]]:

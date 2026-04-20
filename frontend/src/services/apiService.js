@@ -9,15 +9,16 @@ import settingsService from './settings/SettingsService';
 import adminService from './admin/AdminService';
 import folderService from './folder/FolderService';
 import templateService from './template/TemplateService';
-import integrationService from './integration/IntegrationService';
 import audioService from './audio/AudioService';
 import voiceService from './audio/VoiceService';
 import orgService from './org/OrgService';
 import calendarService from './calendar/CalendarService';
 import contactService from './contacts/ContactService';
 import musicService from './music/MediaService';
+import embyService from './emby/EmbyService';
 import agentFactoryService from './agentFactoryService';
 import controlPanesService from './controlPanes/ControlPanesService';
+import federationService from './federation/FederationService';
 
 class ApiService {
   constructor() {
@@ -30,15 +31,16 @@ class ApiService {
     this.admin = adminService;
     this.folders = folderService;
     this.templates = templateService;
-    this.integrations = integrationService;
     this.audio = audioService;
     this.voice = voiceService;
     this.org = orgService;
     this.calendar = calendarService;
     this.contacts = contactService;
     this.music = musicService;
+    this.emby = embyService;
     this.agentFactory = agentFactoryService;
     this.controlPanes = controlPanesService;
+    this.federation = federationService;
   }
 
   // ===== CORE HTTP METHODS =====
@@ -49,6 +51,18 @@ class ApiService {
   put = (url, data, options = {}) => this.auth.put(url, data, options);
   patch = (url, data, options = {}) => this.auth.patch(url, data, options);
   delete = (url, options = {}) => this.auth.delete(url, options);
+
+  // ===== CODE WORKSPACES =====
+  // Minimal helper methods (Phase 1) for Code Spaces UI.
+  codeWorkspaces = {
+    list: () => this.get('/api/code-workspaces'),
+    connectedDevices: () => this.get('/api/code-workspaces/connected-devices'),
+    create: (data) => this.post('/api/code-workspaces', data),
+    get: (id) => this.get(`/api/code-workspaces/${id}`),
+    update: (id, data) => this.put(`/api/code-workspaces/${id}`, data),
+    delete: (id) => this.delete(`/api/code-workspaces/${id}`),
+    refreshTree: (id) => this.post(`/api/code-workspaces/${id}/refresh-tree`, {}),
+  };
 
   // Legacy method proxies for backward compatibility
   // These delegate to the appropriate domain service to maintain existing functionality
@@ -79,8 +93,18 @@ class ApiService {
   updateDocumentMetadata = (documentId, metadata) => this.documents.updateDocumentMetadata(documentId, metadata);
   renameDocument = (documentId, newFilename) => this.documents.renameDocument(documentId, newFilename);
   moveDocument = (documentId, newFolderId, userId) => this.documents.moveDocument(documentId, newFolderId, userId);
-  getDocumentContent = (documentId) => this.documents.getDocumentContent(documentId);
-  updateDocumentContent = (documentId, content) => this.documents.updateDocumentContent(documentId, content);
+  getDocumentContent = (documentId, opts) => this.documents.getDocumentContent(documentId, opts || {});
+  updateDocumentContent = (documentId, content, opts) =>
+    this.documents.updateDocumentContent(documentId, content, opts || {});
+  encryptDocument = (documentId, password, confirmPassword) =>
+    this.documents.encryptDocument(documentId, password, confirmPassword);
+  createDecryptSession = (documentId, password) => this.documents.createDecryptSession(documentId, password);
+  encryptionHeartbeat = (documentId, sessionToken) =>
+    this.documents.encryptionHeartbeat(documentId, sessionToken);
+  lockEncryptedDocument = (documentId) => this.documents.lockEncryptedDocument(documentId);
+  changeEncryptionPassword = (documentId, oldPassword, newPassword) =>
+    this.documents.changeEncryptionPassword(documentId, oldPassword, newPassword);
+  removeEncryption = (documentId, password) => this.documents.removeEncryption(documentId, password);
   getPendingProposals = (documentId, options) => this.documents.getPendingProposals(documentId, options);
   applyDocumentEditProposal = (proposalId, selectedOperationIndices) => this.documents.applyDocumentEditProposal(proposalId, selectedOperationIndices);
   rejectDocumentEditProposal = (proposalId) => this.documents.rejectDocumentEditProposal(proposalId);
@@ -108,23 +132,23 @@ class ApiService {
   getVersionContent = (documentId, versionId) => this.documents.getVersionContent(documentId, versionId);
   diffVersions = (documentId, fromVersionId, toVersionId) => this.documents.diffVersions(documentId, fromVersionId, toVersionId);
   rollbackToVersion = (documentId, versionId) => this.documents.rollbackToVersion(documentId, versionId);
+  getShareableUsers = () => this.documents.getShareableUsers();
+  getSharedWithMe = () => this.documents.getSharedWithMe();
+  getDocumentShares = (documentId) => this.documents.getDocumentShares(documentId);
+  createDocumentShare = (documentId, body) => this.documents.createDocumentShare(documentId, body);
+  getFolderShares = (folderId) => this.documents.getFolderShares(folderId);
+  createFolderShare = (folderId, body) => this.documents.createFolderShare(folderId, body);
+  updateShare = (shareId, body) => this.documents.updateShare(shareId, body);
+  revokeShare = (shareId) => this.documents.revokeShare(shareId);
+  getDocumentSharingContext = (documentId) => this.documents.getDocumentSharingContext(documentId);
+  getDocumentLock = (documentId) => this.documents.getDocumentLock(documentId);
+  acquireDocumentLock = (documentId) => this.documents.acquireDocumentLock(documentId);
+  releaseDocumentLock = (documentId) => this.documents.releaseDocumentLock(documentId);
+  heartbeatDocumentLock = (documentId) => this.documents.heartbeatDocumentLock(documentId);
+  collabFlush = (documentId) => this.documents.collabFlush(documentId);
 
   // ===== CHAT METHODS =====
-  queryKnowledgeBase = (query, sessionId, maxResults, conversationId) => 
-    this.chat.queryKnowledgeBase(query, sessionId, maxResults, conversationId);
-  mcpQueryKnowledgeBase = (query, sessionId, executionMode, conversationId) => 
-    this.chat.mcpQueryKnowledgeBase(query, sessionId, executionMode, conversationId);
-  classifyIntent = (query, conversationContext) => this.chat.classifyIntent(query, conversationContext);
-  sendMessage = (conversationId, message, executionMode) => 
-    this.chat.sendMessage(conversationId, message, executionMode);
-  sendUnifiedMessage = (conversationId, message, sessionId, executionMode) => 
-    this.chat.sendUnifiedMessage(conversationId, message, sessionId, executionMode);
-  sendLangGraphMessage = (conversationId, message, sessionId, executionMode) => 
-    this.chat.sendLangGraphMessage(conversationId, message, sessionId, executionMode);
-  sendUnifiedMessageBackground = (conversationId, message, sessionId) => 
-    this.chat.sendUnifiedMessageBackground(conversationId, message, sessionId);
   cancelUnifiedJob = (jobId) => this.chat.cancelUnifiedJob(jobId);
-  // ROOSEVELT: Execute Plan removed - LangGraph uses simple Yes/No responses
 
   // ===== CONVERSATION METHODS =====
   createConversation = (data) => this.conversations.createConversation(data);
@@ -202,6 +226,7 @@ class ApiService {
   getUserVoiceProviderVoices = (providerId) => this.get(`/api/user/voice-providers/${providerId}/voices`);
   getUserVoiceSettings = () => this.get('/api/user/voice-settings');
   setUserVoiceSettings = (body) => this.put('/api/user/voice-settings', body);
+  getUserHedraTtsModels = () => this.get('/api/user/hedra-tts-models');
 
   getHomeDashboard = () => this.get('/api/home-dashboard');
   putHomeDashboard = (body) => this.put('/api/home-dashboard', body);
@@ -216,6 +241,19 @@ class ApiService {
     this.get(`/api/home-dashboards/${encodeURIComponent(id)}/layout`);
   putHomeDashboardLayout = (id, layout) =>
     this.put(`/api/home-dashboards/${encodeURIComponent(id)}/layout`, layout);
+
+  getScratchpad = () => this.get('/api/scratchpad');
+  putScratchpad = (body) => this.put('/api/scratchpad', body);
+
+  getDocumentPins = (includePreview = false) =>
+    this.get(
+      `/api/document-pins${includePreview ? '?include_preview=true' : ''}`
+    );
+  postDocumentPin = (body) => this.post('/api/document-pins', body);
+  deleteDocumentPin = (pinId) =>
+    this.delete(`/api/document-pins/${encodeURIComponent(pinId)}`);
+  reorderDocumentPins = (pinIds) =>
+    this.put('/api/document-pins/reorder', { pin_ids: pinIds });
 
   getUserTimezone = () => this.settings.getUserTimezone();
   setUserTimezone = (timezoneData) => this.settings.setUserTimezone(timezoneData);
@@ -239,8 +277,12 @@ class ApiService {
   deleteUser = (userId) => this.admin.deleteUser(userId);
 
   // ===== FOLDER METHODS =====
-  getFolderTree = (collectionType) => this.folders.getFolderTree(collectionType);
-  getFolderContents = (folderId) => this.folders.getFolderContents(folderId);
+  getFolderTree = (collectionType, shallow) =>
+    this.folders.getFolderTree(collectionType, shallow);
+  getFolderContents = (folderId, limit, offset) =>
+    this.folders.getFolderContents(folderId, limit, offset);
+  getFolderContentsBatch = (folderIds, limit, offset, maxConcurrent) =>
+    this.folders.getFolderContentsBatch(folderIds, limit, offset, maxConcurrent);
   createFolder = (folderData) => this.folders.createFolder(folderData);
   updateFolder = (folderId, folderData) => this.folders.updateFolder(folderId, folderData);
   deleteFolder = (folderId, recursive) => this.folders.deleteFolder(folderId, recursive);

@@ -106,6 +106,21 @@ async def device_websocket(websocket: WebSocket):
                     ws_manager.resolve_device_invocation(request_id, result, user_id)
             elif msg_type == "heartbeat":
                 pass
+            elif msg_type == "workspace_set":
+                request_id = msg.get("request_id")
+                if request_id:
+                    result = {
+                        "success": True,
+                        "result_json": json.dumps(
+                            {
+                                "workspace_root": msg.get("workspace_root", ""),
+                                "file_count": msg.get("file_count", 0),
+                                "git_detected": bool(msg.get("git_detected", False)),
+                            }
+                        ),
+                        "formatted": f"Workspace set: {msg.get('workspace_root', '')}",
+                    }
+                    ws_manager.resolve_device_invocation(request_id, result, user_id)
     except WebSocketDisconnect:
         pass
     finally:

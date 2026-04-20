@@ -231,7 +231,7 @@ const HelpPanelContent = ({
   );
 };
 
-const HelpOverlay = ({ open, onClose }) => {
+const HelpOverlay = ({ open, onClose, initialTopicId = null }) => {
   const theme = useTheme();
   const [selectedTopic, setSelectedTopic] = useState(null);
   const [isFloating, setIsFloating] = useState(() => readStoredBoolean(STORAGE_KEYS.floating, false));
@@ -263,10 +263,18 @@ const HelpOverlay = ({ open, onClose }) => {
   );
 
   useEffect(() => {
-    if (open && topics.length > 0 && !selectedTopic) {
-      setSelectedTopic(topics[0].id);
+    if (!open || topics.length === 0) return;
+    if (initialTopicId && topics.some((t) => t.id === initialTopicId)) {
+      setSelectedTopic(initialTopicId);
+      return;
     }
-  }, [open, topics, selectedTopic]);
+    setSelectedTopic((prev) => {
+      if (prev != null && topics.some((t) => t.id === prev)) {
+        return prev;
+      }
+      return topics[0].id;
+    });
+  }, [open, topics, initialTopicId]);
 
   const dragBounds = useMemo(() => {
     if (typeof window === 'undefined') {

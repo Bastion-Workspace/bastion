@@ -171,41 +171,7 @@ class DeduplicationManager:
         
         logger.info(f"📊 Standard content similarity dedup: {len(chunks)} → {len(result)} chunks")
         return result
-    
-    def deduplicate_by_document(self, chunks: List[Dict]) -> List[Dict]:
-        """Limit chunks per document to prevent over-representation"""
-        if not chunks:
-            return chunks
-        
-        logger.info(f"🔄 Applying document-level deduplication")
-        
-        document_chunks = defaultdict(list)
-        
-        for chunk in chunks:
-            doc_id = chunk.get('document_id', 'unknown')
-            document_chunks[doc_id].append(chunk)
-        
-        # Sort chunks within each document by relevance score
-        for doc_id in document_chunks:
-            document_chunks[doc_id].sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        # Take top N chunks per document
-        result = []
-        max_per_doc = settings.MAX_CHUNKS_PER_DOCUMENT
-        
-        for doc_id, doc_chunks in document_chunks.items():
-            selected = doc_chunks[:max_per_doc]
-            result.extend(selected)
-            
-            if len(doc_chunks) > max_per_doc:
-                logger.debug(f"📊 Limited document {doc_id}: {len(doc_chunks)} → {len(selected)} chunks")
-        
-        # Re-sort by overall relevance
-        result.sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        logger.info(f"📊 Document dedup: {len(chunks)} → {len(result)} chunks")
-        return result
-    
+
     def deduplicate_email_threads(self, chunks: List[Dict]) -> List[Dict]:
         """Remove redundant email content from threads"""
         if not chunks or not settings.EMAIL_THREAD_DEDUP_ENABLED:
@@ -256,38 +222,7 @@ class DeduplicationManager:
         
         logger.info(f"📊 Email dedup: {len(chunks)} → {len(result)} chunks")
         return result
-    
-    def ensure_source_diversity(self, chunks: List[Dict]) -> List[Dict]:
-        """Ensure diverse sources in results"""
-        if not chunks:
-            return chunks
-        
-        logger.info(f"🔄 Ensuring source diversity")
-        
-        source_counts = defaultdict(int)
-        result = []
-        max_per_source = settings.MAX_CHUNKS_PER_SOURCE
-        
-        # Sort by relevance score first
-        sorted_chunks = sorted(chunks, key=lambda x: x.get('score', 0), reverse=True)
-        
-        for chunk in sorted_chunks:
-            # Determine source (could be document type, author, domain, etc.)
-            metadata = chunk.get('metadata', {})
-            source = (
-                metadata.get('source') or 
-                metadata.get('document_type') or 
-                metadata.get('author') or 
-                'unknown'
-            )
-            
-            if source_counts[source] < max_per_source:
-                result.append(chunk)
-                source_counts[source] += 1
-        
-        logger.info(f"📊 Source diversity: {len(chunks)} → {len(result)} chunks")
-        return result
-    
+
     def deduplicate_by_content_hash(self, chunks: List[Dict]) -> List[Dict]:
         """Remove exact content duplicates using hash"""
         if not chunks:

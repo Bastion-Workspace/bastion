@@ -45,12 +45,18 @@ import {
   Build,
   Group,
   Close,
+  DragIndicator,
+  Share as ShareIcon,
+  PeopleAlt,
 } from '@mui/icons-material';
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import agentFactoryService, { invalidateAgentHandlesQuery } from '../../services/agentFactoryService';
 import QuickTeamWizard from './QuickTeamWizard';
+import LineFromTemplateWizard from './LineFromTemplateWizard';
 import TeamEditor from './TeamEditor';
+import ArtifactShareDialog from './ArtifactShareDialog';
 
 const SIDEBAR_WIDTH = 280;
 const AF_SIDEBAR_STATE_KEY = 'agentFactorySidebarState';
@@ -60,9 +66,9 @@ const SECTION_KEYS = { agents: 'agents', playbooks: 'playbooks', skills: 'skills
 
 function AfSectionHeaderTitle({ Icon, children }) {
   return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, overflow: 'hidden' }}>
       <Icon sx={{ fontSize: 18, color: 'primary.main', flexShrink: 0 }} aria-hidden />
-      <Typography variant="subtitle2" fontWeight={600} component="span">
+      <Typography variant="subtitle2" fontWeight={600} component="span" noWrap>
         {children}
       </Typography>
     </Box>
@@ -107,8 +113,8 @@ const AF_TOOLBAR_ICON_BTN_SX = {
 };
 
 /**
- * Compact toolbar: search toggle → optional field → menu trigger.
- * Collapsed: two small icon buttons side by side. Expanded: short text field between them.
+ * Search toggle → optional field → menu trigger.
+ * With `inline`, sits in the section header row (flex); without, full width below header.
  */
 function AfSectionSearchRow({
   searchOpen,
@@ -117,6 +123,7 @@ function AfSectionSearchRow({
   onValueChange,
   placeholder,
   children,
+  inline = false,
 }) {
   const inputRef = useRef(null);
   const hasQuery = Boolean((value || '').trim());
@@ -133,16 +140,23 @@ function AfSectionSearchRow({
         display: 'flex',
         alignItems: 'center',
         gap: 0.25,
-        mb: 0.5,
+        mb: inline ? 0 : 0.5,
         minWidth: 0,
-        width: '100%',
+        ...(inline
+          ? searchOpen
+            ? { flex: '1 1 0%', minWidth: 0 }
+            : { flex: '0 0 auto' }
+          : { width: '100%' }),
       }}
     >
       <Tooltip title={searchOpen ? 'Hide search' : hasQuery ? 'Search (filter on)' : 'Search'}>
         <Badge color="primary" variant="dot" invisible={!hasQuery || searchOpen} sx={{ '& .MuiBadge-badge': { minWidth: 6, height: 6 } }}>
           <IconButton
             size="small"
-            onClick={() => onSearchOpenChange(!searchOpen)}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSearchOpenChange(!searchOpen);
+            }}
             aria-label="Toggle search"
             aria-expanded={searchOpen}
             sx={{ ...AF_TOOLBAR_ICON_BTN_SX, flexShrink: 0 }}
@@ -189,7 +203,10 @@ function AfSectionMenuTrigger({ setMenuAnchor, tooltipTitle = 'List actions' }) 
     <Tooltip title={tooltipTitle}>
       <IconButton
         size="small"
-        onClick={(e) => setMenuAnchor(e.currentTarget)}
+        onClick={(e) => {
+          e.stopPropagation();
+          setMenuAnchor(e.currentTarget);
+        }}
         aria-label={tooltipTitle}
         aria-haspopup="true"
         sx={AF_TOOLBAR_ICON_BTN_SX}
@@ -197,6 +214,75 @@ function AfSectionMenuTrigger({ setMenuAnchor, tooltipTitle = 'List actions' }) 
         <MoreVert sx={{ fontSize: 18 }} />
       </IconButton>
     </Tooltip>
+  );
+}
+
+/** Section title row: title (toggle) + inline search/menu when expanded + chevron. */
+function AfCollapsibleSectionHeader({
+  Icon,
+  title,
+  expanded,
+  onToggle,
+  searchOpen,
+  onSearchOpenChange,
+  searchValue,
+  onSearchValueChange,
+  searchPlaceholder,
+  menuTrigger,
+  badge,
+}) {
+  const titleFlex =
+    expanded && searchOpen ? '0 1 38%' : '1 1 0%';
+
+  return (
+    <Box
+      sx={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 0.5,
+        px: 2,
+        py: 0.75,
+        '&:hover': { bgcolor: 'action.hover' },
+      }}
+    >
+      <Box
+        onClick={onToggle}
+        sx={{
+          flex: titleFlex,
+          minWidth: 0,
+          display: 'flex',
+          alignItems: 'center',
+          cursor: 'pointer',
+        }}
+      >
+        <AfSectionHeaderTitle Icon={Icon}>{title}</AfSectionHeaderTitle>
+        {badge || null}
+      </Box>
+      {expanded && (
+        <AfSectionSearchRow
+          inline
+          searchOpen={searchOpen}
+          onSearchOpenChange={onSearchOpenChange}
+          value={searchValue}
+          onValueChange={onSearchValueChange}
+          placeholder={searchPlaceholder}
+        >
+          {menuTrigger}
+        </AfSectionSearchRow>
+      )}
+      <Box
+        onClick={onToggle}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          flexShrink: 0,
+          cursor: 'pointer',
+          color: 'text.secondary',
+        }}
+      >
+        {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+      </Box>
+    </Box>
   );
 }
 
@@ -216,6 +302,7 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
   const [lineSearchOpen, setLineSearchOpen] = useState(false);
   const [quickLineWizardOpen, setQuickLineWizardOpen] = useState(false);
   const [createLineOpen, setCreateLineOpen] = useState(false);
+  const [lineFromTemplateOpen, setLineFromTemplateOpen] = useState(false);
   const [deleteLineConfirm, setDeleteLineConfirm] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
   const [deletePlaybookConfirm, setDeletePlaybookConfirm] = useState(null);
@@ -236,6 +323,7 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
   const [skillsMenuAnchor, setSkillsMenuAnchor] = useState(null);
   const [connectorsMenuAnchor, setConnectorsMenuAnchor] = useState(null);
   const [linesMenuAnchor, setLinesMenuAnchor] = useState(null);
+  const [shareDialogTarget, setShareDialogTarget] = useState(null);
   const queryClient = useQueryClient();
 
   const persistedState = useMemo(() => {
@@ -332,33 +420,53 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
   const { data: profiles = [], isLoading: profilesLoading } = useQuery(
     'agentFactoryProfiles',
     () => apiService.agentFactory.listProfiles(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: defaultChatPref } = useQuery(
     'defaultChatAgentProfile',
     () => apiService.settings.getDefaultChatAgentProfile(),
-    { retry: false }
+    { staleTime: 30_000, retry: false }
   );
   const defaultChatProfileId = defaultChatPref?.agent_profile_id || null;
   const { data: playbooks = [], isLoading: playbooksLoading } = useQuery(
     'agentFactoryPlaybooks',
     () => apiService.agentFactory.listPlaybooks(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: connectors = [], isLoading: connectorsLoading } = useQuery(
     'agentFactoryConnectors',
     () => apiService.agentFactory.listConnectors(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: skillsList = [], isLoading: skillsLoading } = useQuery(
     'agentFactorySkills',
     () => apiService.agentFactory.listSkills({ include_builtin: true }),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
+  const { data: sharedWithMe = [] } = useQuery(
+    'agentFactorySharedWithMe',
+    () => agentFactoryService.listSharedWithMe(),
+    { staleTime: 30_000, retry: false }
+  );
+  const shareIdMap = useMemo(() => {
+    const map = {};
+    (sharedWithMe || []).forEach((s) => { map[`${s.artifact_type}::${s.artifact_id}`] = s.id; });
+    return map;
+  }, [sharedWithMe]);
+  const getShareId = useCallback((artifactType, artifactId) =>
+    shareIdMap[`${artifactType}::${artifactId}`] || null,
+  [shareIdMap]);
+
+  const { data: pendingRecs = [] } = useQuery(
+    ['agentFactorySkillRecommendations', 'pending'],
+    () => agentFactoryService.getSkillRecommendations('pending', 100),
+    { staleTime: 120_000, retry: false }
+  );
+  const pendingRecsCount = Array.isArray(pendingRecs) ? pendingRecs.length : 0;
   const { data: linesList = [], isLoading: linesLoading } = useQuery(
     'agentFactoryLines',
     () => apiService.agentFactory.listLines(),
-    { retry: false }
+    { staleTime: 60_000, retry: false }
   );
   const { data: connectorTemplates = [], isLoading: templatesLoading } = useQuery(
     'agentFactoryConnectorTemplates',
@@ -368,7 +476,7 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
   const { data: sidebarCategories = [] } = useQuery(
     'agentFactorySidebarCategories',
     () => apiService.agentFactory.listSidebarCategories(),
-    { retry: false }
+    { staleTime: 30_000, retry: false }
   );
 
   const createSidebarCategoryMutation = useMutation(
@@ -381,6 +489,17 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
       },
     }
   );
+
+  const deleteSidebarCategoryMutation = useMutation(
+    (categoryId) => apiService.agentFactory.deleteSidebarCategory(categoryId),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('agentFactorySidebarCategories');
+      },
+    }
+  );
+
+  const [categoryFolderMenu, setCategoryFolderMenu] = useState(null);
 
   const updateProfileCategoryMutation = useMutation(
     ({ profileId, category }) => apiService.agentFactory.updateProfile(profileId, { category }),
@@ -402,18 +521,30 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
   const pauseMutation = useMutation(
     (profileId) => apiService.agentFactory.pauseProfile(profileId),
     {
-      onSuccess: () => {
+      onSuccess: (updated) => {
+        if (updated?.id) {
+          queryClient.setQueryData('agentFactoryProfiles', (old = []) =>
+            old.map((row) => (String(row.id) === String(updated.id) ? { ...row, ...updated } : row))
+          );
+        }
         queryClient.invalidateQueries('agentFactoryProfiles');
         queryClient.invalidateQueries('defaultChatAgentProfile');
+        invalidateAgentHandlesQuery(queryClient);
       },
     }
   );
   const resumeMutation = useMutation(
     (profileId) => apiService.agentFactory.resumeProfile(profileId),
     {
-      onSuccess: () => {
+      onSuccess: (updated) => {
+        if (updated?.id) {
+          queryClient.setQueryData('agentFactoryProfiles', (old = []) =>
+            old.map((row) => (String(row.id) === String(updated.id) ? { ...row, ...updated } : row))
+          );
+        }
         queryClient.invalidateQueries('agentFactoryProfiles');
         queryClient.invalidateQueries('defaultChatAgentProfile');
+        invalidateAgentHandlesQuery(queryClient);
       },
     }
   );
@@ -423,6 +554,7 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
       onSuccess: (_, profileId) => {
         queryClient.invalidateQueries('agentFactoryProfiles');
         queryClient.invalidateQueries('defaultChatAgentProfile');
+        invalidateAgentHandlesQuery(queryClient);
         onCloseEntityTab?.('agent', profileId);
         setDeleteConfirm(null);
       },
@@ -447,6 +579,22 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
       },
     }
   );
+
+  const copySharedToMineMutation = useMutation(
+    (shareId) => agentFactoryService.copySharedToMine(shareId),
+    {
+      onSuccess: (data) => {
+        queryClient.invalidateQueries('agentFactoryProfiles');
+        queryClient.invalidateQueries('agentFactoryPlaybooks');
+        queryClient.invalidateQueries('agentFactorySkills');
+        queryClient.invalidateQueries('agentFactorySharedWithMe');
+        if (data?.new_profile?.id) navigate(`/agent-factory/agent/${data.new_profile.id}`);
+        else if (data?.new_playbook_id) navigate(`/agent-factory/playbook/${data.new_playbook_id}`);
+        else if (data?.new_skill_id) navigate(`/agent-factory/skill/${data.new_skill_id}`);
+      },
+    }
+  );
+
   const deleteConnectorMutation = useMutation(
     (connectorId) => apiService.agentFactory.deleteConnector(connectorId),
     {
@@ -462,6 +610,7 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
     {
       onSuccess: (_, lineId) => {
         queryClient.invalidateQueries('agentFactoryLines');
+        invalidateAgentHandlesQuery(queryClient);
         onCloseEntityTab?.('line', lineId);
         setDeleteLineConfirm(null);
       },
@@ -505,6 +654,7 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
         queryClient.invalidateQueries('agentFactoryProfiles');
         queryClient.invalidateQueries('agentFactoryPlaybooks');
         queryClient.invalidateQueries('agentFactoryConnectors');
+        invalidateAgentHandlesQuery(queryClient);
         setImportFileInputKey((k) => k + 1);
         if (data?.id) navigate(`/agent-factory/agent/${data.id}`);
       },
@@ -771,6 +921,101 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
     [groupByCategory, filteredConnectors]
   );
 
+  const findSidebarCategoryId = useCallback(
+    (sectionKey, name) => {
+      const apiSection = sectionKey === 'dataSources' ? 'connectors' : sectionKey;
+      const row = (sidebarCategories || []).find((c) => c.section === apiSection && c.name === name);
+      return row?.id || null;
+    },
+    [sidebarCategories]
+  );
+
+  const removeCategoryFolder = useCallback(
+    async (sectionKey, categoryName) => {
+      if (!categoryName || categoryName === UNCATEGORIZED) return;
+      const itemsByCat =
+        sectionKey === 'agents'
+          ? agentsByCategory
+          : sectionKey === 'playbooks'
+            ? playbooksByCategory
+            : sectionKey === 'skills'
+              ? skillsByCategory
+              : connectorsByCategory;
+      const items = itemsByCat[categoryName] || [];
+      const movable = items.filter((it) => {
+        if (it.ownership === 'shared') return false;
+        if (sectionKey === 'agents' && (it.is_locked || it.is_builtin)) return false;
+        if (sectionKey === 'playbooks' && (it.is_locked || it.is_builtin)) return false;
+        if (sectionKey === 'skills' && it.is_builtin) return false;
+        if (sectionKey === 'connectors' && it.is_locked) return false;
+        return true;
+      });
+      const skipped = items.length - movable.length;
+      let msg = `Remove folder "${categoryName}"?`;
+      if (movable.length) {
+        msg += ` ${movable.length} item(s) will move to Uncategorized.`;
+      }
+      if (skipped) {
+        msg += ` ${skipped} item(s) cannot be moved automatically (shared, built-in, or locked) and will keep this label until edited or moved.`;
+      }
+      if (!window.confirm(msg)) return;
+
+      const mut =
+        sectionKey === 'agents'
+          ? updateProfileCategoryMutation
+          : sectionKey === 'playbooks'
+            ? updatePlaybookCategoryMutation
+            : sectionKey === 'skills'
+              ? updateSkillCategoryMutation
+              : updateConnectorCategoryMutation;
+
+      for (const it of movable) {
+        const payload =
+          sectionKey === 'agents'
+            ? { profileId: it.id, category: null }
+            : sectionKey === 'playbooks'
+              ? { playbookId: it.id, category: null }
+              : sectionKey === 'skills'
+                ? { skillId: it.id, category: null }
+                : { connectorId: it.id, category: null };
+        try {
+          await mut.mutateAsync(payload);
+        } catch (err) {
+          console.error('Clear item category failed:', err);
+        }
+      }
+      const cid = findSidebarCategoryId(sectionKey, categoryName);
+      if (cid) {
+        try {
+          await deleteSidebarCategoryMutation.mutateAsync(cid);
+        } catch (err) {
+          console.error('Delete sidebar category failed:', err);
+        }
+      }
+      await Promise.all([
+        queryClient.invalidateQueries('agentFactoryProfiles'),
+        queryClient.invalidateQueries('agentFactoryPlaybooks'),
+        queryClient.invalidateQueries('agentFactorySkills'),
+        queryClient.invalidateQueries('agentFactoryConnectors'),
+        queryClient.invalidateQueries('agentFactorySidebarCategories'),
+      ]);
+      setCategoryFolderMenu(null);
+    },
+    [
+      agentsByCategory,
+      playbooksByCategory,
+      skillsByCategory,
+      connectorsByCategory,
+      findSidebarCategoryId,
+      updateProfileCategoryMutation,
+      updatePlaybookCategoryMutation,
+      updateSkillCategoryMutation,
+      updateConnectorCategoryMutation,
+      deleteSidebarCategoryMutation,
+      queryClient,
+    ]
+  );
+
   return (
     <Box
       sx={{
@@ -781,62 +1026,48 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
-        bgcolor: 'background.paper',
+        bgcolor: (t) => t.palette.surface?.main ?? t.palette.background.default,
       }}
     >
       <Box sx={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
         {/* Agents section */}
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              px: 2,
-              py: 1,
-              cursor: 'pointer',
-              '&:hover': { bgcolor: 'action.hover' },
-            }}
-            onClick={() => setAgentsOpen((o) => !o)}
-          >
-            <AfSectionHeaderTitle Icon={SmartToy}>Agents</AfSectionHeaderTitle>
-            {agentsOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-          </Box>
+          <AfCollapsibleSectionHeader
+            Icon={SmartToy}
+            title="Agents"
+            expanded={agentsOpen}
+            onToggle={() => setAgentsOpen((o) => !o)}
+            searchOpen={agentSearchOpen}
+            onSearchOpenChange={setAgentSearchOpen}
+            searchValue={agentSearch}
+            onSearchValueChange={setAgentSearch}
+            searchPlaceholder="Search agents…"
+            menuTrigger={<AfSectionMenuTrigger setMenuAnchor={setAgentsMenuAnchor} />}
+          />
           <Collapse in={agentsOpen}>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <input
-                type="file"
-                accept=".yaml,.yml"
-                key={importFileInputKey}
-                onChange={handleImportAgent}
-                style={{ display: 'none' }}
-                id="agent-import-file"
-              />
-              <AfSectionSearchRow
-                searchOpen={agentSearchOpen}
-                onSearchOpenChange={setAgentSearchOpen}
-                value={agentSearch}
-                onValueChange={setAgentSearch}
-                placeholder="Search agents…"
-              >
-                <AfSectionMenuTrigger setMenuAnchor={setAgentsMenuAnchor} />
-              </AfSectionSearchRow>
-              <Menu
-                anchorEl={agentsMenuAnchor}
-                open={!!agentsMenuAnchor}
-                onClose={() => setAgentsMenuAnchor(null)}
-              >
-                <MenuItem onClick={() => { setAgentsMenuAnchor(null); handleCreateAgent(); }}>
-                  Create new
-                </MenuItem>
-                <MenuItem onClick={() => { setAgentsMenuAnchor(null); document.getElementById('agent-import-file')?.click(); }} disabled={importBundleMutation.isLoading}>
-                  Import
-                </MenuItem>
-                <MenuItem onClick={() => { setAgentsMenuAnchor(null); setAddCategorySection('agents'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
-                  Add category
-                </MenuItem>
-              </Menu>
-            </Box>
+            <input
+              type="file"
+              accept=".yaml,.yml"
+              key={importFileInputKey}
+              onChange={handleImportAgent}
+              style={{ display: 'none' }}
+              id="agent-import-file"
+            />
+            <Menu
+              anchorEl={agentsMenuAnchor}
+              open={!!agentsMenuAnchor}
+              onClose={() => setAgentsMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => { setAgentsMenuAnchor(null); handleCreateAgent(); }}>
+                Create new
+              </MenuItem>
+              <MenuItem onClick={() => { setAgentsMenuAnchor(null); document.getElementById('agent-import-file')?.click(); }} disabled={importBundleMutation.isLoading}>
+                Import
+              </MenuItem>
+              <MenuItem onClick={() => { setAgentsMenuAnchor(null); setAddCategorySection('agents'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
+                Add category
+              </MenuItem>
+            </Menu>
             {profilesLoading && (
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
                 <CircularProgress size={24} />
@@ -851,13 +1082,59 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                   const items = agentsByCategory[cat] || [];
                   return (
                     <Box key={cat} sx={{ borderTop: 1, borderColor: 'divider' }}>
-                      <Box
-                        sx={{ display: 'flex', alignItems: 'center', px: 1.5, py: 0.5, cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }}
-                        onClick={() => toggleCategoryExpanded('agents', cat)}
-                      >
-                        {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-                        <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', pr: 0.5 }}>
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            flex: 1,
+                            minWidth: 0,
+                            px: 1.5,
+                            py: 0.5,
+                            cursor: 'pointer',
+                            '&:hover': { bgcolor: 'action.hover' },
+                          }}
+                          onClick={() => toggleCategoryExpanded('agents', cat)}
+                          onContextMenu={
+                            cat !== UNCATEGORIZED
+                              ? (e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setCategoryFolderMenu({
+                                    type: 'position',
+                                    mouseX: e.clientX + 2,
+                                    mouseY: e.clientY - 6,
+                                    sectionKey: 'agents',
+                                    categoryName: cat,
+                                  });
+                                }
+                              : undefined
+                          }
+                        >
+                          {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                          <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
+                          <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                        </Box>
+                        {cat !== UNCATEGORIZED && (
+                          <Tooltip title="Category options">
+                            <IconButton
+                              size="small"
+                              aria-label="Category options"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCategoryFolderMenu({
+                                  type: 'anchor',
+                                  anchorEl: e.currentTarget,
+                                  sectionKey: 'agents',
+                                  categoryName: cat,
+                                });
+                              }}
+                              sx={{ flexShrink: 0 }}
+                            >
+                              <MoreVert sx={{ fontSize: 18 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
                       </Box>
                       <Collapse in={expanded}>
                         <Droppable droppableId={`agents::${cat}`}>
@@ -873,7 +1150,6 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                     <ListItemButton
                                       ref={dragProvided.innerRef}
                                       {...dragProvided.draggableProps}
-                                      {...dragProvided.dragHandleProps}
                                       selected={selectedSection === 'agent' && selectedId === p.id}
                                       onClick={() => handleSelectAgent(p)}
                                       sx={{
@@ -887,6 +1163,22 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                           : {}),
                                       }}
                                     >
+                                      <Box
+                                        {...dragProvided.dragHandleProps}
+                                        onClick={(e) => e.stopPropagation()}
+                                        sx={{
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          flexShrink: 0,
+                                          mr: 0.25,
+                                          cursor: 'grab',
+                                          color: 'text.disabled',
+                                          '&:active': { cursor: 'grabbing' },
+                                        }}
+                                        aria-label="Drag to reorder or move category"
+                                      >
+                                        <DragIndicator sx={{ fontSize: 18 }} />
+                                      </Box>
                                       <StatusDot status={p.status || (p.is_active ? 'active' : 'paused')} />
                                       <ListItemText
                                         primary={
@@ -894,6 +1186,11 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                             <Typography component="span" variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
                                               {p.name || p.handle || 'Unnamed'}
                                             </Typography>
+                                            {p.ownership === 'shared' && (
+                                              <Tooltip title={`Shared by ${p.owner_display_name || p.owner_username || 'another user'}`}>
+                                                <PeopleAlt sx={{ fontSize: 16, color: 'info.main', flexShrink: 0 }} />
+                                              </Tooltip>
+                                            )}
                                             {isChatDefault && (
                                               <Chip size="small" color="primary" label="Default" sx={{ height: 22, flexShrink: 0 }} />
                                             )}
@@ -901,7 +1198,9 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                         }
                                         secondary={
                                           <>
-                                            {p.handle ? `@${p.handle}` : 'Schedule only'}
+                                            {p.ownership === 'shared'
+                                              ? `by ${p.owner_display_name || p.owner_username || 'user'}`
+                                              : p.handle ? `@${p.handle}` : 'Schedule only'}
                                             {p.budget?.monthly_limit_usd != null && p.budget.monthly_limit_usd > 0 && (
                                               <Typography component="span" variant="caption" display="block" color="text.secondary">
                                                 ${Number(p.budget.current_period_spend_usd || 0).toFixed(2)} / ${Number(p.budget.monthly_limit_usd).toFixed(2)}
@@ -913,20 +1212,47 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                         secondaryTypographyProps={{ noWrap: true }}
                                         sx={{ ml: 1, mr: 0.5 }}
                                       />
-                                      <Tooltip title={p.is_active ? 'Pause agent' : 'Resume agent'}>
-                                        <IconButton size="small" onClick={(e) => { e.stopPropagation(); handleToggleActive(e, p); }} disabled={pauseMutation.isLoading || resumeMutation.isLoading} aria-label={p.is_active ? 'Pause' : 'Resume'}>
-                                          {p.is_active ? <Pause fontSize="small" /> : <PlayArrow fontSize="small" />}
-                                        </IconButton>
-                                      </Tooltip>
-                                      {p.is_locked && !p.is_builtin && <Tooltip title="Locked"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
-                                      {p.is_builtin && <Tooltip title="Built-in"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
-                                      <Tooltip title={p.is_builtin ? 'Built-in agent cannot be deleted' : p.is_locked ? 'Unlock in editor to delete' : 'Delete agent'}>
-                                        <span>
-                                          <IconButton size="small" onClick={(e) => { e.stopPropagation(); if (!p.is_locked && !p.is_builtin) setDeleteConfirm(p); }} disabled={!!p.is_locked || !!p.is_builtin} aria-label="Delete agent" sx={{ color: 'error.main', opacity: (p.is_locked || p.is_builtin) ? 0.4 : 0.6, '&:hover': { opacity: (p.is_locked || p.is_builtin) ? 0.4 : 1 } }}>
-                                            <Delete fontSize="small" />
+                                      {p.ownership === 'shared' ? (
+                                        <Tooltip title="Make my own copy">
+                                          <IconButton size="small" onClick={(e) => { e.stopPropagation(); const sid = getShareId('agent_profile', p.id); if (sid) copySharedToMineMutation.mutate(sid); }} disabled={copySharedToMineMutation.isLoading} aria-label="Copy to my workspace" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                            <ContentCopy fontSize="small" />
                                           </IconButton>
-                                        </span>
-                                      </Tooltip>
+                                        </Tooltip>
+                                      ) : (
+                                        <>
+                                          <Tooltip title={p.is_active ? 'Pause agent' : 'Resume agent'}>
+                                            <span>
+                                              <IconButton
+                                                size="small"
+                                                onClick={(e) => { e.stopPropagation(); handleToggleActive(e, p); }}
+                                                disabled={
+                                                  (pauseMutation.isLoading && String(pauseMutation.variables) === String(p.id)) ||
+                                                  (resumeMutation.isLoading && String(resumeMutation.variables) === String(p.id))
+                                                }
+                                                aria-label={p.is_active ? 'Pause' : 'Resume'}
+                                              >
+                                                {p.is_active ? <Pause fontSize="small" /> : <PlayArrow fontSize="small" />}
+                                              </IconButton>
+                                            </span>
+                                          </Tooltip>
+                                          {!p.is_builtin && !p.is_locked && (
+                                            <Tooltip title="Share">
+                                              <IconButton size="small" onClick={(e) => { e.stopPropagation(); setShareDialogTarget({ artifactType: 'agent_profile', artifactId: p.id, artifactName: p.name || p.handle || 'Agent' }); }} aria-label="Share agent" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                                <ShareIcon fontSize="small" />
+                                              </IconButton>
+                                            </Tooltip>
+                                          )}
+                                          {p.is_locked && !p.is_builtin && <Tooltip title="Locked"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
+                                          {p.is_builtin && <Tooltip title="Built-in"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
+                                          <Tooltip title={p.is_builtin ? 'Built-in agent cannot be deleted' : p.is_locked ? 'Unlock in editor to delete' : 'Delete agent'}>
+                                            <span>
+                                              <IconButton size="small" onClick={(e) => { e.stopPropagation(); if (!p.is_locked && !p.is_builtin) setDeleteConfirm(p); }} disabled={!!p.is_locked || !!p.is_builtin} aria-label="Delete agent" sx={{ color: 'error.main', opacity: (p.is_locked || p.is_builtin) ? 0.4 : 0.6, '&:hover': { opacity: (p.is_locked || p.is_builtin) ? 0.4 : 1 } }}>
+                                                <Delete fontSize="small" />
+                                              </IconButton>
+                                            </span>
+                                          </Tooltip>
+                                        </>
+                                      )}
                                     </ListItemButton>
                                   )}
                                 </Draggable>
@@ -952,56 +1278,42 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
 
         {/* Playbooks section */}
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              px: 2,
-              py: 1,
-              cursor: 'pointer',
-              '&:hover': { bgcolor: 'action.hover' },
-            }}
-            onClick={() => setPlaybooksOpen((o) => !o)}
-          >
-            <AfSectionHeaderTitle Icon={PlayArrow}>Playbooks</AfSectionHeaderTitle>
-            {playbooksOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-          </Box>
+          <AfCollapsibleSectionHeader
+            Icon={PlayArrow}
+            title="Playbooks"
+            expanded={playbooksOpen}
+            onToggle={() => setPlaybooksOpen((o) => !o)}
+            searchOpen={playbookSearchOpen}
+            onSearchOpenChange={setPlaybookSearchOpen}
+            searchValue={playbookSearch}
+            onSearchValueChange={setPlaybookSearch}
+            searchPlaceholder="Search playbooks…"
+            menuTrigger={<AfSectionMenuTrigger setMenuAnchor={setPlaybooksMenuAnchor} />}
+          />
           <Collapse in={playbooksOpen}>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <input
-                type="file"
-                accept=".json"
-                key={importPlaybooksFileInputKey}
-                onChange={handleImportPlaybook}
-                style={{ display: 'none' }}
-                id="playbooks-import-file"
-              />
-              <AfSectionSearchRow
-                searchOpen={playbookSearchOpen}
-                onSearchOpenChange={setPlaybookSearchOpen}
-                value={playbookSearch}
-                onValueChange={setPlaybookSearch}
-                placeholder="Search playbooks…"
-              >
-                <AfSectionMenuTrigger setMenuAnchor={setPlaybooksMenuAnchor} />
-              </AfSectionSearchRow>
-              <Menu
-                anchorEl={playbooksMenuAnchor}
-                open={!!playbooksMenuAnchor}
-                onClose={() => setPlaybooksMenuAnchor(null)}
-              >
-                <MenuItem onClick={() => { setPlaybooksMenuAnchor(null); setCreatePlaybookOpen(true); }}>
-                  Create new
-                </MenuItem>
-                <MenuItem onClick={() => { setPlaybooksMenuAnchor(null); document.getElementById('playbooks-import-file')?.click(); }} disabled={importPlaybookMutation.isLoading}>
-                  Import
-                </MenuItem>
-                <MenuItem onClick={() => { setPlaybooksMenuAnchor(null); setAddCategorySection('playbooks'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
-                  Add category
-                </MenuItem>
-              </Menu>
-            </Box>
+            <input
+              type="file"
+              accept=".json"
+              key={importPlaybooksFileInputKey}
+              onChange={handleImportPlaybook}
+              style={{ display: 'none' }}
+              id="playbooks-import-file"
+            />
+            <Menu
+              anchorEl={playbooksMenuAnchor}
+              open={!!playbooksMenuAnchor}
+              onClose={() => setPlaybooksMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => { setPlaybooksMenuAnchor(null); setCreatePlaybookOpen(true); }}>
+                Create new
+              </MenuItem>
+              <MenuItem onClick={() => { setPlaybooksMenuAnchor(null); document.getElementById('playbooks-import-file')?.click(); }} disabled={importPlaybookMutation.isLoading}>
+                Import
+              </MenuItem>
+              <MenuItem onClick={() => { setPlaybooksMenuAnchor(null); setAddCategorySection('playbooks'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
+                Add category
+              </MenuItem>
+            </Menu>
             {playbooksLoading && (
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
                 <CircularProgress size={24} />
@@ -1014,10 +1326,59 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                   const items = playbooksByCategory[cat] || [];
                   return (
                     <Box key={cat} sx={{ borderTop: 1, borderColor: 'divider' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, py: 0.5, cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }} onClick={() => toggleCategoryExpanded('playbooks', cat)}>
-                        {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-                        <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', pr: 0.5 }}>
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            flex: 1,
+                            minWidth: 0,
+                            px: 1.5,
+                            py: 0.5,
+                            cursor: 'pointer',
+                            '&:hover': { bgcolor: 'action.hover' },
+                          }}
+                          onClick={() => toggleCategoryExpanded('playbooks', cat)}
+                          onContextMenu={
+                            cat !== UNCATEGORIZED
+                              ? (e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setCategoryFolderMenu({
+                                    type: 'position',
+                                    mouseX: e.clientX + 2,
+                                    mouseY: e.clientY - 6,
+                                    sectionKey: 'playbooks',
+                                    categoryName: cat,
+                                  });
+                                }
+                              : undefined
+                          }
+                        >
+                          {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                          <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
+                          <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                        </Box>
+                        {cat !== UNCATEGORIZED && (
+                          <Tooltip title="Category options">
+                            <IconButton
+                              size="small"
+                              aria-label="Category options"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCategoryFolderMenu({
+                                  type: 'anchor',
+                                  anchorEl: e.currentTarget,
+                                  sectionKey: 'playbooks',
+                                  categoryName: cat,
+                                });
+                              }}
+                              sx={{ flexShrink: 0 }}
+                            >
+                              <MoreVert sx={{ fontSize: 18 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
                       </Box>
                       <Collapse in={expanded}>
                         <Droppable droppableId={`playbooks::${cat}`}>
@@ -1027,21 +1388,55 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                 <Draggable key={pb.id} draggableId={`playbook::${pb.id}`} index={idx}>
                                   {(dragProvided) => (
                                     <ListItemButton ref={dragProvided.innerRef} {...dragProvided.draggableProps} {...dragProvided.dragHandleProps} selected={selectedSection === 'playbook' && selectedId === pb.id} onClick={() => handleSelectPlaybook(pb)} sx={{ pr: 0.5 }}>
-                                      <ListItemText primary={pb.name || 'Unnamed'} secondary={`${stepCount(pb)} step(s)`} primaryTypographyProps={{ noWrap: true }} secondaryTypographyProps={{ noWrap: true }} sx={{ mr: 0.5 }} />
-                                      {pb.is_locked && !pb.is_builtin && <Tooltip title="Locked"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
-                                      {pb.is_builtin && <Tooltip title="Built-in"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
-                                      <Tooltip title="Clone playbook">
-                                        <IconButton size="small" onClick={(e) => { e.stopPropagation(); clonePlaybookMutation.mutate(pb.id); }} disabled={clonePlaybookMutation.isLoading} aria-label="Clone playbook" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
-                                          <ContentCopy fontSize="small" />
-                                        </IconButton>
-                                      </Tooltip>
-                                      <Tooltip title={pb.is_builtin ? 'Built-in playbook cannot be deleted' : pb.is_locked ? 'Unlock in editor to delete' : 'Delete playbook'}>
-                                        <span>
-                                          <IconButton size="small" onClick={(e) => { e.stopPropagation(); if (!pb.is_locked && !pb.is_builtin) setDeletePlaybookConfirm(pb); }} disabled={!!pb.is_locked || !!pb.is_builtin} aria-label="Delete playbook" sx={{ color: 'error.main', opacity: (pb.is_locked || pb.is_builtin) ? 0.4 : 0.6, '&:hover': { opacity: (pb.is_locked || pb.is_builtin) ? 0.4 : 1 } }}>
-                                            <Delete fontSize="small" />
+                                      <ListItemText
+                                        primary={
+                                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
+                                            <Typography component="span" variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
+                                              {pb.name || 'Unnamed'}
+                                            </Typography>
+                                            {pb.ownership === 'shared' && (
+                                              <Tooltip title={`Shared by ${pb.owner_display_name || pb.owner_username || 'another user'}`}>
+                                                <PeopleAlt sx={{ fontSize: 16, color: 'info.main', flexShrink: 0 }} />
+                                              </Tooltip>
+                                            )}
+                                          </Box>
+                                        }
+                                        secondary={pb.ownership === 'shared' ? `by ${pb.owner_display_name || pb.owner_username || 'user'}` : `${stepCount(pb)} step(s)`}
+                                        primaryTypographyProps={{ noWrap: true }}
+                                        secondaryTypographyProps={{ noWrap: true }}
+                                        sx={{ mr: 0.5 }}
+                                      />
+                                      {pb.ownership === 'shared' ? (
+                                        <Tooltip title="Make my own copy">
+                                          <IconButton size="small" onClick={(e) => { e.stopPropagation(); const sid = getShareId('playbook', pb.id); if (sid) copySharedToMineMutation.mutate(sid); }} disabled={copySharedToMineMutation.isLoading} aria-label="Copy to my workspace" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                            <ContentCopy fontSize="small" />
                                           </IconButton>
-                                        </span>
-                                      </Tooltip>
+                                        </Tooltip>
+                                      ) : (
+                                        <>
+                                          {pb.is_locked && !pb.is_builtin && <Tooltip title="Locked"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
+                                          {pb.is_builtin && <Tooltip title="Built-in"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.25 }} /></Tooltip>}
+                                          {!pb.is_builtin && !pb.is_locked && !pb.is_template && (
+                                            <Tooltip title="Share">
+                                              <IconButton size="small" onClick={(e) => { e.stopPropagation(); setShareDialogTarget({ artifactType: 'playbook', artifactId: pb.id, artifactName: pb.name || 'Playbook' }); }} aria-label="Share playbook" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                                <ShareIcon fontSize="small" />
+                                              </IconButton>
+                                            </Tooltip>
+                                          )}
+                                          <Tooltip title="Clone playbook">
+                                            <IconButton size="small" onClick={(e) => { e.stopPropagation(); clonePlaybookMutation.mutate(pb.id); }} disabled={clonePlaybookMutation.isLoading} aria-label="Clone playbook" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                              <ContentCopy fontSize="small" />
+                                            </IconButton>
+                                          </Tooltip>
+                                          <Tooltip title={pb.is_builtin ? 'Built-in playbook cannot be deleted' : pb.is_locked ? 'Unlock in editor to delete' : 'Delete playbook'}>
+                                            <span>
+                                              <IconButton size="small" onClick={(e) => { e.stopPropagation(); if (!pb.is_locked && !pb.is_builtin) setDeletePlaybookConfirm(pb); }} disabled={!!pb.is_locked || !!pb.is_builtin} aria-label="Delete playbook" sx={{ color: 'error.main', opacity: (pb.is_locked || pb.is_builtin) ? 0.4 : 0.6, '&:hover': { opacity: (pb.is_locked || pb.is_builtin) ? 0.4 : 1 } }}>
+                                                <Delete fontSize="small" />
+                                              </IconButton>
+                                            </span>
+                                          </Tooltip>
+                                        </>
+                                      )}
                                     </ListItemButton>
                                   )}
                                 </Draggable>
@@ -1062,59 +1457,50 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
 
         {/* Skills section */}
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              px: 2,
-              py: 1,
-              cursor: 'pointer',
-              '&:hover': { bgcolor: 'action.hover' },
-            }}
-            onClick={() => setSkillsOpen((o) => !o)}
-          >
-            <AfSectionHeaderTitle Icon={Build}>Skills</AfSectionHeaderTitle>
-            {skillsOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-          </Box>
+          <AfCollapsibleSectionHeader
+            Icon={Build}
+            title="Skills"
+            expanded={skillsOpen}
+            onToggle={() => setSkillsOpen((o) => !o)}
+            searchOpen={skillSearchOpen}
+            onSearchOpenChange={setSkillSearchOpen}
+            searchValue={skillSearch}
+            onSearchValueChange={setSkillSearch}
+            searchPlaceholder="Search skills…"
+            menuTrigger={<AfSectionMenuTrigger setMenuAnchor={setSkillsMenuAnchor} />}
+            badge={
+              pendingRecsCount > 0 ? (
+                <Chip size="small" label={pendingRecsCount} color="warning" sx={{ height: 18, fontSize: '0.7rem', ml: 0.5 }} />
+              ) : null
+            }
+          />
           <Collapse in={skillsOpen}>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <input
-                type="file"
-                accept=".yaml,.yml"
-                key={importSkillsFileInputKey}
-                onChange={handleImportSkills}
-                style={{ display: 'none' }}
-                id="skills-import-file"
-              />
-              <AfSectionSearchRow
-                searchOpen={skillSearchOpen}
-                onSearchOpenChange={setSkillSearchOpen}
-                value={skillSearch}
-                onValueChange={setSkillSearch}
-                placeholder="Search skills…"
-              >
-                <AfSectionMenuTrigger setMenuAnchor={setSkillsMenuAnchor} />
-              </AfSectionSearchRow>
-              <Menu
-                anchorEl={skillsMenuAnchor}
-                open={!!skillsMenuAnchor}
-                onClose={() => setSkillsMenuAnchor(null)}
-              >
-                <MenuItem onClick={() => { setSkillsMenuAnchor(null); handleCreateSkill(); }}>
-                  Create new
-                </MenuItem>
-                <MenuItem onClick={() => { setSkillsMenuAnchor(null); document.getElementById('skills-import-file')?.click(); }} disabled={importSkillsMutation.isLoading}>
-                  Import
-                </MenuItem>
-                <MenuItem onClick={() => { setSkillsMenuAnchor(null); handleExportSkills(); }}>
-                  Export all (YAML)
-                </MenuItem>
-                <MenuItem onClick={() => { setSkillsMenuAnchor(null); setAddCategorySection('skills'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
-                  Add category
-                </MenuItem>
-              </Menu>
-            </Box>
+            <input
+              type="file"
+              accept=".yaml,.yml"
+              key={importSkillsFileInputKey}
+              onChange={handleImportSkills}
+              style={{ display: 'none' }}
+              id="skills-import-file"
+            />
+            <Menu
+              anchorEl={skillsMenuAnchor}
+              open={!!skillsMenuAnchor}
+              onClose={() => setSkillsMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => { setSkillsMenuAnchor(null); handleCreateSkill(); }}>
+                Create new
+              </MenuItem>
+              <MenuItem onClick={() => { setSkillsMenuAnchor(null); document.getElementById('skills-import-file')?.click(); }} disabled={importSkillsMutation.isLoading}>
+                Import
+              </MenuItem>
+              <MenuItem onClick={() => { setSkillsMenuAnchor(null); handleExportSkills(); }}>
+                Export all (YAML)
+              </MenuItem>
+              <MenuItem onClick={() => { setSkillsMenuAnchor(null); setAddCategorySection('skills'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
+                Add category
+              </MenuItem>
+            </Menu>
             {skillsLoading && (
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
                 <CircularProgress size={24} />
@@ -1127,10 +1513,59 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                   const items = skillsByCategory[cat] || [];
                   return (
                     <Box key={cat} sx={{ borderTop: 1, borderColor: 'divider' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, py: 0.5, cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }} onClick={() => toggleCategoryExpanded('skills', cat)}>
-                        {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-                        <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', pr: 0.5 }}>
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            flex: 1,
+                            minWidth: 0,
+                            px: 1.5,
+                            py: 0.5,
+                            cursor: 'pointer',
+                            '&:hover': { bgcolor: 'action.hover' },
+                          }}
+                          onClick={() => toggleCategoryExpanded('skills', cat)}
+                          onContextMenu={
+                            cat !== UNCATEGORIZED
+                              ? (e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setCategoryFolderMenu({
+                                    type: 'position',
+                                    mouseX: e.clientX + 2,
+                                    mouseY: e.clientY - 6,
+                                    sectionKey: 'skills',
+                                    categoryName: cat,
+                                  });
+                                }
+                              : undefined
+                          }
+                        >
+                          {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                          <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
+                          <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                        </Box>
+                        {cat !== UNCATEGORIZED && (
+                          <Tooltip title="Category options">
+                            <IconButton
+                              size="small"
+                              aria-label="Category options"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCategoryFolderMenu({
+                                  type: 'anchor',
+                                  anchorEl: e.currentTarget,
+                                  sectionKey: 'skills',
+                                  categoryName: cat,
+                                });
+                              }}
+                              sx={{ flexShrink: 0 }}
+                            >
+                              <MoreVert sx={{ fontSize: 18 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
                       </Box>
                       <Collapse in={expanded}>
                         <Droppable droppableId={`skills::${cat}`}>
@@ -1141,7 +1576,37 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                                   {(dragProvided) => (
                                     <ListItemButton ref={dragProvided.innerRef} {...dragProvided.draggableProps} {...dragProvided.dragHandleProps} selected={selectedSection === 'skill' && selectedId === s.id} onClick={() => navigate(`/agent-factory/skill/${s.id}`)} sx={{ pr: 0.5 }}>
                                       {s.is_builtin && <Tooltip title="Built-in"><Lock fontSize="small" sx={{ color: 'text.secondary', mr: 0.5 }} /></Tooltip>}
-                                      <ListItemText primary={s.name || s.slug} secondary={s.category ? `${s.category}` : null} primaryTypographyProps={{ noWrap: true }} secondaryTypographyProps={{ noWrap: true }} sx={{ mr: 0.5 }} />
+                                      <ListItemText
+                                        primary={
+                                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, minWidth: 0 }}>
+                                            <Typography component="span" variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
+                                              {s.name || s.slug}
+                                            </Typography>
+                                            {s.ownership === 'shared' && (
+                                              <Tooltip title={`Shared by ${s.owner_display_name || s.owner_username || 'another user'}`}>
+                                                <PeopleAlt sx={{ fontSize: 16, color: 'info.main', flexShrink: 0 }} />
+                                              </Tooltip>
+                                            )}
+                                          </Box>
+                                        }
+                                        secondary={s.ownership === 'shared' ? `by ${s.owner_display_name || s.owner_username || 'user'}` : s.category || null}
+                                        primaryTypographyProps={{ noWrap: true }}
+                                        secondaryTypographyProps={{ noWrap: true }}
+                                        sx={{ mr: 0.5 }}
+                                      />
+                                      {s.ownership === 'shared' ? (
+                                        <Tooltip title="Make my own copy">
+                                          <IconButton size="small" onClick={(e) => { e.stopPropagation(); const sid = getShareId('skill', s.id); if (sid) copySharedToMineMutation.mutate(sid); }} disabled={copySharedToMineMutation.isLoading} aria-label="Copy to my workspace" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                            <ContentCopy fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                      ) : !s.is_builtin ? (
+                                        <Tooltip title="Share">
+                                          <IconButton size="small" onClick={(e) => { e.stopPropagation(); setShareDialogTarget({ artifactType: 'skill', artifactId: s.id, artifactName: s.name || s.slug || 'Skill' }); }} aria-label="Share skill" sx={{ color: 'text.secondary', opacity: 0.6, '&:hover': { opacity: 1 } }}>
+                                            <ShareIcon fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                      ) : null}
                                     </ListItemButton>
                                   )}
                                 </Draggable>
@@ -1162,72 +1627,58 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
 
         {/* Data Connections section */}
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              px: 2,
-              py: 1,
-              cursor: 'pointer',
-              '&:hover': { bgcolor: 'action.hover' },
-            }}
-            onClick={() => setDataSourcesOpen((o) => !o)}
-          >
-            <AfSectionHeaderTitle Icon={Storage}>Data Connections</AfSectionHeaderTitle>
-            {dataSourcesOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-          </Box>
+          <AfCollapsibleSectionHeader
+            Icon={Storage}
+            title="Data Connections"
+            expanded={dataSourcesOpen}
+            onToggle={() => setDataSourcesOpen((o) => !o)}
+            searchOpen={connectorSearchOpen}
+            onSearchOpenChange={setConnectorSearchOpen}
+            searchValue={connectorSearch}
+            onSearchValueChange={setConnectorSearch}
+            searchPlaceholder="Search connections…"
+            menuTrigger={<AfSectionMenuTrigger setMenuAnchor={setConnectorsMenuAnchor} />}
+          />
           <Collapse in={dataSourcesOpen}>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <input
-                type="file"
-                accept=".yaml,.yml"
-                key={importConnectorsFileInputKey}
-                onChange={handleImportConnectors}
-                style={{ display: 'none' }}
-                id="connectors-import-file"
-              />
-              <AfSectionSearchRow
-                searchOpen={connectorSearchOpen}
-                onSearchOpenChange={setConnectorSearchOpen}
-                value={connectorSearch}
-                onValueChange={setConnectorSearch}
-                placeholder="Search connections…"
-              >
-                <AfSectionMenuTrigger setMenuAnchor={setConnectorsMenuAnchor} />
-              </AfSectionSearchRow>
-              <Menu
-                anchorEl={connectorsMenuAnchor}
-                open={!!connectorsMenuAnchor}
-                onClose={() => setConnectorsMenuAnchor(null)}
-              >
-                <MenuItem onClick={() => {
-                  setConnectorsMenuAnchor(null);
-                  createConnectorMutation.mutate({
-                    name: 'New connector',
-                    description: '',
-                    connector_type: 'rest',
-                    definition: { base_url: '', auth: { type: 'none' }, endpoints: {} },
-                    requires_auth: false,
-                    auth_fields: [],
-                  });
-                }} disabled={createConnectorMutation.isLoading}>
-                  Create new
-                </MenuItem>
-                <MenuItem onClick={() => { setConnectorsMenuAnchor(null); setTemplateDialogOpen(true); }}>
-                  Add from template
-                </MenuItem>
-                <MenuItem onClick={() => { setConnectorsMenuAnchor(null); document.getElementById('connectors-import-file')?.click(); }} disabled={importConnectorsMutation.isLoading}>
-                  Import
-                </MenuItem>
-                <MenuItem onClick={() => { setConnectorsMenuAnchor(null); handleExportConnectors(); }}>
-                  Export all (YAML)
-                </MenuItem>
-                <MenuItem onClick={() => { setConnectorsMenuAnchor(null); setAddCategorySection('connectors'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
-                  Add category
-                </MenuItem>
-              </Menu>
-            </Box>
+            <input
+              type="file"
+              accept=".yaml,.yml"
+              key={importConnectorsFileInputKey}
+              onChange={handleImportConnectors}
+              style={{ display: 'none' }}
+              id="connectors-import-file"
+            />
+            <Menu
+              anchorEl={connectorsMenuAnchor}
+              open={!!connectorsMenuAnchor}
+              onClose={() => setConnectorsMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => {
+                setConnectorsMenuAnchor(null);
+                createConnectorMutation.mutate({
+                  name: 'New connector',
+                  description: '',
+                  connector_type: 'rest',
+                  definition: { base_url: '', auth: { type: 'none' }, endpoints: {} },
+                  requires_auth: false,
+                  auth_fields: [],
+                });
+              }} disabled={createConnectorMutation.isLoading}>
+                Create new
+              </MenuItem>
+              <MenuItem onClick={() => { setConnectorsMenuAnchor(null); setTemplateDialogOpen(true); }}>
+                Add from template
+              </MenuItem>
+              <MenuItem onClick={() => { setConnectorsMenuAnchor(null); document.getElementById('connectors-import-file')?.click(); }} disabled={importConnectorsMutation.isLoading}>
+                Import
+              </MenuItem>
+              <MenuItem onClick={() => { setConnectorsMenuAnchor(null); handleExportConnectors(); }}>
+                Export all (YAML)
+              </MenuItem>
+              <MenuItem onClick={() => { setConnectorsMenuAnchor(null); setAddCategorySection('connectors'); setNewCategoryName(''); setAddCategoryOpen(true); }}>
+                Add category
+              </MenuItem>
+            </Menu>
             {connectorsLoading && (
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
                 <CircularProgress size={24} />
@@ -1240,10 +1691,59 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
                   const items = connectorsByCategory[cat] || [];
                   return (
                     <Box key={cat} sx={{ borderTop: 1, borderColor: 'divider' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', px: 1.5, py: 0.5, cursor: 'pointer', '&:hover': { bgcolor: 'action.hover' } }} onClick={() => toggleCategoryExpanded('connectors', cat)}>
-                        {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-                        <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
-                        <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', pr: 0.5 }}>
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            flex: 1,
+                            minWidth: 0,
+                            px: 1.5,
+                            py: 0.5,
+                            cursor: 'pointer',
+                            '&:hover': { bgcolor: 'action.hover' },
+                          }}
+                          onClick={() => toggleCategoryExpanded('connectors', cat)}
+                          onContextMenu={
+                            cat !== UNCATEGORIZED
+                              ? (e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setCategoryFolderMenu({
+                                    type: 'position',
+                                    mouseX: e.clientX + 2,
+                                    mouseY: e.clientY - 6,
+                                    sectionKey: 'connectors',
+                                    categoryName: cat,
+                                  });
+                                }
+                              : undefined
+                          }
+                        >
+                          {expanded ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
+                          <Typography variant="caption" fontWeight={500} sx={{ ml: 0.5 }}>{cat}</Typography>
+                          <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>({items.length})</Typography>
+                        </Box>
+                        {cat !== UNCATEGORIZED && (
+                          <Tooltip title="Category options">
+                            <IconButton
+                              size="small"
+                              aria-label="Category options"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCategoryFolderMenu({
+                                  type: 'anchor',
+                                  anchorEl: e.currentTarget,
+                                  sectionKey: 'connectors',
+                                  categoryName: cat,
+                                });
+                              }}
+                              sx={{ flexShrink: 0 }}
+                            >
+                              <MoreVert sx={{ fontSize: 18 }} />
+                            </IconButton>
+                          </Tooltip>
+                        )}
                       </Box>
                       <Collapse in={expanded}>
                         <Droppable droppableId={`connectors::${cat}`}>
@@ -1282,45 +1782,34 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
 
         {/* Lines section */}
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              px: 2,
-              py: 1,
-              cursor: 'pointer',
-              '&:hover': { bgcolor: 'action.hover' },
-            }}
-            onClick={() => setLinesOpen((o) => !o)}
-          >
-            <AfSectionHeaderTitle Icon={Group}>Lines</AfSectionHeaderTitle>
-            {linesOpen ? <ExpandLess fontSize="small" /> : <ExpandMore fontSize="small" />}
-          </Box>
+          <AfCollapsibleSectionHeader
+            Icon={Group}
+            title="Lines"
+            expanded={linesOpen}
+            onToggle={() => setLinesOpen((o) => !o)}
+            searchOpen={lineSearchOpen}
+            onSearchOpenChange={setLineSearchOpen}
+            searchValue={lineSearch}
+            onSearchValueChange={setLineSearch}
+            searchPlaceholder="Search lines…"
+            menuTrigger={<AfSectionMenuTrigger setMenuAnchor={setLinesMenuAnchor} />}
+          />
           <Collapse in={linesOpen}>
-            <Box sx={{ px: 2, pb: 2 }}>
-              <AfSectionSearchRow
-                searchOpen={lineSearchOpen}
-                onSearchOpenChange={setLineSearchOpen}
-                value={lineSearch}
-                onValueChange={setLineSearch}
-                placeholder="Search lines…"
-              >
-                <AfSectionMenuTrigger setMenuAnchor={setLinesMenuAnchor} />
-              </AfSectionSearchRow>
-              <Menu
-                anchorEl={linesMenuAnchor}
-                open={!!linesMenuAnchor}
-                onClose={() => setLinesMenuAnchor(null)}
-              >
-                <MenuItem onClick={() => { setLinesMenuAnchor(null); setQuickLineWizardOpen(true); }}>
-                  Quick line
-                </MenuItem>
-                <MenuItem onClick={() => { setLinesMenuAnchor(null); setCreateLineOpen(true); }}>
-                  New line
-                </MenuItem>
-              </Menu>
-            </Box>
+            <Menu
+              anchorEl={linesMenuAnchor}
+              open={!!linesMenuAnchor}
+              onClose={() => setLinesMenuAnchor(null)}
+            >
+              <MenuItem onClick={() => { setLinesMenuAnchor(null); setQuickLineWizardOpen(true); }}>
+                Quick line
+              </MenuItem>
+              <MenuItem onClick={() => { setLinesMenuAnchor(null); setCreateLineOpen(true); }}>
+                New line
+              </MenuItem>
+              <MenuItem onClick={() => { setLinesMenuAnchor(null); setLineFromTemplateOpen(true); }}>
+                From template…
+              </MenuItem>
+            </Menu>
             {linesLoading && (
               <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}>
                 <CircularProgress size={24} />
@@ -1379,6 +1868,16 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
           queryClient.invalidateQueries('agentFactoryLines');
           if (line?.id) navigate(`/agent-factory/line/${line.id}`);
           setQuickLineWizardOpen(false);
+        }}
+      />
+
+      <LineFromTemplateWizard
+        open={lineFromTemplateOpen}
+        onClose={() => setLineFromTemplateOpen(false)}
+        onSuccess={(line) => {
+          queryClient.invalidateQueries('agentFactoryLines');
+          if (line?.id) navigate(`/agent-factory/line/${line.id}`);
+          setLineFromTemplateOpen(false);
         }}
       />
 
@@ -1592,6 +2091,38 @@ export default function AgentListSidebar({ onOpenCreate, onCloseEntityTab }) {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <Menu
+        open={Boolean(categoryFolderMenu)}
+        onClose={() => setCategoryFolderMenu(null)}
+        anchorReference={categoryFolderMenu?.type === 'position' ? 'anchorPosition' : 'anchorEl'}
+        anchorEl={categoryFolderMenu?.type === 'anchor' ? categoryFolderMenu.anchorEl : null}
+        anchorPosition={
+          categoryFolderMenu?.type === 'position'
+            ? { top: categoryFolderMenu.mouseY, left: categoryFolderMenu.mouseX }
+            : undefined
+        }
+      >
+        <MenuItem
+          onClick={() => {
+            if (!categoryFolderMenu) return;
+            const { sectionKey, categoryName } = categoryFolderMenu;
+            setCategoryFolderMenu(null);
+            removeCategoryFolder(sectionKey, categoryName);
+          }}
+          disabled={deleteSidebarCategoryMutation.isLoading}
+        >
+          Remove category…
+        </MenuItem>
+      </Menu>
+
+      <ArtifactShareDialog
+        open={!!shareDialogTarget}
+        onClose={() => setShareDialogTarget(null)}
+        artifactType={shareDialogTarget?.artifactType || ''}
+        artifactId={shareDialogTarget?.artifactId || ''}
+        artifactName={shareDialogTarget?.artifactName || ''}
+      />
 
     </Box>
   );

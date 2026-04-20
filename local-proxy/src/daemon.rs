@@ -6,6 +6,7 @@ use crate::policy;
 use crate::protocol::{BackendToDaemon, DaemonToBackend};
 use crate::shared_state::{ConnectionStatus, DaemonCommand, InvocationRecord, SharedState};
 use futures_util::{SinkExt, StreamExt};
+use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -22,6 +23,68 @@ fn ws_url(config: &AppConfig) -> String {
         .trim_start_matches("https://")
         .trim_start_matches("http://");
     format!("{}://{}/api/ws/device", scheme, host)
+}
+
+fn resolve_paths_with_workspace_root(mut args: Value, workspace_root: Option<&str>) -> Value {
+    let Some(root) = workspace_root else {
+        return args;
+    };
+    let root_path = std::path::Path::new(root);
+    let Value::Object(ref mut map) = args else {
+        return args;
+    };
+
+    for key in ["path", "cwd"] {
+        let Some(v) = map.get(key).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+            continue;
+        };
+        let p = std::path::Path::new(&v);
+        if p.is_absolute() {
+            continue;
+        }
+        let joined = root_path.join(p);
+        if let Some(s) = joined.to_str() {
+            map.insert(key.to_string(), Value::String(s.to_string()));
+        }
+    }
+    args
+}
+
+async fn quick_file_count(root: &std::path::Path) -> u64 {
+    let mut count: u64 = 0;
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    let max = 50_000u64;
+    while let Some(p) = stack.pop() {
+        if count >= max {
+            break;
+        }
+        let mut rd = match tokio::fs::read_dir(&p).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        while let Ok(Some(e)) = rd.next_entry().await {
+            if count >= max {
+                break;
+            }
+            let name = e.file_name().to_string_lossy().into_owned();
+            if matches!(
+                name.as_str(),
+                ".git" | "node_modules" | "__pycache__" | ".venv" | "target" | "dist" | "build"
+            ) {
+                continue;
+            }
+            let meta = match e.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                stack.push(e.path());
+            } else if meta.is_file() {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 pub async fn run_daemon_loop(
@@ -88,7 +151,7 @@ pub async fn run_daemon_loop(
                 let capabilities: Vec<String> = registry
                     .names()
                     .into_iter()
-                    .filter(|n| policy::capability_enabled(&config, n))
+                    .filter(|n| policy::capability_offered(&config, n))
                     .collect();
 
                 let register_msg = DaemonToBackend::Register {
@@ -136,7 +199,7 @@ pub async fn run_daemon_loop(
                                         let caps: Vec<String> = registry
                                             .names()
                                             .into_iter()
-                                            .filter(|n| policy::capability_enabled(&st.config, n))
+                                            .filter(|n| policy::capability_offered(&st.config, n))
                                             .collect();
                                         (st.config.clone(), caps)
                                     };
@@ -177,7 +240,15 @@ pub async fn run_daemon_loop(
                                     let result_msg = match cap {
                                         Some(c) => {
                                             let state_clone = state.clone();
-                                            let exec = c.execute(args, &config);
+                                            let workspace_root = {
+                                                let st = state_clone.lock().unwrap();
+                                                st.active_workspace_root.clone()
+                                            };
+                                            let resolved_args = resolve_paths_with_workspace_root(
+                                                args,
+                                                workspace_root.as_deref(),
+                                            );
+                                            let exec = c.execute(resolved_args, &config);
                                             let out = exec.await;
                                             match out {
                                                 Ok(res) => {
@@ -222,6 +293,44 @@ pub async fn run_daemon_loop(
                                         error!("Failed to send result: {}", e);
                                         break;
                                     }
+                                }
+                                BackendToDaemon::SetWorkspace { request_id, workspace_root } => {
+                                    // Validate and set the active workspace root.
+                                    let root_path = std::path::Path::new(&workspace_root);
+                                    let canon = match root_path.canonicalize() {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            let err_msg = DaemonToBackend::Error {
+                                                request_id,
+                                                error: format!("Invalid workspace_root: {}", e),
+                                            };
+                                            let _ = write
+                                                .send(Message::Text(
+                                                    serde_json::to_string(&err_msg).unwrap(),
+                                                ))
+                                                .await;
+                                            continue;
+                                        }
+                                    };
+
+                                    let git_detected = canon.join(".git").exists();
+                                    let file_count = quick_file_count(&canon).await;
+
+                                    {
+                                        let mut st = state.lock().unwrap();
+                                        st.active_workspace_root =
+                                            canon.to_str().map(|s| s.to_string());
+                                    }
+
+                                    let msg = DaemonToBackend::WorkspaceSet {
+                                        request_id,
+                                        workspace_root: canon.to_string_lossy().into_owned(),
+                                        file_count,
+                                        git_detected,
+                                    };
+                                    let _ = write
+                                        .send(Message::Text(serde_json::to_string(&msg).unwrap()))
+                                        .await;
                                 }
                                 BackendToDaemon::Ping => {}
                             }

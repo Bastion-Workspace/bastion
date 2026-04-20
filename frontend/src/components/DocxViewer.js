@@ -11,6 +11,7 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import FindInDocumentBar from './FindInDocumentBar';
 import {
   Box,
   Paper,
@@ -24,20 +25,38 @@ import {
 } from '@mui/material';
 import {
   Description,
-  Download
+  Download,
+  Search as SearchIcon,
 } from '@mui/icons-material';
 import mammoth from 'mammoth';
 import DOMPurify from 'dompurify';
 import { useTheme } from '../contexts/ThemeContext';
 import { useImageLightbox } from './common/ImageLightbox';
 
-const DocxViewer = ({ documentId, filename }) => {
+const DocxViewer = ({ documentId, filename, onTextExtracted }) => {
   const [htmlContent, setHtmlContent] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const { darkMode } = useTheme();
   const contentRef = useRef(null);
+  const docxFindRootRef = useRef(null);
+  const viewerRootRef = useRef(null);
+  const [findOpen, setFindOpen] = useState(false);
   const { openLightbox } = useImageLightbox();
+
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const root = viewerRootRef.current;
+      const t = e.target;
+      if (!root || !(t instanceof Node) || !root.contains(t)) return;
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        setFindOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    return () => document.removeEventListener('keydown', onKeyDown, true);
+  }, []);
 
   // Fetch and convert DocX file
   useEffect(() => {
@@ -95,6 +114,17 @@ const DocxViewer = ({ documentId, filename }) => {
 
         setHtmlContent(sanitizedHtml);
 
+        // Plain text for agent / {editor} read-only context (parallel to HTML display)
+        try {
+          const raw = await mammoth.extractRawText({ arrayBuffer });
+          const plain = (raw && raw.value) ? String(raw.value) : '';
+          if (typeof onTextExtracted === 'function' && plain.trim()) {
+            onTextExtracted(plain);
+          }
+        } catch (rawErr) {
+          console.warn('DocX raw text extraction failed:', rawErr);
+        }
+
         // Log warnings if any
         if (result.messages && result.messages.length > 0) {
           console.warn('DocX conversion warnings:', result.messages);
@@ -110,7 +140,7 @@ const DocxViewer = ({ documentId, filename }) => {
     if (documentId) {
       fetchAndConvertDocx();
     }
-  }, [documentId]);
+  }, [documentId, onTextExtracted]);
 
   // Add click handlers to embedded images
   useEffect(() => {
@@ -167,11 +197,15 @@ const DocxViewer = ({ documentId, filename }) => {
 
   return (
     <Box
+      ref={viewerRootRef}
+      tabIndex={-1}
       sx={{
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
-        backgroundColor: darkMode ? '#121212' : '#f5f5f5'
+        backgroundColor: darkMode ? '#121212' : '#f5f5f5',
+        outline: 'none',
+        minHeight: 0,
       }}
     >
       {/* Toolbar */}
@@ -195,6 +229,16 @@ const DocxViewer = ({ documentId, filename }) => {
         </Stack>
 
         <Stack direction="row" spacing={1} alignItems="center">
+          <Tooltip title="Find in document (Ctrl+F)">
+            <IconButton
+              onClick={() => setFindOpen((o) => !o)}
+              size="small"
+              color={findOpen ? 'primary' : 'default'}
+              aria-label="Find in document"
+            >
+              <SearchIcon />
+            </IconButton>
+          </Tooltip>
           {/* Download */}
           <Tooltip title="Download DocX">
             <IconButton onClick={handleDownload} size="small" color="primary">
@@ -203,6 +247,15 @@ const DocxViewer = ({ documentId, filename }) => {
           </Tooltip>
         </Stack>
       </Paper>
+
+      {findOpen && (
+        <FindInDocumentBar
+          containerRef={docxFindRootRef}
+          open={findOpen}
+          onClose={() => setFindOpen(false)}
+          darkMode={darkMode}
+        />
+      )}
 
       {/* Content Viewer */}
       <Box
@@ -229,6 +282,7 @@ const DocxViewer = ({ documentId, filename }) => {
           </Box>
         ) : htmlContent ? (
           <Paper
+            ref={docxFindRootRef}
             elevation={3}
             sx={{
               maxWidth: '8.5in',

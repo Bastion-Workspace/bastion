@@ -2,7 +2,7 @@
 
 ## Tool Architecture Overview
 
-**BULLY!** Agents have access to two types of tools:
+Agents have access to two types of tools:
 
 1. **Backend gRPC Tools** (`orchestrator/tools/`) - Require backend services via gRPC
 2. **Pure Utility Functions** (`orchestrator/utils/`) - Stateless functions, no backend needed
@@ -574,7 +574,7 @@ If no ZIP code is found in the user's profile, the system will log a warning and
 ### Navigation Tools (tools-service, gRPC via BackendToolClient)
 **Location management and route planning**
 
-Navigation tools live in `tools-service/services/navigation_tools.py` and are exposed via gRPC. The LLM orchestrator calls them through `BackendToolClient` in `orchestrator/backend_tool_client.py`. The Navigation Agent uses the location_management and route_planning subgraphs, which call these methods.
+Navigation tools live in `tools-service/services/navigation_tools.py` and are exposed via gRPC. The LLM orchestrator calls them through `BackendToolClient` in `orchestrator/backend_tool_client.py` (same pattern as other backend tools—no separate LangGraph subgraph package in-repo).
 
 **Location operations:**
 - `create_location(user_id, name, address, latitude, longitude, notes, is_global)` - Create a saved location (address is geocoded by backend if needed)
@@ -623,7 +623,7 @@ saved = await client.save_route(user_id=user_id, name="Daily Commute", route_dat
 ```
 
 **Map visualization (Phase 1):**
-- Turn-by-turn directions are formatted as markdown by the route_planning subgraph
+- Turn-by-turn directions can be formatted as markdown in the agent response when the navigation tools return route data
 - A Google Maps URL is generated for the route (`https://www.google.com/maps/dir/?api=1&origin=...&destination=...`) for user follow-up
 
 **Error handling:** Tools return `{"success": False, "error": "..."}` for location not found, geocoding failures, OSRM errors, and permission issues.
@@ -793,30 +793,6 @@ from orchestrator.tools.enhancement_tools import expand_query_tool, search_conve
 
 expanded = await expand_query_tool("keyboard matrix circuit")
 cached = await search_conversation_cache_tool("What did we discuss about ESP32?", user_id)
-```
-
-### Project Content Management Tools (`orchestrator/tools/project_content_tools.py`)
-**Tools for intelligently managing project content across multiple files**
-
-- `save_or_update_project_content(result, project_plan_document_id, referenced_context, documents, user_id, metadata)` - Intelligently save/update content in appropriate files
-- `determine_content_target(response_text, frontmatter, referenced_context, documents)` - Determine which file and section to update based on content type
-- `propose_section_update(document_id, existing_content, section_name, new_content, user_id, ...)` - Propose an update to an existing section
-- `append_project_content(document_id, section_name, content, user_id, ...)` - Append new content to a project file
-- `create_new_project_file(file_suggestion, project_plan_document_id, initial_content, project_plan_frontmatter, user_id, metadata)` - Create a new project file based on user approval
-
-**Usage**:
-```python
-from orchestrator.tools.project_content_tools import save_or_update_project_content
-
-# Automatically save/update project content after generating response
-await save_or_update_project_content(
-    result=agent_response,
-    project_plan_document_id=project_plan_id,
-    referenced_context=referenced_files,
-    documents=search_results,
-    user_id=user_id,
-    metadata={"shared_memory": shared_memory, "active_editor": active_editor}
-)
 ```
 
 ### Reference File Loader (`orchestrator/tools/reference_file_loader.py`)
@@ -1030,45 +1006,8 @@ The system will:
 2. Parse its frontmatter
 3. Load `rules.md`, `style.md`, and character files (cascaded references)
 
-### Project Structure Management Tools (`orchestrator/tools/project_structure_tools.py`)
-**Tools for planning and creating project file structures**
-
-- `plan_project_structure(query, user_id, llm, project_type, default_folder)` - Use LLM to intelligently plan project structure, files, and organization
-- `execute_project_structure_plan(plan, query, user_id, project_type, project_category, project_plan_sections)` - Execute the project structure plan by creating files and folders
-
-**Note**: `execute_project_structure_plan` automatically generates frontmatter with proper relative paths (`./filename.md`) for use with `load_referenced_files`.
-
-**Usage**:
-```python
-from orchestrator.tools.project_structure_tools import (
-    plan_project_structure,
-    execute_project_structure_plan
-)
-
-# Plan project structure using LLM
-result = await plan_project_structure(
-    query="I need to create a new electronics project for an Allen organ control system",
-    user_id=user_id,
-    llm=llm_instance,
-    project_type="electronics",
-    default_folder="Projects"
-)
-
-if result.get("success"):
-    plan = result.get("plan")
-    
-    # Execute the plan to create files
-    execution_result = await execute_project_structure_plan(
-        plan=plan,
-        query=original_query,
-        user_id=user_id,
-        project_type="electronics",
-        project_category="electronics"
-    )
-```
-
 ### Org-Mode Tools (Backend)
-**BULLY! Tools for managing user's Org-mode inbox and searching reference files!**
+**Tools for managing the user's Org-mode inbox and searching reference files**
 
 - `search_org_files(query, tags, todo_states, limit)` - Search across all user's .org files
 - `list_org_todos(todo_states, tags, limit)` - List all TODO items from org files
@@ -1080,7 +1019,7 @@ if result.get("success"):
 - `org_inbox_set_state(line_index, state)` - Set TODO state
 
 ### Image & Messaging Tools (Backend)
-**BULLY! Tools for visual generation and messaging cavalry!**
+**Tools for visual generation and messaging**
 
 - `generate_image(prompt, size, format, num_images)` - Generate images via OpenRouter
 - `get_user_rooms(user_id, limit)` - Get list of chat rooms
@@ -1088,47 +1027,7 @@ if result.get("success"):
 
 ## Available Utilities by Category
 
-### Project Utilities (`orchestrator/utils/project_utils.py`)
-**Pure utility functions for project content generation**
-
-- `sanitize_filename(filename)` - Sanitize filename (preserves spaces, removes problematic chars)
-- `generate_filename_from_content(content, content_type)` - Generate filename from content
-- `generate_title_from_content(content, content_type)` - Generate title from content
-- `extract_description_from_content(content)` - Extract description (first sentence)
-
-**Usage**:
-```python
-from orchestrator.utils.project_utils import (
-    sanitize_filename,
-    generate_filename_from_content,
-    generate_title_from_content,
-    extract_description_from_content
-)
-
-# Sanitize filename (preserves spaces)
-safe_name = sanitize_filename("My Project - Component Spec.md")
-# Returns: "My Project - Component Spec.md"
-
-# Generate filename from content
-filename = generate_filename_from_content(
-    "The Keyboard Matrix circuit uses...",
-    "component"
-)
-# Returns: "Keyboard Matrix component.md"
-
-# Generate title
-title = generate_title_from_content(
-    "The Keyboard Matrix circuit uses...",
-    "component"
-)
-# Returns: "Keyboard Matrix - Component"
-
-# Extract description
-desc = extract_description_from_content(
-    "The keyboard scanning matrix uses a 8x8 grid. It connects..."
-)
-# Returns: "The keyboard scanning matrix uses a 8x8 grid."
-```
+Orchestrator-specific pure helpers live under `orchestrator/utils/` (e.g. `frontmatter_utils.py`). Prefer importing the concrete module you need.
 
 ## Tool Access Patterns
 
@@ -1136,20 +1035,9 @@ desc = extract_description_from_content(
 **Import tools directly from modules**:
 ```python
 from orchestrator.tools.document_tools import search_documents_structured
-from orchestrator.utils.project_utils import sanitize_filename
 
 # Use directly
 results = await search_documents_structured(query, user_id)
-safe_name = sanitize_filename(filename)
-```
-
-### For Backend Agents (LangGraph)
-**Use centralized tool registry**:
-```python
-from services.langgraph_tools.centralized_tool_registry import get_tool_registry
-
-tool_registry = await get_tool_registry()
-search_tool = tool_registry.get_tool_function("search_documents", AgentType.RESEARCH_AGENT)
 ```
 
 ## Tool Development Guidelines
@@ -1222,9 +1110,6 @@ async def create_user_file_tool(
 | File Creation | `tools/file_creation_tools.py` | gRPC | create file, create folder |
 | Web Search | `tools/web_tools.py` | gRPC | search web, crawl |
 | Query Enhancement | `tools/enhancement_tools.py` | gRPC | expand query, cache search |
-| Project Content Management | `tools/project_content_tools.py` | gRPC | save/update content, determine target, enrich metadata |
-| Project Structure Management | `tools/project_structure_tools.py` | gRPC | plan structure, execute plan, load referenced context |
-| Project Utilities | `utils/project_utils.py` | Pure | filename gen, sanitize |
 
 ## Best Practices
 

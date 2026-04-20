@@ -1,12 +1,9 @@
 /**
- * Frontmatter Parsing Utilities - Roosevelt's Shared Cavalry Tools
- * 
- * **BULLY!** Consistent frontmatter parsing across the application!
+ * Frontmatter parsing utilities for markdown documents.
  */
 
 /**
- * Parse YAML-like frontmatter from markdown text
- * **By George!** Extract metadata like a well-organized cavalry charge!
+ * Parse YAML-like frontmatter from markdown text.
  */
 export function parseFrontmatter(text) {
   try {
@@ -58,38 +55,7 @@ export function parseFrontmatter(text) {
   }
 }
 
-/**
- * Build frontmatter YAML block from data object
- * **BULLY!** Construct metadata like a well-drilled regiment!
- */
-export function buildFrontmatter(data) {
-  if (!data || typeof data !== 'object') return '';
-  
-  const lines = [];
-  for (const [key, value] of Object.entries(data)) {
-    if (value !== null && value !== undefined) {
-      lines.push(`${key}: ${value}`);
-    }
-  }
-  
-  return lines.length > 0 ? `---\n${lines.join('\n')}\n---\n` : '';
-}
-
-/**
- * Check if content has frontmatter
- * **By George!** Quick reconnaissance of document structure!
- */
-export function hasFrontmatter(text) {
-  if (!text || typeof text !== 'string') return false;
-  const trimmed = text.startsWith('\ufeff') ? text.slice(1) : text;
-  return trimmed.startsWith('---\n') && trimmed.indexOf('\n---', 4) !== -1;
-}
-
-/**
- * Extract just the frontmatter data without parsing the full structure
- * **BULLY!** Quick extraction for lightweight operations!
- */
-export function extractFrontmatterData(text) {
-  const parsed = parseFrontmatter(text);
-  return parsed.data || {};
+/** Markdown source for preview: body only, without leading YAML frontmatter when present. */
+export function markdownPreviewBody(text) {
+  return parseFrontmatter(text || '').body;
 }

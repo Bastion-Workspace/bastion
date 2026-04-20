@@ -182,6 +182,9 @@ class ApiServiceBase {
               if (retryResponse.status === 204 || retryResponse.status === 205) {
                 return null;
               }
+              if (config.responseType === 'arraybuffer') {
+                return await retryResponse.arrayBuffer();
+              }
               const result = await retryResponse.json();
               if (import.meta.env.DEV) {
                 console.log('🌐 API Success after refresh:', result);
@@ -220,6 +223,9 @@ class ApiServiceBase {
     }
     if (response.status === 204 || response.status === 205) {
       return null;
+    }
+    if (config.responseType === 'arraybuffer') {
+      return await response.arrayBuffer();
     }
     const result = await response.json();
     // Only log in development mode to reduce console noise

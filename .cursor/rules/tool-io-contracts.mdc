@@ -733,4 +733,4 @@ See also: [agent-response-contract.mdc](mdc:.cursor/rules/agent-response-contrac
 - Tool placement zones: [langgraph-tool-placement.mdc](mdc:.cursor/rules/langgraph-tool-placement.mdc)
 - Agent Factory tech guide (registry spec): [AGENT_FACTORY_TECHNICAL_GUIDE.md § 12](mdc:docs/AGENT_FACTORY_TECHNICAL_GUIDE.md)
 - Structured LLM outputs rule: [structured-llm-outputs.mdc](mdc:.cursor/rules/structured-llm-outputs.mdc)
-- Migration tracker: [dev-notes/TOOL_IO_CONTRACT_MIGRATION.md](mdc:dev-notes/TOOL_IO_CONTRACT_MIGRATION.md)
+- Legacy migration tracker `dev-notes/TOOL_IO_CONTRACT_MIGRATION.md` was removed; use [AGENT_FACTORY_TOOLS.md](mdc:docs/AGENT_FACTORY_TOOLS.md) and this rule file as the source of truth.

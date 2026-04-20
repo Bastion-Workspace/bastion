@@ -9,7 +9,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Set
 
-from config.settings import settings
+from ds_config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -8,6 +8,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from services.builtin_skill_definitions import BUILTIN_SKILL_DEFINITIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,9 @@ def _ensure_json_obj(val: Any, fallback: Any = None) -> Any:
 def _row_to_skill(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not row:
         return {}
+    ownership = row.get("ownership") or "owned"
+    if row.get("is_builtin"):
+        ownership = "builtin"
     return {
         "id": str(row["id"]),
         "user_id": row.get("user_id"),
@@ -40,19 +45,29 @@ def _row_to_skill(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "category": row.get("category"),
         "procedure": row.get("procedure") or "",
         "required_tools": list(row["required_tools"]) if row.get("required_tools") else [],
+        "required_connection_types": list(row["required_connection_types"])
+        if row.get("required_connection_types")
+        else [],
         "optional_tools": list(row["optional_tools"]) if row.get("optional_tools") else [],
         "inputs_schema": _ensure_json_obj(row.get("inputs_schema"), {}),
         "outputs_schema": _ensure_json_obj(row.get("outputs_schema"), {}),
         "examples": _ensure_json_obj(row.get("examples"), []),
         "tags": list(row["tags"]) if row.get("tags") else [],
         "is_builtin": row.get("is_builtin", False),
+        "is_core": row.get("is_core", False),
         "is_locked": row.get("is_locked", False),
         "version": row.get("version", 1),
         "parent_skill_id": str(row["parent_skill_id"]) if row.get("parent_skill_id") else None,
         "improvement_rationale": row.get("improvement_rationale"),
+        "depends_on": list(row["depends_on"]) if row.get("depends_on") else [],
+        "is_candidate": row.get("is_candidate", False),
+        "candidate_weight": row.get("candidate_weight", 0),
         "evidence_metadata": _ensure_json_obj(row.get("evidence_metadata"), {}),
         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
         "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+        "ownership": ownership,
+        "owner_username": row.get("owner_username"),
+        "owner_display_name": row.get("owner_display_name"),
     }
 
 
@@ -61,45 +76,121 @@ async def list_skills(
     category: Optional[str] = None,
     include_builtin: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Return user skills and optionally built-in skills, optionally filtered by category."""
+    """Return user skills, shared skills, and optionally built-in skills, optionally filtered by category."""
     from services.database_manager.database_helpers import fetch_all
+
+    _shared_clause = """
+        OR EXISTS (
+            SELECT 1 FROM agent_artifact_shares _sh
+            WHERE _sh.artifact_type = 'skill'
+              AND _sh.artifact_id = sk.id
+              AND _sh.shared_with_user_id = $1
+        )
+    """
+    _ownership_expr = """
+        CASE
+            WHEN sk.is_builtin = true THEN 'builtin'
+            WHEN sk.user_id = $1 THEN 'owned'
+            ELSE 'shared'
+        END AS ownership,
+        u_owner.username AS owner_username,
+        u_owner.display_name AS owner_display_name
+    """
+    _join = "LEFT JOIN users u_owner ON u_owner.user_id = sk.user_id"
 
     if include_builtin and category:
         rows = await fetch_all(
-            """
-            SELECT * FROM agent_skills
-            WHERE (user_id = $1 OR is_builtin = true)
-              AND (category = $2 OR category IS NULL AND $2 IS NULL)
-            ORDER BY is_builtin ASC, name ASC
+            f"""
+            SELECT sk.*, {_ownership_expr}
+            FROM agent_skills sk {_join}
+            WHERE (sk.user_id = $1 OR sk.is_builtin = true {_shared_clause})
+              AND (sk.category = $2 OR sk.category IS NULL AND $2 IS NULL)
+            ORDER BY sk.is_builtin ASC, sk.name ASC
             """,
             user_id,
             category,
         )
     elif include_builtin:
         rows = await fetch_all(
-            """
-            SELECT * FROM agent_skills
-            WHERE user_id = $1 OR is_builtin = true
-            ORDER BY is_builtin ASC, name ASC
+            f"""
+            SELECT sk.*, {_ownership_expr}
+            FROM agent_skills sk {_join}
+            WHERE sk.user_id = $1 OR sk.is_builtin = true {_shared_clause}
+            ORDER BY sk.is_builtin ASC, sk.name ASC
             """,
             user_id,
         )
     elif category:
         rows = await fetch_all(
-            """
-            SELECT * FROM agent_skills
-            WHERE user_id = $1 AND (category = $2 OR category IS NULL AND $2 IS NULL)
-            ORDER BY name ASC
+            f"""
+            SELECT sk.*, {_ownership_expr}
+            FROM agent_skills sk {_join}
+            WHERE (sk.user_id = $1 {_shared_clause})
+              AND (sk.category = $2 OR sk.category IS NULL AND $2 IS NULL)
+            ORDER BY sk.name ASC
             """,
             user_id,
             category,
         )
     else:
         rows = await fetch_all(
-            "SELECT * FROM agent_skills WHERE user_id = $1 ORDER BY name ASC",
+            f"""
+            SELECT sk.*, {_ownership_expr}
+            FROM agent_skills sk {_join}
+            WHERE sk.user_id = $1 {_shared_clause}
+            ORDER BY sk.name ASC
+            """,
             user_id,
         )
     return [_row_to_skill(r) for r in rows]
+
+
+def _row_to_skill_summary(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Lightweight skill representation for manifest/catalog (no procedure, schemas, or examples)."""
+    if not row:
+        return {}
+    return {
+        "id": str(row["id"]),
+        "slug": row.get("slug") or "",
+        "name": row.get("name") or "",
+        "description": row.get("description") or "",
+        "category": row.get("category") or "",
+        "tags": list(row["tags"]) if row.get("tags") else [],
+        "required_connection_types": list(row["required_connection_types"])
+        if row.get("required_connection_types")
+        else [],
+        "is_builtin": row.get("is_builtin", False),
+        "is_core": row.get("is_core", False),
+    }
+
+
+async def list_skill_summaries(
+    user_id: str,
+    include_builtin: bool = True,
+) -> List[Dict[str, Any]]:
+    """Return lightweight skill summaries (no procedure/schemas) for catalog/manifest injection."""
+    from services.database_manager.database_helpers import fetch_all
+
+    cols = "id, slug, name, description, category, tags, required_connection_types, is_builtin, is_core"
+    if include_builtin:
+        rows = await fetch_all(
+            f"""
+            SELECT {cols} FROM agent_skills
+            WHERE user_id = $1 OR is_builtin = true
+            ORDER BY is_builtin ASC, name ASC
+            """,
+            user_id,
+        )
+    else:
+        rows = await fetch_all(
+            f"""
+            SELECT {cols} FROM agent_skills
+            WHERE user_id = $1
+            ORDER BY name ASC
+            """,
+            user_id,
+        )
+    return [_row_to_skill_summary(r) for r in rows]
 
 
 async def get_skill(skill_id: str) -> Optional[Dict[str, Any]]:
@@ -156,6 +247,23 @@ def _is_valid_uuid(s: str) -> bool:
         return False
 
 
+async def get_skills_by_slugs(slugs: List[str], user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Batch fetch latest version of skills by slug. Prefer user's version if user_id given."""
+    if not slugs:
+        return []
+    results: List[Dict[str, Any]] = []
+    seen: set = set()
+    for slug in slugs:
+        s = (slug or "").strip().lower()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        skill = await get_skill_by_slug(s, user_id=user_id)
+        if skill:
+            results.append(skill)
+    return results
+
+
 async def get_skills_by_ids(skill_ids: List[str]) -> List[Dict[str, Any]]:
     """Batch fetch skills by IDs. Returns list in same order as requested; missing IDs omitted. Non-UUID entries are skipped."""
     from services.database_manager.database_helpers import fetch_all
@@ -194,6 +302,9 @@ async def create_skill(
     outputs_schema: Optional[Dict[str, Any]] = None,
     examples: Optional[List[Any]] = None,
     tags: Optional[List[str]] = None,
+    required_connection_types: Optional[List[str]] = None,
+    is_core: bool = False,
+    depends_on: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Create a user skill. Slug must be unique per user."""
     from services.database_manager.database_helpers import fetch_one
@@ -213,9 +324,9 @@ async def create_skill(
         """
         INSERT INTO agent_skills (
             user_id, name, slug, description, category, procedure,
-            required_tools, optional_tools, inputs_schema, outputs_schema,
-            examples, tags, is_builtin, is_locked, version
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, false, false, 1)
+            required_tools, required_connection_types, optional_tools, inputs_schema, outputs_schema,
+            examples, tags, is_builtin, is_locked, version, is_core, depends_on
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13, false, false, 1, $14, $15)
         RETURNING *
         """,
         user_id,
@@ -225,11 +336,14 @@ async def create_skill(
         (category or "")[:100] or None,
         (procedure or "").strip(),
         list(required_tools or []),
+        list(required_connection_types or []),
         list(optional_tools or []),
         json.dumps(inputs_schema or {}),
         json.dumps(outputs_schema or {}),
         json.dumps(examples or []),
         list(tags or []),
+        bool(is_core),
+        list(depends_on or []),
     )
     skill_dict = _row_to_skill(row)
     try:
@@ -255,8 +369,13 @@ async def update_skill(
     tags: Optional[List[str]] = None,
     improvement_rationale: Optional[str] = None,
     evidence_metadata: Optional[Dict[str, Any]] = None,
+    required_connection_types: Optional[List[str]] = None,
+    is_core: Optional[bool] = None,
+    depends_on: Optional[List[str]] = None,
+    as_candidate: bool = False,
 ) -> Dict[str, Any]:
-    """Update a user skill by creating a new version. Parent skill id set to previous version."""
+    """Update a user skill by creating a new version. Parent skill id set to previous version.
+    When as_candidate=True, creates a candidate version (A/B testing) without removing the old version's vector."""
     from services.database_manager.database_helpers import fetch_one, execute
 
     row = await fetch_one(
@@ -280,15 +399,23 @@ async def update_skill(
     tags_val = tags if tags is not None else list(row.get("tags") or [])
     improvement_rationale_val = improvement_rationale or None
     evidence_metadata_val = evidence_metadata if evidence_metadata is not None else _ensure_json_obj(row.get("evidence_metadata"), {})
+    required_connection_types_val = (
+        required_connection_types
+        if required_connection_types is not None
+        else list(row.get("required_connection_types") or [])
+    )
+    is_core_val = is_core if is_core is not None else row.get("is_core", False)
+    depends_on_val = depends_on if depends_on is not None else list(row.get("depends_on") or [])
 
     new_row = await fetch_one(
         """
         INSERT INTO agent_skills (
             user_id, name, slug, description, category, procedure,
-            required_tools, optional_tools, inputs_schema, outputs_schema,
+            required_tools, required_connection_types, optional_tools, inputs_schema, outputs_schema,
             examples, tags, is_builtin, is_locked, version, parent_skill_id,
-            improvement_rationale, evidence_metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11::jsonb, $12, false, false, $13, $14::uuid, $15, $16::jsonb)
+            improvement_rationale, evidence_metadata, is_core, depends_on,
+            is_candidate, candidate_weight
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13, false, false, $14, $15::uuid, $16, $17::jsonb, $18, $19, $20, $21)
         RETURNING *
         """,
         user_id,
@@ -298,6 +425,7 @@ async def update_skill(
         (category_val or "")[:100] or None,
         procedure_val,
         required_tools_val,
+        required_connection_types_val,
         optional_tools_val,
         json.dumps(inputs_schema_val),
         json.dumps(outputs_schema_val),
@@ -307,11 +435,16 @@ async def update_skill(
         prev_id,
         improvement_rationale_val,
         json.dumps(evidence_metadata_val),
+        bool(is_core_val),
+        depends_on_val,
+        bool(as_candidate),
+        10 if as_candidate else 0,
     )
     new_skill = _row_to_skill(new_row)
     try:
         from services.skill_vector_service import embed_skill, remove_skill_vector
-        await remove_skill_vector(prev_id)
+        if not as_candidate:
+            await remove_skill_vector(prev_id)
         await embed_skill(new_skill)
     except Exception as e:
         logger.warning("skill vector update failed: %s", e)
@@ -332,6 +465,190 @@ async def delete_skill(skill_id: str, user_id: str) -> None:
         "DELETE FROM agent_skills WHERE id = $1::uuid AND user_id = $2 AND NOT is_builtin",
         skill_id,
         user_id,
+    )
+
+
+async def get_candidate_for_slug(slug: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Return the candidate version of a skill (if any) for a given slug."""
+    from services.database_manager.database_helpers import fetch_one
+    row = await fetch_one(
+        """
+        SELECT * FROM agent_skills
+        WHERE slug = $1 AND (user_id = $2 OR is_builtin = true)
+          AND is_candidate = true
+        ORDER BY version DESC
+        LIMIT 1
+        """,
+        slug, user_id,
+    )
+    return _row_to_skill(row) if row else None
+
+
+async def promote_candidate(candidate_id: str, user_id: str) -> Dict[str, Any]:
+    """Promote a candidate to active: set is_candidate=false, remove old active version's vector."""
+    from services.database_manager.database_helpers import fetch_one, execute
+
+    candidate = await fetch_one(
+        """
+        SELECT * FROM agent_skills
+        WHERE id = $1::uuid AND user_id = $2 AND is_candidate = true
+        """,
+        candidate_id, user_id,
+    )
+    if not candidate:
+        raise ValueError(f"No candidate found with id '{candidate_id}'")
+
+    slug = candidate["slug"]
+    active = await fetch_one(
+        """
+        SELECT * FROM agent_skills
+        WHERE slug = $1 AND user_id = $2 AND is_candidate = false
+        ORDER BY version DESC LIMIT 1
+        """,
+        slug, user_id,
+    )
+
+    await execute(
+        "UPDATE agent_skills SET is_candidate = false, candidate_weight = 0 WHERE id = $1::uuid",
+        str(candidate["id"]),
+    )
+
+    if active:
+        try:
+            from services.skill_vector_service import remove_skill_vector
+            await remove_skill_vector(str(active["id"]))
+        except Exception as e:
+            logger.warning("remove_skill_vector during promotion failed: %s", e)
+
+    return _row_to_skill(await fetch_one(
+        "SELECT * FROM agent_skills WHERE id = $1::uuid", str(candidate["id"])
+    ))
+
+
+async def reject_candidate(candidate_id: str, user_id: str) -> None:
+    """Reject a candidate: delete it and its vector."""
+    from services.database_manager.database_helpers import fetch_one, execute
+
+    candidate = await fetch_one(
+        """
+        SELECT id FROM agent_skills
+        WHERE id = $1::uuid AND user_id = $2 AND is_candidate = true
+        """,
+        candidate_id, user_id,
+    )
+    if not candidate:
+        raise ValueError(f"No candidate found with id '{candidate_id}'")
+
+    cid = str(candidate["id"])
+    try:
+        from services.skill_vector_service import remove_skill_vector
+        await remove_skill_vector(cid)
+    except Exception as e:
+        logger.warning("remove_skill_vector during rejection failed: %s", e)
+
+    await execute("DELETE FROM agent_skills WHERE id = $1::uuid", cid)
+
+
+async def set_candidate_weight(candidate_id: str, weight: int, user_id: str) -> Dict[str, Any]:
+    """Adjust candidate traffic split (0-100)."""
+    from services.database_manager.database_helpers import fetch_one, execute
+
+    weight = max(0, min(100, weight))
+    candidate = await fetch_one(
+        """
+        SELECT * FROM agent_skills
+        WHERE id = $1::uuid AND user_id = $2 AND is_candidate = true
+        """,
+        candidate_id, user_id,
+    )
+    if not candidate:
+        raise ValueError(f"No candidate found with id '{candidate_id}'")
+
+    await execute(
+        "UPDATE agent_skills SET candidate_weight = $1 WHERE id = $2::uuid",
+        weight, str(candidate["id"]),
+    )
+    return _row_to_skill(await fetch_one(
+        "SELECT * FROM agent_skills WHERE id = $1::uuid", str(candidate["id"])
+    ))
+
+
+async def list_promotion_recommendations(
+    status: str = "pending",
+    limit: int = 50,
+) -> List[Dict[str, Any]]:
+    """Return skill promotion/demotion recommendations filtered by status."""
+    from services.database_manager.database_helpers import fetch_all
+
+    rows = await fetch_all(
+        """
+        SELECT r.*, a.name AS skill_name
+        FROM skill_promotion_recommendations r
+        LEFT JOIN agent_skills a ON a.id = r.skill_id
+        WHERE r.status = $1
+        ORDER BY r.created_at DESC
+        LIMIT $2
+        """,
+        status, limit,
+    )
+    out = []
+    for r in rows or []:
+        item = dict(r)
+        for k in ("created_at", "resolved_at"):
+            if item.get(k):
+                item[k] = item[k].isoformat()
+        if isinstance(item.get("evidence"), str):
+            import json as _json
+            try:
+                item["evidence"] = _json.loads(item["evidence"])
+            except Exception:
+                pass
+        out.append(item)
+    return out
+
+
+async def apply_recommendation(rec_id: int, user_id: str) -> Dict[str, Any]:
+    """Apply a pending recommendation (promote or demote the skill)."""
+    from services.database_manager.database_helpers import fetch_one, execute
+
+    rec = await fetch_one(
+        "SELECT * FROM skill_promotion_recommendations WHERE id = $1 AND status = 'pending'",
+        rec_id,
+    )
+    if not rec:
+        raise ValueError(f"Recommendation {rec_id} not found or already resolved")
+
+    skill_id = str(rec["skill_id"])
+    action = rec["action"]
+    new_is_core = action == "promote"
+
+    await execute(
+        "UPDATE agent_skills SET is_core = $1 WHERE id = $2::uuid",
+        new_is_core, skill_id,
+    )
+    await execute(
+        "UPDATE skill_promotion_recommendations SET status = 'applied', resolved_at = NOW() WHERE id = $1",
+        rec_id,
+    )
+
+    skill = await fetch_one("SELECT * FROM agent_skills WHERE id = $1::uuid", skill_id)
+    return _row_to_skill(skill) if skill else {"id": skill_id, "is_core": new_is_core}
+
+
+async def dismiss_recommendation(rec_id: int) -> None:
+    """Dismiss a pending recommendation without applying it."""
+    from services.database_manager.database_helpers import fetch_one, execute
+
+    rec = await fetch_one(
+        "SELECT id FROM skill_promotion_recommendations WHERE id = $1 AND status = 'pending'",
+        rec_id,
+    )
+    if not rec:
+        raise ValueError(f"Recommendation {rec_id} not found or already resolved")
+
+    await execute(
+        "UPDATE skill_promotion_recommendations SET status = 'dismissed', resolved_at = NOW() WHERE id = $1",
+        rec_id,
     )
 
 
@@ -399,6 +716,7 @@ async def revert_skill_to_version(skill_id: str, version_id: str, user_id: str) 
         user_id,
         procedure=target.get("procedure"),
         required_tools=list(target.get("required_tools") or []),
+        required_connection_types=list(target.get("required_connection_types") or []),
         optional_tools=list(target.get("optional_tools") or []),
         name=target.get("name"),
         description=target.get("description"),
@@ -409,461 +727,6 @@ async def revert_skill_to_version(skill_id: str, version_id: str, user_id: str) 
         tags=list(target.get("tags") or []),
         improvement_rationale="Reverted to version " + str(target.get("version")),
     )
-
-
-def _get_builtin_skills() -> List[Dict[str, Any]]:
-    """Return the full list of built-in skill definitions (Python dict skills + retained procedural)."""
-    return [
-        # ---- Automation (20) ----
-        {
-            "slug": "weather",
-            "name": "Weather",
-            "description": "Get current weather conditions, forecasts, and historical weather data for any location.",
-            "category": "automation",
-            "procedure": (
-                "You are a weather assistant. ALWAYS use get_weather to fetch real weather data - never make up weather information. "
-                "Parameters: location (required - city name, ZIP code, or place name like 'New York' or '14532'), "
-                "data_types (comma-separated: 'current' for now, 'forecast' for upcoming days, 'history' for past weather; default 'current'), "
-                "date_str (for history only: 'YYYY-MM-DD' for a specific day, 'YYYY-MM' for monthly average, or 'YYYY-MM to YYYY-MM' for date ranges up to 24 months). "
-                "If the user does not specify a location, ask them for one before calling the tool. "
-                "Present temperatures in both Fahrenheit and Celsius. Include practical recommendations based on conditions."
-            ),
-            "required_tools": ["get_weather"],
-            "optional_tools": [],
-            "tags": ["weather", "temperature", "forecast", "rain", "snow", "sunny", "cloudy"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "email",
-            "name": "Email",
-            "description": "Read, search, send, and manage email. Reply threading, attachments, and connection routing.",
-            "category": "email",
-            "procedure": (
-                "You are an email assistant. Use the available tools for all operations. "
-                "list_emails: folder (inbox/sent/drafts), top (limit), unread_only (bool). search_emails: query, top. "
-                "get_email_thread: conversation_id from a previous list. get_email_statistics: inbox/unread counts. "
-                "For sending: ALWAYS call send_email with confirmed=False first to show the draft; only call with confirmed=True after the user explicitly approves (e.g. yes, send, approve). "
-                "For replying: ALWAYS call reply_to_email with confirmed=False first to show the draft; only call with confirmed=True after the user approves. "
-                "send_email: to (comma-separated), subject, body, confirmed (bool, default False). "
-                "reply_to_email: message_id from thread/list, body, reply_all (bool), confirmed (bool, default False). "
-                "When replying, use the same connection_id as the source message. Attachments require separate upload steps before sending. "
-                "For new threads, use the connection_id from the agent's configured email binding. Include clear subject lines and avoid stripping reply threading headers."
-            ),
-            "required_tools": ["list_emails", "search_emails", "get_email_thread", "get_email_statistics", "send_email", "reply_to_email"],
-            "optional_tools": [],
-            "tags": ["email", "inbox", "mail", "send email", "reply", "read my email", "check email", "search email", "unread", "draft", "compose"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "calendar",
-            "name": "Calendar",
-            "description": "List calendars, view events in a date range, get event details, create/update/delete events (O365).",
-            "category": "calendar",
-            "procedure": (
-                "You are a calendar assistant. Use the available tools for all operations. "
-                "list_calendars: list user's calendars. get_calendar_events: start_datetime and end_datetime required (ISO 8601); optional calendar_id, top. "
-                "get_event_by_id: event_id from a previous list. "
-                "For create_event: ALWAYS call with confirmed=False first to show the draft; only call with confirmed=True after the user explicitly approves. "
-                "For update_event and delete_event: ALWAYS call with confirmed=False first; only call with confirmed=True after the user approves. "
-                "create_event: subject, start_datetime, end_datetime (ISO 8601), confirmed (bool), optional location, body, attendee_emails (comma-separated), is_all_day. "
-                "update_event: event_id, confirmed (bool), optional subject, start_datetime, end_datetime, location, body, attendee_emails, is_all_day. delete_event: event_id, confirmed (bool)."
-            ),
-            "required_tools": ["list_calendars", "get_calendar_events", "get_event_by_id", "create_event", "update_event", "delete_event"],
-            "optional_tools": [],
-            "tags": ["calendar", "schedule", "meeting", "event", "appointment", "create event", "delete event", "update event"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "contacts",
-            "name": "Contacts",
-            "description": "List, get, create, update, and delete contacts (O365 and org-mode unified when include_org).",
-            "category": "contacts",
-            "procedure": (
-                "You are a contacts assistant. Use the available tools for all operations. "
-                "list_contacts: list contacts (O365 + org-mode when include_org=True); optional folder_id, top. "
-                "get_contact_by_id: get a single contact by contact_id (from a previous list). "
-                "create_contact: display_name, given_name, surname, optional company_name, job_title, birthday, notes, email_addresses, phone_numbers. "
-                "update_contact: contact_id (required), optional display_name, given_name, surname, company_name, job_title, birthday, notes. delete_contact: contact_id (required)."
-            ),
-            "required_tools": ["list_contacts", "get_contact_by_id", "create_contact", "update_contact", "delete_contact"],
-            "optional_tools": [],
-            "tags": ["contact", "contacts", "people", "address book", "look up contact", "create contact", "add contact", "update contact", "delete contact"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "navigation",
-            "name": "Navigation",
-            "description": "Manage saved locations, plan routes, and get directions.",
-            "category": "navigation",
-            "procedure": (
-                "You are a navigation assistant. Multi-step flow: (1) list_locations to see saved locations and their IDs; create_location to add a new one (name, address). "
-                "(2) compute_route with from_location_id and to_location_id (from list_locations), or use coordinates string. profile: driving, walking, cycling. "
-                "save_route to save a computed route (pass waypoints, geometry, steps, distance_meters, duration_seconds from compute_route). "
-                "list_saved_routes to list saved routes. delete_location to remove a location by location_id."
-            ),
-            "required_tools": ["create_location", "list_locations", "delete_location", "compute_route", "save_route", "list_saved_routes"],
-            "optional_tools": [],
-            "tags": ["create location", "list locations", "saved locations", "delete location", "route", "directions", "navigate", "map", "turn by turn", "save route"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "rss",
-            "name": "RSS",
-            "description": "Subscribe to and manage RSS feeds; list feeds and fetch recent items from them. Not for finding articles on the web (use research).",
-            "category": "rss",
-            "procedure": (
-                "You are an RSS feed assistant. add_rss_feed: feed_url (required), feed_name, category, is_global (bool). "
-                "list_rss_feeds: scope 'user' or 'global'. refresh_rss_feed: feed_name or feed_id from list to trigger refresh."
-            ),
-            "required_tools": ["add_rss_feed", "list_rss_feeds", "refresh_rss_feed"],
-            "optional_tools": [],
-            "tags": ["rss", "feed", "feeds", "subscribe", "news", "articles"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "org-capture",
-            "name": "Org Capture",
-            "description": "Quick capture items to the org-mode inbox. Use for 'capture to inbox', 'add to inbox', 'quick capture'.",
-            "category": "org",
-            "procedure": (
-                "You help capture items to the user's org-mode inbox. "
-                "ALWAYS call add_org_inbox_item to add each item - never just describe what you would do. "
-                "\n\n"
-                "SCOPE: Only capture items requested in the CURRENT user message (the last message). "
-                "You may see conversation history for context — it helps interpret references like 'capture that' "
-                "or 'add what you just said'. NEVER independently scan history for additional items to capture. "
-                "If the current message does not ask to capture something, do not capture anything from history."
-                "\n\n"
-                "PRIOR STEP CONTENT: When the user message includes 'Content to capture (from a previous step):', "
-                "that content is the main text to capture. Use it as the inbox item: use a concise title/summary for the heading "
-                "if the content is long, and put the full content or a clear summary in the text parameter. "
-                "Do not capture only the 'User request' line; capture the prior-step content. "
-                "\n\n"
-                "ORG FORMATTING: When capturing research, articles, or multi-paragraph content, convert the content to org-mode "
-                "syntax so the inbox stays neat and readable. Output a single text value: first line = short title (used as the "
-                "headline), then a blank line, then the body in org format. Conversion rules: "
-                "Markdown ## H2 → ** H2, ### H3 → *** H3 (subheadings in body). "
-                "Markdown **bold** → *bold*, *italic* → /italic/. "
-                "Tables: use org table form | col1 | col2 | with a |-| separator row after the header. "
-                "Lists: use - for unordered, 1. 2. for ordered; indent continuation lines with 2 spaces. "
-                "Links: use [[url][description]] or plain URL. "
-                "Keep paragraphs separated by blank lines; do not leave raw markdown (e.g. ## or **) in the captured text. "
-                "\n\n"
-                "CALL RULES: Call add_org_inbox_item exactly once per distinct inbox entry. "
-                "One user-provided item → one tool call. Multiple items in one message → one tool call per item. "
-                "Never call the tool multiple times with the same text for the same logical entry. "
-                "\n\n"
-                "REPLY RULES: After calling the tool, reply with a short confirmation only (e.g. 'Added X to your inbox.'). "
-                "Do not mention deduplication, 'you provided it twice', 'I captured it just once', or how many times the tool was called. "
-                "\n\n"
-                "KIND: Use kind='todo' for explicit tasks or short action items (e.g. 'remind me to X', '* TODO X'). "
-                "Use kind='note' for longer-form notes, ideas, or when the user says 'note' or 'capture this' without implying a task. "
-                "Use kind='checkbox' for '- [ ] Item' or checklist items; kind='event' for calendar; kind='contact' for contacts. "
-                "Org headlines: '* TODO Title' or '* Title' (note); extract title as text. Strip prefixes like 'capture to inbox:', 'add to inbox:'. "
-                "\n\n"
-                "TAGS: If the user asks to tag the item (e.g. 'tag with work', 'with tag urgent', 'add tag @project'), "
-                "pass those tags in the tags parameter (comma-separated string or list). Never put :tag: in the title text — "
-                "always use the tags parameter so tags are stored correctly and not duplicated. "
-                "\n\n"
-                "Parameters: text (required; title only, no tags or priority in the text), kind ('todo', 'note', 'checkbox', 'event', 'contact'; default 'todo'), "
-                "schedule (optional org timestamp like '<2026-02-05 Thu>'), tags (optional; use when user specifies tags)."
-            ),
-            "required_tools": ["add_org_inbox_item"],
-            "optional_tools": [],
-            "tags": ["capture", "inbox", "capture to inbox", "add to inbox", "quick capture"],
-            "evidence_metadata": {"engine_type": "automation", "stateless": True},
-        },
-        {
-            "slug": "org-journal",
-            "name": "Org Journal",
-            "description": "Read and search the user's org-mode journal (diary entries). Use for 'what did I write', 'read my journal', 'search journal'.",
-            "category": "org",
-            "procedure": (
-                "You help the user read and search their org-mode journal. ALWAYS call the appropriate tool - never make up journal content. "
-                "get_journal_entry for a single date (date='today' or YYYY-MM-DD). get_journal_entries for a date range with full content. "
-                "list_journal_entries for counts or metadata only. search_journal for keyword search. "
-                "When the user does not specify a date, use 'today' for get_journal_entry. For ranges, use start_date and end_date in YYYY-MM-DD format."
-            ),
-            "required_tools": ["get_journal_entry", "get_journal_entries", "list_journal_entries", "search_journal"],
-            "optional_tools": [],
-            "tags": ["journal", "journal entry", "read my journal", "search my journal", "diary", "journal entries"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "agent-run-history",
-            "name": "Agent Run History",
-            "description": "Report on this agent's or another agent's recent run history, status, and performance.",
-            "category": "agent",
-            "procedure": (
-                "You report on agent execution (run) history. ALWAYS call get_agent_run_history to fetch real data - never make up run counts, dates, or statuses. "
-                "When the user asks about 'your' history or 'this agent', omit agent_profile_id so the tool returns this agent's runs. "
-                "Parameters: agent_profile_id (omit for self), limit (default 10, max 50), status ('completed', 'failed', 'running' to filter), start_date and end_date (YYYY-MM-DD). "
-                "Summarize patterns: e.g. 'You have run 47 times this month with a 94% success rate.' Use status='failed' when the user asks about failures."
-            ),
-            "required_tools": ["get_agent_run_history"],
-            "optional_tools": [],
-            "tags": ["last run", "run history", "when did you last run", "agent log", "execution history", "recent runs"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "save-user-fact",
-            "name": "Save User Fact",
-            "description": "Save a fact about the user to their persistent fact store for future conversations.",
-            "category": "memory",
-            "procedure": (
-                "You help users store facts about themselves for future conversations. When the user shares information they want remembered "
-                "(e.g. 'remember I'm a vegetarian', 'save that I prefer Python'), ALWAYS call save_user_fact to store it. "
-                "fact_key: short snake_case label (e.g. job_title, preferred_language, dietary_restriction, city). value: the actual information. "
-                "category: 'work', 'preferences', 'personal', or 'general'. After saving, confirm naturally (e.g. 'Got it, I'll remember that [value].')."
-            ),
-            "required_tools": ["save_user_fact"],
-            "optional_tools": [],
-            "tags": ["remember", "save fact", "note that", "store preference", "remember that", "save that"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "org-content",
-            "name": "Org Content",
-            "description": "Read-only queries about org-mode files, todos, and tasks.",
-            "category": "org",
-            "procedure": (
-                "You help the user query their org-mode file. The full file content is included in the user message between === FILE ... === and === END FILE === markers. READ IT CAREFULLY before answering. "
-                "You have tools: parse_org_structure to get the full outline; search_org_headings with search_term to find headings or content; get_org_statistics for counts and completion rate. "
-                "When the user says 'today', use the YYYY-MM-DD date from the datetime context as search_term. "
-                "Base your answers ONLY on the actual file content provided. Never fabricate data. Read-only; do not modify the file."
-            ),
-            "required_tools": ["parse_org_structure", "search_org_headings", "get_org_statistics"],
-            "optional_tools": [],
-            "tags": ["org", "org-mode", "todo", "task", "project", "show", "list", "find", "tagged", "tag", "org file"],
-            "evidence_metadata": {"engine_type": "automation", "requires_editor": True, "editor_types": ["org"], "editor_preference": "require", "context_boost": 15},
-        },
-        {
-            "slug": "task-management",
-            "name": "Task Management",
-            "description": "List, create, update, toggle, delete, or archive todos across any org file or inbox.",
-            "category": "org",
-            "procedure": (
-                "You help manage the user's todos across all org files. Org-mode todos: Put tags in the tags parameter (or add_tags/remove_tags for update_todo). "
-                "Put priority in the priority parameter (A, B, or C). Do not embed :tag: or [#A] in the title text. "
-                "Apply TODO updates (state, tags, priority) with update_todo or toggle_todo only - do not use propose_document_edit or patch_file; the todo API applies directly. Effort and category are not settable via these tools. "
-                "list_todos: scope 'all', 'inbox', or a file path; optional states, tags, query, limit. Results include file_path, line_number (0-based), heading, todo_state, tags, scheduled, deadline. "
-                "create_todo: text = title only (required). Use tags parameter for tags and priority parameter for A/B/C. Optional: body, deadline, scheduled, file_path, insert_after_line_number. "
-                "update_todo: file_path, line_number (0-based). Optional: new_state, new_text, add_tags/remove_tags, priority, scheduled, deadline, new_body. "
-                "toggle_todo: file_path, line_number to toggle TODO <-> DONE. delete_todo: file_path, line_number. "
-                "archive_done: single entry (file_path, line_number) or bulk (omit line_number, provide file_path or omit for inbox). Use list_todos first when the user asks to see or manage todos."
-            ),
-            "required_tools": ["list_todos", "create_todo", "update_todo", "toggle_todo", "delete_todo", "archive_done"],
-            "optional_tools": [],
-            "tags": ["todo", "todos", "task", "tasks", "list my todos", "create todo", "add todo", "mark done", "toggle todo", "update todo", "delete todo", "archive done", "inbox", "org"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "image-generation",
-            "name": "Image Generation",
-            "description": "Generate images from text descriptions. Use for 'draw', 'create image', 'make a picture'.",
-            "category": "image",
-            "procedure": (
-                "You are an image generation assistant. Use generate_image: prompt (required), size (e.g. 1024x1024, 512x512), num_images (1-4), optional negative_prompt, model. "
-                "Set check_reference_first=True to return a reference image from the user's library if one exists for the prompt/object name before generating."
-            ),
-            "required_tools": ["generate_image"],
-            "optional_tools": [],
-            "tags": ["create image", "generate image", "draw", "visualize", "image", "picture", "photo", "create a picture", "make an image"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "reference",
-            "name": "Reference",
-            "description": "Query and analyze reference documents, journals, and logs; run calculations and visualizations.",
-            "category": "reference",
-            "procedure": (
-                "You help with reference documents, journals, and logs. The file content is included in the user message between === FILE ... === and === END FILE === markers. "
-                "Read it carefully and base your answers on the actual content. You can run calculations (calculate_expression, evaluate_formula), convert units (convert_units), and create visualizations (create_chart). "
-                "Use the available tools. Never fabricate data that is not in the file."
-            ),
-            "required_tools": ["calculate_expression", "evaluate_formula", "convert_units", "create_chart"],
-            "optional_tools": [],
-            "tags": ["journal", "log", "record", "tracking", "diary", "graph", "chart", "visualize", "calculate", "calculation", "compute", "math", "formula", "convert units", "unit conversion"],
-            "evidence_metadata": {"engine_type": "automation", "requires_editor": True, "editor_types": ["reference"], "context_boost": 20},
-        },
-        {
-            "slug": "document-creator",
-            "name": "Document Creator",
-            "description": "Create new files or documents in a folder (not for editing the current open document; use editor skills for that).",
-            "category": "documents",
-            "procedure": (
-                "You are a document creation assistant. You create files and folders in the user's document tree. "
-                "WORKFLOW: (1) If the user specifies a folder by name, call list_folders first to find its folder_id or verify it exists. "
-                "(2) If the folder does not exist, call create_user_folder to create it first. "
-                "(3) Call create_typed_document with content, filename, and folder_path (e.g. 'Reference'). "
-                "PARAMETERS for create_typed_document: filename (with extension), content (document body - clean markdown with a title heading), folder_path (auto-create if missing). "
-                "If context from a prior step is available (prior_step_*_response keys), use it as the document body. If the user doesn't specify a filename, generate a descriptive one from the content."
-            ),
-            "required_tools": ["list_folders", "create_typed_document", "create_user_folder"],
-            "optional_tools": [],
-            "tags": ["create file", "create document", "save to folder", "new file", "put in folder", "reference file", "save as"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        # ---- Research / Search ----
-        {
-            "slug": "document-search",
-            "name": "Document Search",
-            "description": "Search the knowledge base: documents, segments, and conversation cache. Use for factual lookups, 'do we have', and collection searches (comics, photos).",
-            "category": "search",
-            "procedure": (
-                "Comprehensive local document and image search. Start with limit=10, scope=my_docs. If fewer than 3 relevant results, call enhance_query and retry with the enhanced query. "
-                "Check search_conversation_cache for prior context on this topic. Escalate to team_docs or global scope if needed. "
-                "Use file_types filter when the user asks for a specific document type. Covers factual lookups ('what is X'), 'do we have' queries, and image/comic/photo collection searches."
-            ),
-            "required_tools": ["search_documents", "enhance_query", "search_conversation_cache"],
-            "optional_tools": [],
-            "tags": ["search", "find", "document", "look up", "do we have", "find me", "in our collection", "comic", "photo", "image", "knowledge base"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "web-search",
-            "name": "Web Search",
-            "description": "Multi-query web search with synthesis and source citation. Use for online lookups, fact-checking, and research.",
-            "category": "search",
-            "procedure": (
-                "Multi-query web search with synthesis and source citation. Formulate 2-4 focused queries covering different aspects of the topic. "
-                "Use search_web with limit 10-15. For key results needing full content, use crawl_web_content with exact URLs. "
-                "Synthesize findings across all queries and crawled pages; cite sources (title, URL). Note when sources disagree or when information is uncertain or missing. "
-                "Run follow-up searches to fill gaps. For fact-checking and verification, cross-reference multiple sources."
-            ),
-            "required_tools": ["search_web", "crawl_web_content"],
-            "optional_tools": [],
-            "tags": ["web search", "search the web", "look up online", "find online", "research", "fact check", "verify", "what is", "how to", "investigate"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "security-analysis",
-            "name": "Security Analysis",
-            "description": "Security and vulnerability scanning for URLs and websites.",
-            "category": "research",
-            "procedure": (
-                "Security and vulnerability scanning for URLs and websites. Use search_web to find security-related information and crawl_web_content to fetch and analyze page content, headers, and exposed resources. "
-                "Report on security headers, exposed files, and common vulnerability indicators. Do not perform active exploitation."
-            ),
-            "required_tools": ["search_web", "crawl_web_content"],
-            "optional_tools": [],
-            "tags": ["security scan", "vulnerability scan", "security analysis", "check for vulnerabilities", "security audit", "pen test", "security assessment", "website security"],
-            "evidence_metadata": {"engine_type": "research"},
-        },
-        {
-            "slug": "web-crawl",
-            "name": "Web Crawl",
-            "description": "Crawl websites to extract content: single URL or deeper site ingestion with multiple pages.",
-            "category": "research",
-            "procedure": (
-                "Crawl websites to extract content. For a single URL, call crawl_web_content directly. "
-                "For deeper site ingestion (multiple pages, recursive crawl), use search_web to discover additional page URLs within the domain, then crawl each. "
-                "Use for one-off content extraction, site scraping, or downloading website content for processing or storage."
-            ),
-            "required_tools": ["crawl_web_content"],
-            "optional_tools": ["search_web"],
-            "tags": ["crawl", "crawl site", "crawl website", "ingest", "scrape", "download website", "url", "domain crawl", "capture website"],
-            "evidence_metadata": {"engine_type": "research"},
-        },
-        # ---- Knowledge graph ----
-        {
-            "slug": "knowledge-graph-traversal",
-            "name": "Knowledge Graph Traversal",
-            "description": "Entity search and relationship patterns",
-            "category": "knowledge-graph",
-            "procedure": (
-                "Search entities by name or type first. Use relationship depth to expand connections. "
-                "When resolving identities across sources, prefer entity_search then follow relationship types. "
-                "Limit relationship depth to 2 unless the user asks for deep traversal."
-            ),
-            "required_tools": ["search_knowledge_graph", "get_entity_details"],
-            "optional_tools": [],
-            "tags": [],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        # ---- Data workspace ----
-        {
-            "slug": "data-workspace",
-            "name": "Data Workspace",
-            "description": "Query and inspect tabular data in Data Workspaces. List workspaces, get schema, run SQL or natural language queries.",
-            "category": "data",
-            "procedure": (
-                "You help the user query tabular data in Data Workspaces. "
-                "First call list_data_workspaces to see available workspaces and their IDs. "
-                "Use get_workspace_schema with workspace_id to inspect tables and columns. "
-                "Then use query_data_workspace with workspace_id and either a SQL query or a natural language question. "
-                "Present results in a clear table or summary. For large result sets, summarize or paginate."
-            ),
-            "required_tools": ["query_data_workspace", "list_data_workspaces", "get_workspace_schema"],
-            "optional_tools": [],
-            "tags": ["data workspace", "query data", "sql", "tabular", "dataset", "spreadsheet", "table data"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "notifications",
-            "name": "Notifications",
-            "description": "Send messages to configured channels: in-app, Telegram, Discord, or email.",
-            "category": "messaging",
-            "procedure": (
-                "You help send notifications to the user or their configured channels. "
-                "Use send_channel_message: provide channel_id or channel type (e.g. in_app, telegram, discord), subject (optional), and body. "
-                "Confirm with the user before sending if the request is ambiguous. After sending, confirm delivery briefly."
-            ),
-            "required_tools": ["send_channel_message"],
-            "optional_tools": [],
-            "tags": ["notify", "notification", "send message", "alert", "telegram", "discord", "in-app message"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "file-management",
-            "name": "File Management",
-            "description": "Create files and folders, and patch or append to existing files. Use for saving outputs and organizing content.",
-            "category": "documents",
-            "procedure": (
-                "You help create and organize files. list_folders to see folder structure. create_user_folder to create a folder. "
-                "create_typed_document: use for new documents with a filename, content, and folder_path (creates folder if missing). "
-                "create_user_file: use for raw files (e.g. plain text, CSV) with filename, content, and folder_path. "
-                "patch_file: apply a text patch to an existing file (use when the user wants to edit or replace a section). append_to_file: add content to the end of a file. "
-                "Always confirm the target path or folder with the user when it is ambiguous."
-            ),
-            "required_tools": ["create_typed_document", "create_user_file", "create_user_folder", "list_folders", "patch_file", "append_to_file"],
-            "optional_tools": [],
-            "tags": ["create file", "create folder", "save file", "append to file", "patch file", "file management", "organize files"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "browser-automation",
-            "name": "Browser Automation",
-            "description": "Control a browser: navigate, click, fill forms, extract content, take screenshots.",
-            "category": "automation",
-            "procedure": (
-                "You help automate browser tasks. browser_navigate: open a URL. browser_click: click an element (selector or coordinates). "
-                "browser_fill: fill form fields by selector. browser_extract: extract text or attributes from the page. browser_screenshot: capture a screenshot. "
-                "Use browser_inspect when you need to discover selectors or page structure. For multi-step flows, navigate first, then click or fill as needed. "
-                "Confirm destructive or high-impact actions with the user when appropriate."
-            ),
-            "required_tools": ["browser_navigate", "browser_click", "browser_fill", "browser_extract", "browser_screenshot"],
-            "optional_tools": [],
-            "tags": ["browser", "automation", "navigate", "click", "fill form", "screenshot", "scrape", "extract content"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-        {
-            "slug": "chart-visualization",
-            "name": "Chart Visualization",
-            "description": "Create charts (bar, line, pie, scatter) from data. Use for visualizing numbers or comparisons.",
-            "category": "reference",
-            "procedure": (
-                "You help create charts from data. Use create_chart with chart_type (bar, line, pie, scatter), title, and data. "
-                "Data format: provide series and values (e.g. labels and numbers). Specify axis labels and units when relevant. "
-                "Choose chart_type by task: bar for categories, line for trends over time, pie for proportions, scatter for correlations. "
-                "Return the chart image or embed code to the user."
-            ),
-            "required_tools": ["create_chart"],
-            "optional_tools": [],
-            "tags": ["chart", "graph", "visualize", "bar chart", "line chart", "pie chart", "scatter", "plot", "visualization"],
-            "evidence_metadata": {"engine_type": "automation"},
-        },
-    ]
 
 
 async def seed_builtin_skills() -> None:
@@ -877,9 +740,7 @@ async def seed_builtin_skills() -> None:
         "dictionary",
         "entertainment",
         "image-description",
-        "agent-factory-builder",
         "fiction-editing",
-        "outline-editing",
         "nonfiction-outline-editing",
         "character-development",
         "rules-editing",
@@ -905,7 +766,7 @@ async def seed_builtin_skills() -> None:
             slug,
         )
 
-    builtins = _get_builtin_skills()
+    builtins = BUILTIN_SKILL_DEFINITIONS
     for s in builtins:
         existing = await fetch_one(
             "SELECT id, procedure FROM agent_skills WHERE slug = $1 AND is_builtin = true",
@@ -913,12 +774,17 @@ async def seed_builtin_skills() -> None:
         )
         tags = s.get("tags") or []
         evidence_metadata = s.get("evidence_metadata") or {}
+        req_conn = list(s.get("required_connection_types") or [])
+        is_core = s.get("is_core", True)
+        depends_on = list(s.get("depends_on") or [])
         if existing:
             await execute(
                 """
                 UPDATE agent_skills SET
                     name = $2, description = $3, category = $4, procedure = $5,
-                    required_tools = $6, optional_tools = $7, tags = $8, evidence_metadata = $9::jsonb, updated_at = NOW()
+                    required_tools = $6, required_connection_types = $7, optional_tools = $8,
+                    tags = $9, evidence_metadata = $10::jsonb, is_core = $11,
+                    depends_on = $12, updated_at = NOW()
                 WHERE id = $1
                 """,
                 existing["id"],
@@ -927,9 +793,12 @@ async def seed_builtin_skills() -> None:
                 s["category"],
                 s["procedure"],
                 s.get("required_tools", []),
+                req_conn,
                 s.get("optional_tools", []),
                 tags,
                 json.dumps(evidence_metadata),
+                is_core,
+                depends_on,
             )
             logger.debug("Updated built-in skill: %s", s["slug"])
         else:
@@ -937,8 +806,9 @@ async def seed_builtin_skills() -> None:
                 """
                 INSERT INTO agent_skills (
                     user_id, name, slug, description, category, procedure,
-                    required_tools, optional_tools, tags, evidence_metadata, is_builtin, is_locked, version
-                ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, true, true, 1)
+                    required_tools, required_connection_types, optional_tools, tags,
+                    evidence_metadata, is_builtin, is_locked, version, is_core, depends_on
+                ) VALUES (NULL, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, true, true, 1, $11, $12)
                 """,
                 s["name"],
                 s["slug"],
@@ -946,8 +816,127 @@ async def seed_builtin_skills() -> None:
                 s["category"],
                 s["procedure"],
                 s.get("required_tools", []),
+                req_conn,
                 s.get("optional_tools", []),
                 tags,
                 json.dumps(evidence_metadata),
+                is_core,
+                depends_on,
             )
             logger.info("Seeded built-in skill: %s", s["slug"])
+
+
+# ---------------------------------------------------------------------------
+# Skill execution metrics
+# ---------------------------------------------------------------------------
+
+
+async def record_skill_execution_events(
+    events: List[Dict[str, Any]],
+    user_id: str,
+    agent_profile_id: Optional[str] = None,
+) -> int:
+    """Batch-insert skill execution events. Returns count of rows inserted."""
+    from utils.shared_db_pool import execute, fetch_one
+
+    if not events:
+        return 0
+    inserted = 0
+    for ev in events:
+        skill_id = (ev.get("skill_id") or "").strip()
+        skill_slug = (ev.get("skill_slug") or "").strip()
+        if not skill_id or not skill_slug:
+            continue
+        exists = await fetch_one(
+            "SELECT 1 FROM agent_skills WHERE id = $1::uuid",
+            skill_id,
+        )
+        if not exists:
+            continue
+        try:
+            await execute(
+                """
+                INSERT INTO skill_execution_events
+                    (skill_id, skill_slug, agent_profile_id, step_name,
+                     user_id, discovery_method, tool_calls_made, success, skill_version)
+                VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7, $8, $9)
+                """,
+                skill_id,
+                skill_slug,
+                agent_profile_id if agent_profile_id else None,
+                ev.get("step_name") or "",
+                user_id,
+                ev.get("discovery_method") or "explicit",
+                ev.get("tool_calls_made") or 0,
+                ev.get("success"),
+                ev.get("skill_version") or 1,
+            )
+            inserted += 1
+        except Exception as exc:
+            logger.debug("Skipping skill execution event for %s: %s", skill_slug, exc)
+    return inserted
+
+
+async def get_skill_metrics(skill_id: str) -> Dict[str, Any]:
+    """Return aggregated metrics for a single skill from the materialized view."""
+    from utils.shared_db_pool import fetch_one
+
+    row = await fetch_one(
+        "SELECT * FROM skill_usage_stats WHERE skill_id = $1::uuid",
+        skill_id,
+    )
+    if not row:
+        return {
+            "skill_id": skill_id,
+            "total_uses": 0, "unique_users": 0, "unique_agents": 0,
+            "success_rate": None, "avg_execution_ms": None,
+            "last_used_at": None, "uses_last_7d": 0, "uses_last_30d": 0,
+        }
+    return {
+        "skill_id": str(row["skill_id"]),
+        "skill_slug": row.get("skill_slug") or "",
+        "total_uses": row.get("total_uses") or 0,
+        "unique_users": row.get("unique_users") or 0,
+        "unique_agents": row.get("unique_agents") or 0,
+        "success_rate": float(row["success_rate"]) if row.get("success_rate") is not None else None,
+        "avg_execution_ms": float(row["avg_execution_ms"]) if row.get("avg_execution_ms") is not None else None,
+        "last_used_at": row["last_used_at"].isoformat() if row.get("last_used_at") else None,
+        "uses_last_7d": row.get("uses_last_7d") or 0,
+        "uses_last_30d": row.get("uses_last_30d") or 0,
+    }
+
+
+async def get_skills_metrics_summary(limit: int = 20) -> Dict[str, Any]:
+    """Return top-used and lowest-success-rate skills from the materialized view."""
+    from utils.shared_db_pool import fetch_all
+
+    top_used = await fetch_all(
+        "SELECT * FROM skill_usage_stats ORDER BY total_uses DESC LIMIT $1",
+        limit,
+    )
+    low_success = await fetch_all(
+        """
+        SELECT * FROM skill_usage_stats
+        WHERE total_uses >= 5
+        ORDER BY success_rate ASC NULLS LAST
+        LIMIT $1
+        """,
+        limit,
+    )
+    def _row_to_stat(row):
+        return {
+            "skill_id": str(row["skill_id"]),
+            "skill_slug": row.get("skill_slug") or "",
+            "total_uses": row.get("total_uses") or 0,
+            "unique_users": row.get("unique_users") or 0,
+            "unique_agents": row.get("unique_agents") or 0,
+            "success_rate": float(row["success_rate"]) if row.get("success_rate") is not None else None,
+            "avg_execution_ms": float(row["avg_execution_ms"]) if row.get("avg_execution_ms") is not None else None,
+            "last_used_at": row["last_used_at"].isoformat() if row.get("last_used_at") else None,
+            "uses_last_7d": row.get("uses_last_7d") or 0,
+            "uses_last_30d": row.get("uses_last_30d") or 0,
+        }
+    return {
+        "top_used": [_row_to_stat(r) for r in (top_used or [])],
+        "low_success_rate": [_row_to_stat(r) for r in (low_success or [])],
+    }

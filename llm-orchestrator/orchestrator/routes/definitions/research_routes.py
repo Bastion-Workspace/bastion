@@ -12,7 +12,7 @@ RESEARCH_ROUTES = [
         name="research",
         description=(
             "Factual and exploratory questions using Agent Factory tools: local document search, "
-            "web search, query enhancement, conversation cache, segments, crawl, and image search. "
+            "web search, query enhancement, segments, crawl, and image search. "
             "Use for how-to and what-is questions, and for 'find me' / 'show me' queries about stored content."
         ),
         engine=EngineType.CUSTOM_AGENT,
@@ -37,7 +37,6 @@ RESEARCH_ROUTES = [
             "search_documents_tool",
             "search_web_tool",
             "enhance_query_tool",
-            "search_conversation_cache_tool",
             "search_segments_across_documents_tool",
             "crawl_web_content_tool",
             "get_document_content_tool",
@@ -48,7 +47,6 @@ RESEARCH_ROUTES = [
             "search_documents_tool": "search_documents",
             "search_web_tool": "search_web",
             "enhance_query_tool": "enhance_query",
-            "search_conversation_cache_tool": "search_conversation_cache",
             "search_segments_across_documents_tool": "search_segments_across_documents",
             "crawl_web_content_tool": "crawl_web_content",
             "get_document_content_tool": "get_document_content",

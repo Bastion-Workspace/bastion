@@ -236,7 +236,7 @@ class CodingAssistantTool:
                 model = await settings_service.get_llm_model()
                 if not model:
                     model = "anthropic/claude-3.5-sonnet"  # Emergency fallback
-            except:
+            except Exception:
                 model = "anthropic/claude-3.5-sonnet"  # Emergency fallback
             
             # Import datetime context utility
@@ -411,7 +411,7 @@ def main():
     """
     Main function for: {input_data.description}
     """
-    # TODO: Implement your logic here
+    # Add your implementation here
     print("Hello, World!")
     
     return True
@@ -427,7 +427,7 @@ function main() {{
     /**
      * Main function for: {input_data.description}
      */
-    // TODO: Implement your logic here
+    // Add your implementation here
     console.log("Hello, World!");
     
     return true;
@@ -449,16 +449,16 @@ public class Main {{
      * Main method for: {input_data.description}
      */
     public static void main(String[] args) {{
-        // TODO: Implement your logic here
+        // Add your implementation here
         System.out.println("Hello, World!");
     }}
 }}'''
             
             else:
-                code = f"// {input_data.description}\n// TODO: Implement solution"
+                code = f"// {input_data.description}\n// Implement solution"
         
         else:
-            code = f"// {input_data.task_type.value} template\n// TODO: Implement {input_data.description}"
+            code = f"// {input_data.task_type.value} template\n// Implement: {input_data.description}"
         
         solution = CodeSolution(
             code=code,

@@ -1,5 +1,5 @@
 """
-Substack Models - Roosevelt's Long-Form Article Writing Structures
+Pydantic models for Substack-style long-form articles
 
 Structured request/response for the Substack agent producing
 long-form markdown articles suitable for blog posts and Substack publications.

@@ -33,6 +33,7 @@ import {
   Edit,
   LibraryMusic,
   Headphones,
+  LiveTv,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
@@ -124,12 +125,13 @@ const MediaSettingsTab = () => {
   const refreshMutation = useMutation(
     (serviceType) => apiService.music.refreshCache(serviceType),
     {
-      onSuccess: (data) => {
+      onSuccess: (data, st) => {
         queryClient.invalidateQueries('mediaSources');
         queryClient.invalidateQueries('musicConfig');
+        const pl = st === 'audiobookshelf' ? 'podcasts' : 'playlists';
         setTestResult({
           success: true,
-          message: `Cache refreshed: ${data.albums} albums, ${data.artists} artists, ${data.playlists} ${serviceType === 'audiobookshelf' ? 'podcasts' : 'playlists'}, ${data.tracks} tracks`,
+          message: `Cache refreshed: ${data.albums} albums, ${data.artists} artists, ${data.playlists} ${pl}, ${data.tracks} tracks`,
         });
       },
       onError: (error) => {
@@ -196,13 +198,25 @@ const MediaSettingsTab = () => {
         setTestResult({ success: false, message: 'Please enter server URL' });
         return;
       }
-      // For Audiobookshelf, password is the API token, username is not used
       saveMutation.mutate({
         server_url: serverUrl,
-        username: 'api', // Placeholder, not used
+        username: 'api',
         password: password,
-        auth_type: 'token', // Not used but required
+        auth_type: 'token',
         service_type: 'audiobookshelf',
+        service_name: serviceName || undefined,
+      });
+    } else if (serviceType === 'emby') {
+      if (!serverUrl || !username || !password) {
+        setTestResult({ success: false, message: 'Please enter server URL, username, and password' });
+        return;
+      }
+      saveMutation.mutate({
+        server_url: serverUrl,
+        username,
+        password,
+        auth_type: 'password',
+        service_type: 'emby',
         service_name: serviceName || undefined,
       });
     } else {
@@ -257,9 +271,30 @@ const MediaSettingsTab = () => {
         {
           onSuccess: () => {
             setTestingServiceType('audiobookshelf');
-            // Clear any previous test result before starting new test
             setTestResult(null);
             testMutation.mutate('audiobookshelf');
+          },
+        }
+      );
+    } else if (testType === 'emby') {
+      if (!serverUrl || !username || !password) {
+        setTestResult({ success: false, message: 'Please fill in all fields before testing' });
+        return;
+      }
+      saveMutation.mutate(
+        {
+          server_url: serverUrl,
+          username,
+          password,
+          auth_type: 'password',
+          service_type: 'emby',
+          service_name: serviceName || undefined,
+        },
+        {
+          onSuccess: () => {
+            setTestingServiceType('emby');
+            setTestResult(null);
+            testMutation.mutate('emby');
           },
         }
       );
@@ -268,7 +303,6 @@ const MediaSettingsTab = () => {
         setTestResult({ success: false, message: 'Please fill in all fields before testing' });
         return;
       }
-      // Save first, then test
       saveMutation.mutate(
         {
           server_url: serverUrl,
@@ -281,7 +315,6 @@ const MediaSettingsTab = () => {
         {
           onSuccess: () => {
             setTestingServiceType('subsonic');
-            // Clear any previous test result before starting new test
             setTestResult(null);
             testMutation.mutate('subsonic');
           },
@@ -308,11 +341,14 @@ const MediaSettingsTab = () => {
   };
 
   const getServiceIcon = (type) => {
-    return type === 'audiobookshelf' ? <Headphones /> : <LibraryMusic />;
+    if (type === 'audiobookshelf') return <Headphones />;
+    if (type === 'emby') return <LiveTv />;
+    return <LibraryMusic />;
   };
 
   const getServiceLabel = (type) => {
     if (type === 'audiobookshelf') return 'Audiobookshelf';
+    if (type === 'emby') return 'Emby';
     return 'SubSonic';
   };
 
@@ -373,7 +409,13 @@ const MediaSettingsTab = () => {
                       <Chip
                         label={getServiceLabel(source.service_type)}
                         size="small"
-                        color={source.service_type === 'audiobookshelf' ? 'primary' : 'default'}
+                        color={
+                          source.service_type === 'audiobookshelf'
+                            ? 'primary'
+                            : source.service_type === 'emby'
+                            ? 'secondary'
+                            : 'default'
+                        }
                         sx={{ mt: 0.5 }}
                       />
                     </Box>
@@ -400,9 +442,11 @@ const MediaSettingsTab = () => {
                 <Typography variant="body2" color="text.secondary" gutterBottom>
                   Server: {source.server_url}
                 </Typography>
-                <Typography variant="body2" color="text.secondary" gutterBottom>
-                  Username: {source.username}
-                </Typography>
+                {source.service_type !== 'audiobookshelf' && (
+                  <Typography variant="body2" color="text.secondary" gutterBottom>
+                    Username: {source.username}
+                  </Typography>
+                )}
 
                 <Box display="flex" gap={2} mt={2} flexWrap="wrap">
                   <Button
@@ -474,9 +518,12 @@ const MediaSettingsTab = () => {
                 <Select
                   value={serviceType}
                   onChange={(e) => {
-                    setServiceType(e.target.value);
-                    if (e.target.value === 'audiobookshelf') {
+                    const v = e.target.value;
+                    setServiceType(v);
+                    if (v === 'audiobookshelf') {
                       setAuthType('token');
+                    } else if (v === 'emby') {
+                      setAuthType('password');
                     }
                   }}
                   label="Service Type"
@@ -484,6 +531,7 @@ const MediaSettingsTab = () => {
                 >
                   <MenuItem value="subsonic">SubSonic (Music)</MenuItem>
                   <MenuItem value="audiobookshelf">Audiobookshelf (Audiobooks & Podcasts)</MenuItem>
+                  <MenuItem value="emby">Emby (Video & Music)</MenuItem>
                 </Select>
               </FormControl>
             </Grid>
@@ -494,7 +542,13 @@ const MediaSettingsTab = () => {
                 label="Service Name (Optional)"
                 value={serviceName}
                 onChange={(e) => setServiceName(e.target.value)}
-                placeholder={serviceType === 'audiobookshelf' ? 'My Audiobookshelf' : 'My Music Server'}
+                placeholder={
+                  serviceType === 'audiobookshelf'
+                    ? 'My Audiobookshelf'
+                    : serviceType === 'emby'
+                    ? 'My Emby'
+                    : 'My Music Server'
+                }
                 helperText="A friendly name to identify this source"
               />
             </Grid>
@@ -505,7 +559,13 @@ const MediaSettingsTab = () => {
                 label="Server URL"
                 value={serverUrl}
                 onChange={(e) => setServerUrl(e.target.value)}
-                placeholder={serviceType === 'audiobookshelf' ? 'https://audiobookshelf.example.com' : 'https://music.example.com'}
+                placeholder={
+                  serviceType === 'audiobookshelf'
+                    ? 'https://audiobookshelf.example.com'
+                    : serviceType === 'emby'
+                    ? 'http://emby.local:8096'
+                    : 'https://music.example.com'
+                }
                 helperText={`Full URL to your ${getServiceLabel(serviceType)} server`}
               />
             </Grid>
@@ -521,6 +581,27 @@ const MediaSettingsTab = () => {
                   helperText="Your Audiobookshelf API token (found in Settings → Users)"
                 />
               </Grid>
+            ) : serviceType === 'emby' ? (
+              <>
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    label="Username"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                  />
+                </Grid>
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    type="password"
+                    label="Password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    helperText="Emby user password (AuthenticateByName)"
+                  />
+                </Grid>
+              </>
             ) : (
               <>
                 <Grid item xs={12} sm={6}>

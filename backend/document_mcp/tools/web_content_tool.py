@@ -287,7 +287,7 @@ class WebContentTool:
                                 fetch_time=time.time() - start_time,
                                 status_code=response.status_code
                             )
-                        except:
+                        except Exception:
                             pass
                     
                     elif "text/plain" in content_type:

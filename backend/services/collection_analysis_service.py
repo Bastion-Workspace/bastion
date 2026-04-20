@@ -26,22 +26,26 @@ logger = logging.getLogger(__name__)
 class CollectionAnalysisService:
     """Service for analyzing large document collections"""
     
-    def __init__(self, chat_service=None):
+    def __init__(self, chat_service=None, shared_kg_service=None):
         self.chat_service = chat_service
         self.embedding_manager = None
         self.kg_service = None
-    
+        self._shared_kg_service = shared_kg_service
+
     async def initialize(self):
         """Initialize collection analysis service"""
         logger.info("🔧 Initializing Collection Analysis Service...")
-        
+
         # Initialize embedding service wrapper
         self.embedding_manager = await get_embedding_service()
-        
-        # Initialize knowledge graph service
-        self.kg_service = KnowledgeGraphService()
-        await self.kg_service.initialize()
-        
+
+        if self._shared_kg_service is not None:
+            self.kg_service = self._shared_kg_service
+            logger.info("Using shared knowledge graph service for collection analysis")
+        else:
+            self.kg_service = KnowledgeGraphService()
+            await self.kg_service.initialize()
+
         logger.info("✅ Collection Analysis Service initialized")
     
     async def analyze_document_collection(
@@ -264,7 +268,7 @@ class CollectionAnalysisService:
             if field in metadata:
                 try:
                     return datetime.fromisoformat(str(metadata[field]).replace('Z', '+00:00'))
-                except:
+                except Exception:
                     continue
         
         # Try to extract from filename or content

@@ -4,6 +4,7 @@ import html2pdf from 'html2pdf.js';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
 import { markdownToPlainText } from '../utils/chatUtils';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
+import { devLog } from '../utils/devConsole';
 
 class ExportService {
   // PDF dimensions and layout constants (US Letter)
@@ -44,7 +45,7 @@ class ExportService {
    * Enhanced PDF export with selectable text using markdown parsing
    */
   _exportAsPDFEnhanced = async (message) => {
-    console.log('🔧 Enhanced PDF: Using text-based PDF generation for selectable content...');
+    devLog('🔧 Enhanced PDF: Using text-based PDF generation for selectable content...');
 
     try {
       return await this._exportAsPDFTextBased(message);
@@ -63,7 +64,7 @@ class ExportService {
    * Text-based PDF generation using jsPDF text methods for selectable content
    */
   _exportAsPDFTextBased = async (message) => {
-    console.log('📝 Text PDF: Creating selectable text PDF...');
+    devLog('📝 Text PDF: Creating selectable text PDF...');
 
     // Create PDF with US Letter dimensions
     const pdf = new jsPDF({
@@ -227,10 +228,10 @@ class ExportService {
     const timestamp = new Date(message.timestamp).toISOString().split('T')[0];
     const filename = `chat-message-${timestamp}.pdf`;
 
-    console.log('💾 Text PDF: Saving selectable text PDF...');
+    devLog('💾 Text PDF: Saving selectable text PDF...');
     pdf.save(filename);
 
-    console.log('✅ Text PDF: Export completed successfully!');
+    devLog('✅ Text PDF: Export completed successfully!');
     return { success: true, filename };
   };
 
@@ -642,7 +643,7 @@ class ExportService {
    * Fallback method using html2pdf.js
    */
   _exportAsPDFHtml2Pdf = async (message) => {
-    console.log('🔧 html2pdf.js Fallback: Using html2pdf for image-based PDF...');
+    devLog('🔧 html2pdf.js Fallback: Using html2pdf for image-based PDF...');
 
     // Create HTML content
     const htmlContent = this._createPDFHtmlContent(message);
@@ -667,12 +668,12 @@ class ExportService {
       pagebreak: { mode: ['avoid-all', 'css', 'legacy'] }
     };
 
-    console.log('🔧 html2pdf.js: Generating PDF...');
+    devLog('🔧 html2pdf.js: Generating PDF...');
 
     // Generate PDF using html2pdf.js
     await html2pdf().set(options).from(htmlContent).save();
 
-    console.log('✅ html2pdf.js: Export completed successfully!');
+    devLog('✅ html2pdf.js: Export completed successfully!');
     return {
       success: true,
       filename: `chat-message-${new Date(message.timestamp).toISOString().split('T')[0]}.pdf`
@@ -793,7 +794,7 @@ class ExportService {
    * Canvas-based fallback method for when jsPDF html() fails
    */
   _exportAsPDFCanvasFallback = async (message) => {
-    console.log('🔧 Canvas Fallback: Using html2canvas method...');
+    devLog('🔧 Canvas Fallback: Using html2canvas method...');
 
     // Create temporary HTML element for rendering
     const tempDiv = document.createElement('div');
@@ -846,23 +847,23 @@ class ExportService {
     }
 
     // Add to DOM temporarily
-    console.log('🔧 Enhanced PDF: Adding to DOM...');
+    devLog('🔧 Enhanced PDF: Adding to DOM...');
     document.body.appendChild(tempDiv);
-    console.log('🔧 Enhanced PDF: DOM element added, processing links...');
+    devLog('🔧 Enhanced PDF: DOM element added, processing links...');
 
     try {
       // Process links for PDF annotations
       const links = this._processLinksForPDF(tempDiv);
-      console.log('🔧 Enhanced PDF: Links processed, calculating dimensions...');
+      devLog('🔧 Enhanced PDF: Links processed, calculating dimensions...');
 
       // Calculate how many pages we need
       const contentHeightPx = tempDiv.offsetHeight;
       const pagesNeeded = Math.ceil(contentHeightPx / ExportService.PAGE_HEIGHT_PX);
       const totalCanvasHeight = Math.min(contentHeightPx, ExportService.PAGE_HEIGHT_PX * pagesNeeded);
-      console.log(`🔧 Enhanced PDF: Content height: ${contentHeightPx}px, Pages needed: ${pagesNeeded}, Canvas height: ${totalCanvasHeight}px`);
+      devLog(`🔧 Enhanced PDF: Content height: ${contentHeightPx}px, Pages needed: ${pagesNeeded}, Canvas height: ${totalCanvasHeight}px`);
 
       // Use html2canvas to render the HTML as canvas with proper scaling
-      console.log('🔧 Canvas PDF: Starting html2canvas...');
+      devLog('🔧 Canvas PDF: Starting html2canvas...');
 
       const canvas = await html2canvas(tempDiv, {
         scale: 1.0, // Use 1:1 scaling to prevent corruption
@@ -882,12 +883,12 @@ class ExportService {
         logging: false // Reduce console noise
       });
 
-      console.log('✅ Enhanced PDF: html2canvas completed successfully');
-      console.log(`📐 Canvas dimensions: ${canvas.width}x${canvas.height}`);
+      devLog('✅ Enhanced PDF: html2canvas completed successfully');
+      devLog(`📐 Canvas dimensions: ${canvas.width}x${canvas.height}`);
 
       // Remove temp element
       document.body.removeChild(tempDiv);
-      console.log('🗑️ Canvas Fallback: Temp element removed, creating PDF...');
+      devLog('🗑️ Canvas Fallback: Temp element removed, creating PDF...');
 
       // Create PDF from canvas with proper page handling (US Letter)
       const pdf = new jsPDF({
@@ -950,7 +951,7 @@ class ExportService {
 
       // Add clickable links to PDF
       if (links.length > 0) {
-        console.log(`🔗 Enhanced PDF: Adding ${links.length} clickable links...`);
+        devLog(`🔗 Enhanced PDF: Adding ${links.length} clickable links...`);
         this._addLinksToPDF(pdf, links, 2); // scaleFactor matches canvas scale
       }
 
@@ -958,11 +959,11 @@ class ExportService {
       const timestamp = new Date(message.timestamp).toISOString().split('T')[0];
       const filename = `chat-message-${timestamp}.pdf`;
 
-      console.log(`💾 Enhanced PDF: Saving PDF as ${filename}...`);
+      devLog(`💾 Enhanced PDF: Saving PDF as ${filename}...`);
       // Save the PDF
       pdf.save(filename);
 
-      console.log('🎉 Enhanced PDF: Export completed successfully!');
+      devLog('🎉 Enhanced PDF: Export completed successfully!');
       return { success: true, filename };
 
     } catch (canvasError) {
@@ -2330,7 +2331,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
    */
   _exportMarkdownAsPDF_Legacy = async (markdownContent, options = {}) => {
     try {
-      console.log('PDF Export: Starting text-based markdown document export...');
+      devLog('PDF Export: Starting text-based markdown document export...');
       
       // Yield to UI immediately
       await new Promise(resolve => setTimeout(resolve, 10));
@@ -2361,11 +2362,11 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
       let yPosition = margin;
 
       // Parse markdown into elements (no filename/title banner — content starts at top margin)
-      console.log('PDF Export: Parsing markdown content...');
+      devLog('PDF Export: Parsing markdown content...');
       const elements = this._parseMarkdownForTextPDF(bodyContent);
       
       // Render elements
-      console.log(`PDF Export: Rendering ${elements.length} elements...`);
+      devLog(`PDF Export: Rendering ${elements.length} elements...`);
       pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(12);
 
@@ -2546,9 +2547,9 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
         );
       }
 
-      console.log('PDF Export: Saving document...');
+      devLog('PDF Export: Saving document...');
       pdf.save(`${documentTitle}.pdf`);
-      console.log('PDF Export: Successfully exported markdown document');
+      devLog('PDF Export: Successfully exported markdown document');
       
       return { success: true, filename: `${documentTitle}.pdf` };
 

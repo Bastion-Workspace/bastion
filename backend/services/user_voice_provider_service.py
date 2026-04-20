@@ -17,7 +17,7 @@ from services.database_manager.database_helpers import execute, fetch_all, fetch
 
 logger = logging.getLogger(__name__)
 
-VOICE_PROVIDER_TYPES_TTS = frozenset({"elevenlabs", "openai"})
+VOICE_PROVIDER_TYPES_TTS = frozenset({"elevenlabs", "openai", "hedra"})
 VOICE_PROVIDER_TYPES_STT = frozenset({"openai", "deepgram", "whisper_api"})
 VOICE_PROVIDER_TYPES = VOICE_PROVIDER_TYPES_TTS | VOICE_PROVIDER_TYPES_STT
 
@@ -35,6 +35,8 @@ SETTING_USER_BYOK_TTS_ENGINE = "user_byok_tts_engine"
 SETTING_USER_BYOK_TTS_VOICE_PIPER = "user_byok_tts_voice_piper"
 SETTING_USER_ELEVENLABS_TTS_MODEL_ID = "user_elevenlabs_tts_model_id"
 SETTING_USER_ADMIN_ELEVENLABS_TTS_MODEL_ID = "user_admin_elevenlabs_tts_model_id"
+SETTING_USER_HEDRA_TTS_MODEL_ID = "user_hedra_tts_model_id"
+SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID = "user_admin_hedra_tts_model_id"
 
 
 def _truthy_setting(raw: Optional[str]) -> bool:
@@ -105,6 +107,13 @@ class UserVoiceProviderService:
                     r = await client.get(
                         "https://api.elevenlabs.io/v1/voices",
                         headers={"xi-api-key": key},
+                    )
+                    return r.status_code == 200
+
+                if provider_type == "hedra" and provider_role == "tts":
+                    r = await client.get(
+                        "https://api.hedra.com/web-app/public/voices",
+                        headers={"X-API-Key": key},
                     )
                     return r.status_code == 200
 
@@ -215,6 +224,8 @@ class UserVoiceProviderService:
             return "elevenlabs"
         if provider_type == "openai":
             return "openai"
+        if provider_type == "hedra":
+            return "hedra"
         return provider_type
 
     async def get_linked_tts_provider_type_name(self, user_id: str) -> str:

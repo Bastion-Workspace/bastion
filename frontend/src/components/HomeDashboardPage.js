@@ -2,9 +2,24 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from 'react-query';
 import { Alert, CircularProgress, Container, Stack } from '@mui/material';
+import { Responsive, WidthProvider } from 'react-grid-layout';
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
+
 import apiService from '../services/apiService';
 import rssService from '../services/rssService';
-import { WIDGET_TYPES, emptyWidget, widgetTitle } from './homeDashboard/homeDashboardUtils';
+import savedArtifactService from '../services/savedArtifactService';
+import {
+  WIDGET_TYPES,
+  assignDefaultGridsToWidgets,
+  applyGridLayoutToWidgets,
+  defaultGridForWidgetType,
+  emptyWidget,
+  gridLayoutFromWidgets,
+  pickCanonicalGridLayout,
+  resolveWidgetCardTitle,
+  widgetsForStackMode,
+} from './homeDashboard/homeDashboardUtils';
 import {
   MarkdownCardView,
   NavLinksView,
@@ -12,7 +27,34 @@ import {
   WidgetCard,
   WidgetEditor,
 } from './homeDashboard/HomeDashboardPanels';
+import {
+  OrgAgendaBlock,
+  FolderShortcutsView,
+  PinnedDocumentsBlockWithAdd,
+} from './homeDashboard/homeDashboardWidgetBlocks';
+import { FolderImageSlideshowBlock } from './homeDashboard/homeDashboardFolderImageSlideshow';
+import ArtifactEmbedBlock from './homeDashboard/ArtifactEmbedBlock';
 import HomeDashboardChrome, { HomeDashboardDialogs } from './homeDashboard/HomeDashboardChrome';
+import ScratchPadBlock from './homeDashboard/ScratchPadBlock';
+
+const ResponsiveGridLayout = WidthProvider(Responsive);
+
+const GRID_BREAKPOINTS = { lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 };
+const GRID_COLS = { lg: 12, md: 12, sm: 12, xs: 8, xxs: 4 };
+
+function normalizeLayoutDraft(raw) {
+  const o = typeof raw === 'object' && raw ? raw : {};
+  const mode = o.layout_mode === 'grid' ? 'grid' : 'stack';
+  let widgets = Array.isArray(o.widgets) ? [...o.widgets] : [];
+  if (mode === 'grid' && widgets.some((w) => !w.grid)) {
+    widgets = assignDefaultGridsToWidgets(widgets);
+  }
+  return {
+    schema_version: o.schema_version ?? 1,
+    layout_mode: mode,
+    widgets,
+  };
+}
 
 export default function HomeDashboardPage() {
   const navigate = useNavigate();
@@ -29,7 +71,6 @@ export default function HomeDashboardPage() {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameName, setRenameName] = useState('');
   const [deleteOpen, setDeleteOpen] = useState(false);
-
   const { data: listData, isLoading: listLoading, error: listError } = useQuery(
     ['homeDashboards'],
     () => apiService.listHomeDashboards(),
@@ -75,7 +116,8 @@ export default function HomeDashboardPage() {
 
   const startEdit = useCallback(() => {
     if (serverLayout) {
-      setDraft(JSON.parse(JSON.stringify(serverLayout)));
+      const parsed = JSON.parse(JSON.stringify(serverLayout));
+      setDraft(normalizeLayoutDraft(parsed));
       setEditMode(true);
       setSaveError(null);
     }
@@ -91,7 +133,10 @@ export default function HomeDashboardPage() {
   const saveMutation = useMutation(
     ({ id, body }) => apiService.putHomeDashboardLayout(id, body),
     {
-      onSuccess: (_, variables) => {
+      onSuccess: (savedLayout, variables) => {
+        if (savedLayout && variables?.id) {
+          queryClient.setQueryData(['homeDashboardLayout', variables.id], savedLayout);
+        }
         queryClient.invalidateQueries(['homeDashboardLayout', variables.id]);
         queryClient.invalidateQueries(['homeDashboardRss']);
         setEditMode(false);
@@ -161,6 +206,77 @@ export default function HomeDashboardPage() {
   });
 
   const layout = editMode ? draft : serverLayout;
+  const layoutNormalized = useMemo(
+    () => normalizeLayoutDraft(layout),
+    [layout]
+  );
+  const isGrid = layoutNormalized.layout_mode === 'grid';
+
+  const artifactEmbedIds = useMemo(() => {
+    const widgets = layoutNormalized.widgets || [];
+    const ids = new Set();
+    for (const w of widgets) {
+      if (w.type === 'artifact_embed' && w.config?.artifact_id) {
+        ids.add(String(w.config.artifact_id));
+      }
+    }
+    return Array.from(ids);
+  }, [layoutNormalized.widgets]);
+
+  const { data: savedArtifactsListData } = useQuery(
+    ['savedArtifactsList'],
+    () => savedArtifactService.list(),
+    {
+      enabled: artifactEmbedIds.length > 0,
+      staleTime: 60 * 1000,
+    }
+  );
+
+  const savedArtifactsTitleMap = useMemo(() => {
+    const m = new Map();
+    for (const a of savedArtifactsListData?.artifacts || []) {
+      if (a?.id) {
+        m.set(String(a.id), String(a.title || '').trim());
+      }
+    }
+    return m;
+  }, [savedArtifactsListData?.artifacts]);
+
+  const handleLayoutModeChange = useCallback((_, mode) => {
+    if (!mode) return;
+    setDraft((prev) => {
+      if (!prev) return prev;
+      if (mode === 'grid') {
+        return {
+          ...prev,
+          layout_mode: 'grid',
+          widgets: assignDefaultGridsToWidgets(prev.widgets),
+        };
+      }
+      return {
+        ...prev,
+        layout_mode: 'stack',
+        widgets: widgetsForStackMode(prev.widgets),
+      };
+    });
+  }, []);
+
+  const gridLayouts = useMemo(() => {
+    const gl = gridLayoutFromWidgets(layoutNormalized.widgets);
+    return { lg: gl, md: gl, sm: gl, xs: gl, xxs: gl };
+  }, [layoutNormalized.widgets]);
+
+  const onGridLayoutChange = useCallback((currentLayout, allLayouts) => {
+    setDraft((prev) => {
+      if (!prev || prev.layout_mode !== 'grid') return prev;
+      const l = pickCanonicalGridLayout(currentLayout, allLayouts, prev.widgets);
+      if (!l) return prev;
+      return {
+        ...prev,
+        widgets: applyGridLayoutToWidgets(prev.widgets, l),
+      };
+    });
+  }, []);
 
   const updateWidgetAt = (index, w) => {
     setDraft((prev) => {
@@ -190,11 +306,21 @@ export default function HomeDashboardPage() {
   };
 
   const addWidget = (type) => {
-    const w = emptyWidget(type);
-    if (!w) return;
+    const base = emptyWidget(type);
+    if (!base) return;
     setDraft((prev) => {
       if (!prev) return prev;
-      return { ...prev, widgets: [...prev.widgets, w] };
+      if (prev.layout_mode === 'grid') {
+        let maxY = 0;
+        prev.widgets.forEach((x) => {
+          const g = x.grid || defaultGridForWidgetType(x.type);
+          maxY = Math.max(maxY, g.y + g.h);
+        });
+        const def = defaultGridForWidgetType(type);
+        const nw = { ...base, grid: { x: 0, y: maxY, w: def.w, h: def.h } };
+        return { ...prev, widgets: [...prev.widgets, nw] };
+      }
+      return { ...prev, widgets: [...prev.widgets, base] };
     });
   };
 
@@ -219,6 +345,13 @@ export default function HomeDashboardPage() {
           }
         }
       }
+      if (w.type === 'folder_images') {
+        const fid = w.config?.folder_id;
+        if (!fid || !String(fid).trim()) {
+          setSaveError('Folder images widget needs a folder selected.');
+          return;
+        }
+      }
     }
     saveMutation.mutate({ id: effectiveId, body: draft });
   };
@@ -226,6 +359,21 @@ export default function HomeDashboardPage() {
   useEffect(() => {
     if (!editMode) setSaveError(null);
   }, [editMode]);
+
+  const renderWidgetView = (w) => {
+    if (w.type === 'nav_links') return <NavLinksView config={w.config} navigate={navigate} />;
+    if (w.type === 'markdown_card') return <MarkdownCardView config={w.config} />;
+    if (w.type === 'scratchpad') {
+      return <ScratchPadBlock showLabels={w.config?.show_labels !== false} />;
+    }
+    if (w.type === 'rss_headlines') return <RssHeadlinesBlock config={w.config} navigate={navigate} />;
+    if (w.type === 'org_agenda') return <OrgAgendaBlock config={w.config} navigate={navigate} />;
+    if (w.type === 'folder_shortcuts') return <FolderShortcutsView config={w.config} navigate={navigate} />;
+    if (w.type === 'pinned_documents') return <PinnedDocumentsBlockWithAdd config={w.config} />;
+    if (w.type === 'folder_images') return <FolderImageSlideshowBlock config={w.config} navigate={navigate} />;
+    if (w.type === 'artifact_embed') return <ArtifactEmbedBlock config={w.config} />;
+    return null;
+  };
 
   const currentMeta = dashboards.find((d) => d.id === effectiveId);
   const isDefaultDashboard = Boolean(currentMeta?.is_default);
@@ -284,8 +432,10 @@ export default function HomeDashboardPage() {
     );
   }
 
+  const widgets = layoutNormalized.widgets || [];
+
   return (
-    <Container maxWidth="md" sx={{ py: 3 }}>
+    <Container maxWidth={isGrid ? false : 'md'} sx={{ py: 3 }}>
       <HomeDashboardChrome
         dashboards={dashboards}
         dashboardId={effectiveId}
@@ -309,36 +459,75 @@ export default function HomeDashboardPage() {
         onCloseAddMenu={() => setAddMenuAnchor(null)}
         onPickWidgetType={(t) => addWidget(t)}
         widgetTypeOptions={WIDGET_TYPES}
+        layoutMode={editMode ? draft?.layout_mode || 'stack' : layoutNormalized.layout_mode}
+        onLayoutModeChange={handleLayoutModeChange}
+        showLayoutModeToggle={editMode && Boolean(draft)}
       />
       {saveError ? (
         <Alert severity="error" sx={{ mb: 2 }} onClose={() => setSaveError(null)}>
           {saveError}
         </Alert>
       ) : null}
-      <Stack spacing={2}>
-        {(layout?.widgets || []).map((w, i) => (
-          <WidgetCard
-            key={w.id}
-            title={widgetTitle(w)}
-            editMode={editMode}
-            onDelete={() => removeWidget(i)}
-            onUp={() => moveWidget(i, -1)}
-            onDown={() => moveWidget(i, 1)}
-            disableUp={i === 0}
-            disableDown={i === (layout?.widgets?.length || 0) - 1}
-          >
-            {editMode ? (
-              <WidgetEditor widget={w} feeds={feeds} onChange={(nw) => updateWidgetAt(i, nw)} />
-            ) : w.type === 'nav_links' ? (
-              <NavLinksView config={w.config} navigate={navigate} />
-            ) : w.type === 'markdown_card' ? (
-              <MarkdownCardView config={w.config} />
-            ) : w.type === 'rss_headlines' ? (
-              <RssHeadlinesBlock config={w.config} navigate={navigate} />
-            ) : null}
-          </WidgetCard>
-        ))}
-      </Stack>
+
+      {isGrid ? (
+        <ResponsiveGridLayout
+          className="home-dashboard-grid"
+          layouts={gridLayouts}
+          breakpoints={GRID_BREAKPOINTS}
+          cols={GRID_COLS}
+          rowHeight={36}
+          margin={[12, 12]}
+          containerPadding={[0, 0]}
+          onLayoutChange={editMode ? onGridLayoutChange : undefined}
+          isDraggable={editMode}
+          isResizable={editMode}
+          draggableCancel="button,a,input,textarea,.MuiButton-root,.MuiIconButton-root,.MuiChip-root,.MuiSelect-root,.MuiMenuItem-root"
+        >
+          {widgets.map((w, i) => (
+            <div key={w.id}>
+              <WidgetCard
+                title={resolveWidgetCardTitle(w, savedArtifactsTitleMap)}
+                editMode={editMode}
+                onDelete={() => removeWidget(i)}
+                onUp={() => moveWidget(i, -1)}
+                onDown={() => moveWidget(i, 1)}
+                disableUp={i === 0}
+                disableDown={i === widgets.length - 1}
+                hideStackReorder
+                cardContentOverflow={w.type === 'scratchpad' ? 'hidden' : 'auto'}
+              >
+                {editMode ? (
+                  <WidgetEditor widget={w} feeds={feeds} onChange={(nw) => updateWidgetAt(i, nw)} />
+                ) : (
+                  renderWidgetView(w)
+                )}
+              </WidgetCard>
+            </div>
+          ))}
+        </ResponsiveGridLayout>
+      ) : (
+        <Stack spacing={2}>
+          {widgets.map((w, i) => (
+            <WidgetCard
+              key={w.id}
+              title={resolveWidgetCardTitle(w, savedArtifactsTitleMap)}
+              editMode={editMode}
+              onDelete={() => removeWidget(i)}
+              onUp={() => moveWidget(i, -1)}
+              onDown={() => moveWidget(i, 1)}
+              disableUp={i === 0}
+              disableDown={i === widgets.length - 1}
+              cardContentOverflow={w.type === 'scratchpad' ? 'hidden' : 'auto'}
+            >
+              {editMode ? (
+                <WidgetEditor widget={w} feeds={feeds} onChange={(nw) => updateWidgetAt(i, nw)} />
+              ) : (
+                renderWidgetView(w)
+              )}
+            </WidgetCard>
+          ))}
+        </Stack>
+      )}
 
       <HomeDashboardDialogs
         createOpen={createOpen}

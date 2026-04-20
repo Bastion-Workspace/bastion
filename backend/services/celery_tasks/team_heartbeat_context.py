@@ -108,20 +108,96 @@ def _build_team_roster_section(
     return lines
 
 
+def governance_briefing_banner(
+    governance_mode: Optional[str] = None,
+    rotation_cycle_index: Optional[int] = None,
+    quorum_pct: Optional[int] = None,
+) -> Optional[str]:
+    """One-line governance hint injected into heartbeat briefings."""
+    gm = (governance_mode or "hierarchical").strip().lower()
+    if gm == "committee":
+        return "GOVERNANCE: Committee mode — members may run in parallel on heartbeats; chair synthesizes when set."
+    if gm == "round_robin":
+        idx = rotation_cycle_index if rotation_cycle_index is not None else "n/a"
+        return f"GOVERNANCE: Round-robin — rotating leader this cycle (index {idx})."
+    if gm == "consensus":
+        q = quorum_pct if quorum_pct is not None else 60
+        return f"GOVERNANCE: Consensus — actions execute when at least {q}% of members propose the same action."
+    if gm == "hierarchical":
+        return "GOVERNANCE: Hierarchical — root leader delegates via tasks and messages to reports."
+    return None
+
+
+async def _build_continuity_workspace_sections(
+    team_id: str,
+    user_id: str,
+    heartbeat_config: Optional[Dict[str, Any]],
+    now: datetime,
+) -> List[str]:
+    """Inject full workspace values for configured keys (living brief / rubric), size-capped."""
+    if not heartbeat_config or not isinstance(heartbeat_config, dict):
+        return []
+    nested = heartbeat_config.get("continuity")
+    if not isinstance(nested, dict):
+        nested = {}
+    keys = heartbeat_config.get("continuity_workspace_keys") or nested.get("workspace_keys") or []
+    if isinstance(keys, str):
+        keys = [k.strip() for k in keys.split(",") if k.strip()]
+    if not isinstance(keys, list) or not keys:
+        return []
+    max_c = heartbeat_config.get("continuity_max_chars_per_key")
+    if max_c is None:
+        max_c = nested.get("max_chars_per_key", 8000)
+    try:
+        max_c = int(max_c)
+    except (TypeError, ValueError):
+        max_c = 8000
+    max_c = min(max(500, max_c), 50_000)
+
+    from services import agent_workspace_service
+
+    lines: List[str] = [
+        "CONTINUITY (pinned workspace keys — full current values):",
+        "",
+    ]
+    for raw_key in keys[:20]:
+        if not isinstance(raw_key, str) or not raw_key.strip():
+            continue
+        key = raw_key.strip()[:200]
+        ent = await agent_workspace_service.get_workspace_entry(team_id, key, user_id)
+        val = (ent or {}).get("value") if isinstance(ent, dict) else None
+        if not val:
+            lines.append(f"--- key: {key} --- (empty)")
+            lines.append("")
+            continue
+        val = str(val)
+        truncated = val[:max_c] + ("..." if len(val) > max_c else "")
+        lines.append(f"--- key: {key} ---")
+        lines.append(truncated)
+        lines.append("")
+    return lines
+
+
 async def _build_heartbeat_context(
     team_id: str,
     user_id: str,
     ceo_agent_profile_id: Optional[str] = None,
+    governance_mode: Optional[str] = None,
+    rotation_cycle_index: Optional[int] = None,
+    quorum_pct: Optional[int] = None,
 ) -> str:
     """Build a rich situational briefing for the CEO: tasks, goals, escalations, messages, agent activity, previous summary."""
     from datetime import timedelta
     from services.database_manager.database_helpers import fetch_one, fetch_all
+    from utils.grpc_rls import grpc_admin_rls as _hb_admin_rls, grpc_user_rls as _hb_user_rls
 
     parts = []
     try:
         from services import agent_task_service, agent_goal_service, agent_message_service, agent_line_service
         now = datetime.now(timezone.utc)
         cutoff_24h = now - timedelta(hours=24)
+        _ctx_u = _hb_user_rls(user_id)
+        _ctx_a = _hb_admin_rls()
 
         team = await agent_line_service.get_line(team_id, user_id)
         if not team:
@@ -144,6 +220,10 @@ async def _build_heartbeat_context(
                     pass
 
         parts.append("== TEAM STATUS BRIEFING ==")
+        gov_line = governance_briefing_banner(governance_mode, rotation_cycle_index, quorum_pct)
+        if gov_line:
+            parts.append(gov_line)
+            parts.append("")
         parts.append(f"Line ID: {team_id}  (use this UUID as line_id in tool context)")
         parts.append("")
 
@@ -294,6 +374,7 @@ async def _build_heartbeat_context(
                 ORDER BY agent_profile_id, started_at DESC
                 """,
                 *member_ids,
+                rls_context=_ctx_a,
             )
             for r in last_exec:
                 last_exec_per_agent[str(r["agent_profile_id"])] = r.get("started_at")
@@ -331,6 +412,19 @@ async def _build_heartbeat_context(
         timeline = await agent_message_service.get_line_timeline(team_id, user_id, limit=10)
         recent = (timeline.get("items") or [])[:10]
         if recent:
+            directives = [m for m in recent if m.get("message_type") == "user_directive"]
+            if directives:
+                parts.append("USER DIRECTIVES (from chat):")
+                for msg in directives:
+                    raw = msg.get("content") or ""
+                    content = raw[:HEARTBEAT_CONTEXT_MESSAGE_CONTENT_MAX].strip()
+                    if len(raw) > HEARTBEAT_CONTEXT_MESSAGE_CONTENT_MAX:
+                        content += "..."
+                    created = msg.get("created_at")
+                    ago = _format_relative_time(created, now) if created else "unknown"
+                    parts.append(f"- \"{content}\" ({ago})")
+                parts.append("")
+
             parts.append("RECENT MESSAGES (last 10):")
             for msg in recent:
                 from_name = msg.get("from_agent_name") or msg.get("from_agent_handle") or "Agent"
@@ -347,6 +441,22 @@ async def _build_heartbeat_context(
         ws_section = await _build_workspace_section(team_id, user_id, now, "WORKSPACE (shared scratchpad):")
         parts.extend(ws_section)
 
+        hb_cfg = team.get("heartbeat_config")
+        if isinstance(hb_cfg, str):
+            try:
+                import json
+
+                hb_cfg = json.loads(hb_cfg) if hb_cfg else {}
+            except Exception:
+                hb_cfg = {}
+        if not isinstance(hb_cfg, dict):
+            hb_cfg = {}
+        parts.extend(await _build_continuity_workspace_sections(team_id, user_id, hb_cfg, now))
+
+        from services.agent_line_brief_snapshot_service import build_snapshot_context_lines
+
+        parts.extend(await build_snapshot_context_lines(team_id, user_id))
+
         approval_count = await fetch_one(
             """
             SELECT COUNT(*)::int AS c FROM agent_approval_queue
@@ -355,6 +465,7 @@ async def _build_heartbeat_context(
             """,
             user_id,
             team_id,
+            rls_context=_ctx_u,
         )
         if approval_count and (approval_count.get("c") or 0) > 0:
             parts.append(f"Pending approvals for this team: {approval_count['c']}")
@@ -370,6 +481,7 @@ async def _build_heartbeat_context(
                 """,
                 cutoff_24h,
                 *member_ids,
+                rls_context=_ctx_a,
             )
             if err_rows:
                 parts.append(f"Agent failures (last 24h): {sum(r['cnt'] for r in err_rows)} total")
@@ -387,6 +499,7 @@ async def _build_heartbeat_context(
                 "SELECT memory_value FROM agent_memory WHERE agent_profile_id = $1 AND user_id = $2 AND memory_key = 'last_heartbeat_summary'",
                 ceo_agent_profile_id,
                 user_id,
+                rls_context=_ctx_u,
             )
             if prev and isinstance(prev.get("memory_value"), dict) and prev["memory_value"].get("summary"):
                 summary_text = prev["memory_value"]["summary"] or ""

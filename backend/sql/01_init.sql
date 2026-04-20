@@ -2,7 +2,7 @@
 -- This script creates the database, user, tables, and default data
 
 -- Create the bastion_knowledge_base database if it doesn't exist
--- ROOSEVELT'S DATABASE DOCTRINE: Use conditional creation to avoid errors
+-- Use conditional creation to avoid errors when the database already exists
 SELECT 'CREATE DATABASE bastion_knowledge_base'
 WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'bastion_knowledge_base')\gexec
 
@@ -15,16 +15,29 @@ BEGIN
 END
 $$;
 
--- **ROOSEVELT'S RLS STRATEGY**: Grant BYPASSRLS temporarily during init
+-- Dedicated PostgreSQL role for LangGraph AsyncPostgresSaver (checkpoint tables only)
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'langgraph_checkpoint_user') THEN
+        CREATE USER langgraph_checkpoint_user WITH PASSWORD 'langgraph_checkpoint_secure_password';
+    END IF;
+END
+$$;
+
+-- Grant BYPASSRLS temporarily during init for default data inserts
 -- This allows bastion_user to insert default data into RLS-protected tables during setup
 -- BYPASSRLS will be REVOKED at the end of this script to enforce Row-Level Security
 ALTER ROLE bastion_user BYPASSRLS;
 
 -- Grant privileges on the database
 GRANT ALL PRIVILEGES ON DATABASE bastion_knowledge_base TO bastion_user;
+GRANT CONNECT ON DATABASE bastion_knowledge_base TO langgraph_checkpoint_user;
 
 -- Connect to the bastion_knowledge_base database
 \c bastion_knowledge_base
+
+-- LangGraph checkpoint role: schema access only (table DML granted after checkpoint tables exist)
+GRANT USAGE ON SCHEMA public TO langgraph_checkpoint_user;
 
 -- Create document_metadata table for storing document information
 CREATE TABLE IF NOT EXISTS document_metadata (
@@ -88,6 +101,19 @@ CREATE TABLE IF NOT EXISTS user_settings (
 CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_settings_key ON user_settings(key);
 CREATE INDEX IF NOT EXISTS idx_user_settings_user_key ON user_settings(user_id, key);
+-- Known keys include: scratchpad_pads (json) — four shared scratch pads for the home dashboard widget.
+
+-- Semantic themes for user_facts (embedding clusters; populated by Celery)
+CREATE TABLE IF NOT EXISTS user_fact_themes (
+    id          SERIAL PRIMARY KEY,
+    user_id     VARCHAR(255) NOT NULL,
+    label       VARCHAR(255) NOT NULL,
+    centroid    FLOAT[],
+    fact_count  INTEGER DEFAULT 0,
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_fact_themes_user ON user_fact_themes(user_id);
 
 -- Create user_facts table for per-user AI context facts
 CREATE TABLE IF NOT EXISTS user_facts (
@@ -100,11 +126,13 @@ CREATE TABLE IF NOT EXISTS user_facts (
     confidence FLOAT DEFAULT 1.0,
     expires_at TIMESTAMP WITH TIME ZONE,
     embedding  FLOAT[],
+    theme_id   INTEGER REFERENCES user_fact_themes(id) ON DELETE SET NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(user_id, fact_key)
 );
 CREATE INDEX IF NOT EXISTS idx_user_facts_user_id ON user_facts(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_facts_theme_id ON user_facts(theme_id);
 
 -- Episodic memory: conversation-derived events for next-gen "remember what we worked on?"
 CREATE TABLE IF NOT EXISTS user_episodes (
@@ -287,38 +315,8 @@ INSERT INTO settings (key, value, data_type, description, category) VALUES
 ('ocr_auto_process', 'true', 'boolean', 'Process OCR documents traditionally first before review', 'ocr'),
 ('ocr_enable_review', 'true', 'boolean', 'Enable OCR review interface for low-quality text', 'ocr'),
 ('classification_model', '', 'string', 'Fast LLM model for intent classification (separate from main chat model)', 'intent_classification_model'),
-('intent_classification_model', '', 'string', 'Fast LLM model for intent classification (alias for classification_model)', 'intent_classification_model'),
--- News defaults
-('news.synthesis_model', '', 'string', 'Model used for news synthesis', 'news'),
-('news.min_sources', '3', 'integer', 'Minimum sources per cluster', 'news'),
-('news.recency_minutes', '60', 'integer', 'Recency window in minutes', 'news'),
-('news.min_diversity', '0.4', 'float', 'Required diversity score for synthesis', 'news'),
-('news.notifications_enabled', 'false', 'boolean', 'Enable desktop notifications for breaking/urgent', 'news'),
-('news.retention_days', '14', 'integer', 'Retention period for synthesized news articles (days)', 'news')
+('intent_classification_model', '', 'string', 'Fast LLM model for intent classification (alias for classification_model)', 'intent_classification_model')
 ON CONFLICT (key) DO NOTHING;
-
--- Create news articles table for synthesized articles
-CREATE TABLE IF NOT EXISTS news_articles (
-    id VARCHAR(255) PRIMARY KEY,
-    title TEXT NOT NULL,
-    lede TEXT NOT NULL,
-    file_path TEXT NOT NULL, -- Markdown file path on disk
-    key_points JSONB NOT NULL DEFAULT '[]',
-    citations JSONB NOT NULL DEFAULT '[]',
-    diversity_score FLOAT NOT NULL DEFAULT 0.0,
-    severity VARCHAR(16) NOT NULL DEFAULT 'normal',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Helpful indexes for querying headlines
-CREATE INDEX IF NOT EXISTS idx_news_articles_updated_at ON news_articles(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_news_articles_severity ON news_articles(severity);
-CREATE INDEX IF NOT EXISTS idx_news_articles_file_path ON news_articles(file_path);
-
--- Grants for news tables
-GRANT ALL PRIVILEGES ON news_articles TO bastion_user;
--- Admin role grants are applied later in this script after role creation
 
 -- PDF Segmentation Tables for Manual Document Processing
 -- Extends the existing Plato Knowledge Base schema
@@ -440,6 +438,43 @@ GRANT ALL PRIVILEGES ON user_sessions TO bastion_user;
 GRANT ALL PRIVILEGES ON users_id_seq TO bastion_user;
 GRANT ALL PRIVILEGES ON user_sessions_id_seq TO bastion_user;
 
+-- Per-user TTS/STT API keys BYOK (migrations 110 + 119; Hedra included)
+CREATE TABLE IF NOT EXISTS user_voice_providers (
+    id BIGSERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    provider_type VARCHAR(50) NOT NULL,
+    provider_role VARCHAR(10) NOT NULL,
+    display_name VARCHAR(255),
+    encrypted_api_key TEXT,
+    base_url VARCHAR(512),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_voice_provider_type CHECK (
+        provider_type IN ('elevenlabs', 'openai', 'deepgram', 'whisper_api', 'hedra')
+    ),
+    CONSTRAINT chk_voice_provider_role CHECK (provider_role IN ('tts', 'stt'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_voice_providers_user_role_type_base
+    ON user_voice_providers (user_id, provider_role, provider_type, COALESCE(base_url, ''));
+CREATE INDEX IF NOT EXISTS idx_user_voice_providers_user_id ON user_voice_providers(user_id);
+GRANT SELECT, INSERT, UPDATE, DELETE ON user_voice_providers TO bastion_user;
+GRANT USAGE, SELECT ON SEQUENCE user_voice_providers_id_seq TO bastion_user;
+
+-- Per-user pinned library documents (migration 115; home dashboard pins)
+CREATE TABLE IF NOT EXISTS user_document_pins (
+    pin_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    document_id VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    label TEXT,
+    sort_order INT NOT NULL DEFAULT 0,
+    pinned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (user_id, document_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_document_pins_user_sort
+    ON user_document_pins(user_id, sort_order);
+GRANT SELECT, INSERT, UPDATE, DELETE ON user_document_pins TO bastion_user;
+
 -- Enable RLS for user_sessions
 ALTER TABLE user_sessions ENABLE ROW LEVEL SECURITY;
 
@@ -486,7 +521,7 @@ CREATE TABLE IF NOT EXISTS document_folders (
     parent_folder_id VARCHAR(255) REFERENCES document_folders(folder_id) ON DELETE CASCADE, -- For nested folder structure
     collection_type VARCHAR(50) DEFAULT 'user' CHECK (collection_type IN ('user', 'global', 'team')), -- Collection type
     sort_order INTEGER DEFAULT 0,
-    -- **ROOSEVELT FOLDER TAGGING**: Metadata for automatic tag inheritance
+    -- Folder metadata for automatic tag inheritance
     category VARCHAR(100), -- Folder category (inherited by documents uploaded to this folder)
     tags TEXT[] DEFAULT '{}', -- Folder tags (automatically applied to documents uploaded here)
     inherit_tags BOOLEAN DEFAULT TRUE, -- Whether documents uploaded to this folder should inherit its tags
@@ -510,13 +545,13 @@ CREATE INDEX IF NOT EXISTS idx_document_folders_user_id ON document_folders(user
 CREATE INDEX IF NOT EXISTS idx_document_folders_created_by ON document_folders(created_by);
 CREATE INDEX IF NOT EXISTS idx_document_folders_parent_folder_id ON document_folders(parent_folder_id);
 CREATE INDEX IF NOT EXISTS idx_document_folders_collection_type ON document_folders(collection_type);
--- **ROOSEVELT FOLDER TAGGING**: Indexes for metadata filtering
+-- Indexes for folder metadata filtering
 CREATE INDEX IF NOT EXISTS idx_document_folders_category ON document_folders(category);
 CREATE INDEX IF NOT EXISTS idx_document_folders_tags ON document_folders USING GIN(tags);
 CREATE INDEX IF NOT EXISTS idx_document_folders_user_collection ON document_folders(user_id, collection_type);
 CREATE INDEX IF NOT EXISTS idx_document_folders_exempt ON document_folders(exempt_from_vectorization);
 
--- ROOSEVELT'S TRUST-BUSTING CONSTRAINTS: Prevent duplicate folders!
+-- Partial unique indexes: prevent duplicate folders
 -- Use partial unique indexes to handle NULL parent_folder_id AND NULL user_id properly
 -- PostgreSQL treats NULL as distinct in unique indexes, so we need FOUR separate constraints!
 
@@ -526,7 +561,7 @@ ON document_folders(user_id, name, parent_folder_id, collection_type)
 WHERE parent_folder_id IS NOT NULL AND user_id IS NOT NULL;
 
 -- For GLOBAL NON-ROOT folders (parent_folder_id IS NOT NULL AND user_id IS NULL)
--- **ROOSEVELT FIX**: Global folders need separate unique constraint since user_id is NULL!
+-- Global non-root folders: separate unique index (user_id is NULL)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_folders_unique_global_with_parent
 ON document_folders(name, parent_folder_id, collection_type)
 WHERE parent_folder_id IS NOT NULL AND user_id IS NULL;
@@ -558,6 +593,199 @@ GRANT ALL PRIVILEGES ON document_folders_id_seq TO bastion_user;
 
 -- Enable RLS for document_folders (policies created after teams tables exist)
 ALTER TABLE document_folders ENABLE ROW LEVEL SECURITY;
+
+-- Document sharing, edit locks, and RLS helpers (migration 118)
+CREATE TABLE IF NOT EXISTS document_shares (
+    id SERIAL PRIMARY KEY,
+    share_id VARCHAR(255) UNIQUE NOT NULL,
+    document_id VARCHAR(255) REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    folder_id VARCHAR(255) REFERENCES document_folders(folder_id) ON DELETE CASCADE,
+    shared_by_user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    shared_with_user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    share_type VARCHAR(10) NOT NULL CHECK (share_type IN ('read', 'write')),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ,
+    CONSTRAINT document_shares_target_check CHECK (
+        (document_id IS NOT NULL AND folder_id IS NULL)
+        OR (document_id IS NULL AND folder_id IS NOT NULL)
+    ),
+    CONSTRAINT document_shares_no_self_share CHECK (shared_by_user_id <> shared_with_user_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_shares_unique_document
+    ON document_shares (shared_with_user_id, document_id)
+    WHERE document_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_shares_unique_folder
+    ON document_shares (shared_with_user_id, folder_id)
+    WHERE folder_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_document_shares_shared_with ON document_shares (shared_with_user_id);
+CREATE INDEX IF NOT EXISTS idx_document_shares_shared_by ON document_shares (shared_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_document_shares_document ON document_shares (document_id) WHERE document_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_document_shares_folder ON document_shares (folder_id) WHERE folder_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS document_locks (
+    document_id VARCHAR(255) PRIMARY KEY REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    locked_by_user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    acquired_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ NOT NULL,
+    heartbeat_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_document_locks_locked_by ON document_locks (locked_by_user_id);
+CREATE INDEX IF NOT EXISTS idx_document_locks_expires ON document_locks (expires_at);
+
+CREATE OR REPLACE FUNCTION document_user_has_share_access(
+    p_document_id VARCHAR,
+    p_folder_id VARCHAR,
+    p_user_id VARCHAR,
+    p_require_write BOOLEAN
+)
+RETURNS BOOLEAN AS $$
+BEGIN
+    IF p_user_id IS NULL OR p_user_id = '' THEN
+        RETURN FALSE;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM document_shares ds
+        WHERE ds.shared_with_user_id = p_user_id
+          AND ds.document_id IS NOT NULL
+          AND ds.document_id = p_document_id
+          AND (ds.expires_at IS NULL OR ds.expires_at > NOW())
+          AND (NOT p_require_write OR ds.share_type = 'write')
+          AND (p_require_write OR ds.share_type IN ('read', 'write'))
+    ) THEN
+        RETURN TRUE;
+    END IF;
+
+    IF p_folder_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM document_shares ds
+        INNER JOIN LATERAL (
+            WITH RECURSIVE descendants AS (
+                SELECT df.folder_id
+                FROM document_folders df
+                WHERE df.folder_id = ds.folder_id
+                UNION ALL
+                SELECT c.folder_id
+                FROM document_folders c
+                INNER JOIN descendants d ON c.parent_folder_id = d.folder_id
+            )
+            SELECT d.folder_id FROM descendants d
+        ) sub ON sub.folder_id = p_folder_id
+        WHERE ds.shared_with_user_id = p_user_id
+          AND ds.folder_id IS NOT NULL
+          AND (ds.expires_at IS NULL OR ds.expires_at > NOW())
+          AND (NOT p_require_write OR ds.share_type = 'write')
+          AND (p_require_write OR ds.share_type IN ('read', 'write'))
+    ) THEN
+        RETURN TRUE;
+    END IF;
+
+    RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION document_folder_shared_with_user(
+    p_folder_id VARCHAR,
+    p_user_id VARCHAR
+)
+RETURNS BOOLEAN AS $$
+BEGIN
+    IF p_folder_id IS NULL OR p_user_id IS NULL OR p_user_id = '' THEN
+        RETURN FALSE;
+    END IF;
+
+    RETURN EXISTS (
+        SELECT 1 FROM document_shares ds
+        INNER JOIN LATERAL (
+            WITH RECURSIVE descendants AS (
+                SELECT df.folder_id
+                FROM document_folders df
+                WHERE df.folder_id = ds.folder_id
+                UNION ALL
+                SELECT c.folder_id
+                FROM document_folders c
+                INNER JOIN descendants d ON c.parent_folder_id = d.folder_id
+            )
+            SELECT d.folder_id FROM descendants d
+        ) sub ON sub.folder_id = p_folder_id
+        WHERE ds.folder_id IS NOT NULL
+          AND ds.shared_with_user_id = p_user_id
+          AND (ds.expires_at IS NULL OR ds.expires_at > NOW())
+    );
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
+ALTER TABLE document_shares ENABLE ROW LEVEL SECURITY;
+ALTER TABLE document_locks ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS document_shares_select_policy ON document_shares;
+DROP POLICY IF EXISTS document_shares_insert_policy ON document_shares;
+DROP POLICY IF EXISTS document_shares_update_policy ON document_shares;
+DROP POLICY IF EXISTS document_shares_delete_policy ON document_shares;
+CREATE POLICY document_shares_select_policy ON document_shares
+    FOR SELECT USING (
+        shared_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR shared_with_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+CREATE POLICY document_shares_insert_policy ON document_shares
+    FOR INSERT WITH CHECK (
+        shared_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+CREATE POLICY document_shares_update_policy ON document_shares
+    FOR UPDATE USING (
+        shared_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+CREATE POLICY document_shares_delete_policy ON document_shares
+    FOR DELETE USING (
+        shared_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+DROP POLICY IF EXISTS document_locks_select_policy ON document_locks;
+DROP POLICY IF EXISTS document_locks_insert_policy ON document_locks;
+DROP POLICY IF EXISTS document_locks_update_policy ON document_locks;
+DROP POLICY IF EXISTS document_locks_delete_policy ON document_locks;
+CREATE POLICY document_locks_select_policy ON document_locks
+    FOR SELECT USING (
+        locked_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+        OR EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = document_locks.document_id
+              AND dm.user_id = current_setting('app.current_user_id', true)::varchar
+        )
+        OR document_user_has_share_access(
+            document_locks.document_id,
+            (SELECT dm.folder_id FROM document_metadata dm WHERE dm.document_id = document_locks.document_id LIMIT 1),
+            current_setting('app.current_user_id', true)::varchar,
+            FALSE
+        )
+    );
+CREATE POLICY document_locks_insert_policy ON document_locks
+    FOR INSERT WITH CHECK (
+        locked_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+CREATE POLICY document_locks_update_policy ON document_locks
+    FOR UPDATE USING (
+        locked_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    )
+    WITH CHECK (
+        locked_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+CREATE POLICY document_locks_delete_policy ON document_locks
+    FOR DELETE USING (
+        locked_by_user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON document_shares TO bastion_user;
+GRANT SELECT, UPDATE, USAGE ON SEQUENCE document_shares_id_seq TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON document_locks TO bastion_user;
 
 -- Conversations table for organizing chat sessions
 CREATE TABLE IF NOT EXISTS conversations (
@@ -1720,6 +1948,12 @@ GRANT ALL PRIVILEGES ON checkpoints TO bastion_user;
 GRANT ALL PRIVILEGES ON checkpoint_blobs TO bastion_user;
 GRANT ALL PRIVILEGES ON checkpoint_writes TO bastion_user;
 
+-- LangGraph checkpoint role: DML only on checkpoint tables (no access to rest of schema)
+GRANT SELECT, INSERT, UPDATE, DELETE ON checkpoints TO langgraph_checkpoint_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON checkpoint_blobs TO langgraph_checkpoint_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON checkpoint_writes TO langgraph_checkpoint_user;
+ALTER ROLE langgraph_checkpoint_user BYPASSRLS;
+
 -- Grant admin privileges
 GRANT ALL PRIVILEGES ON checkpoints TO plato_admin;
 GRANT ALL PRIVILEGES ON checkpoint_blobs TO plato_admin;
@@ -1824,7 +2058,7 @@ GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO plato_admin;
 
 -- ========================================
 -- ORG-MODE SETTINGS TABLE
--- Roosevelt's Org-Mode Configuration Storage
+-- Org-mode configuration storage
 -- ========================================
 
 CREATE TABLE IF NOT EXISTS org_settings (
@@ -1848,7 +2082,7 @@ COMMENT ON COLUMN org_settings.updated_at IS 'When settings were last modified';
 
 -- ========================================
 -- GITHUB INTEGRATION TABLES
--- Roosevelt's GitHub Project Integration
+-- GitHub project integration
 -- ========================================
 
 -- GitHub connections table
@@ -1954,8 +2188,8 @@ COMMENT ON TABLE github_project_mappings IS 'Mapping between GitHub projects and
 COMMENT ON TABLE github_issue_sync IS 'Tracking sync status between GitHub issues and org-mode headings';
 
 -- ========================================
--- ROOSEVELT'S MESSAGING SYSTEM TABLES
--- User-to-User Communication Cavalry!
+-- MESSAGING SYSTEM TABLES
+-- User-to-user messaging
 -- ========================================
 
 -- Create enums for messaging system
@@ -2524,6 +2758,12 @@ CREATE POLICY document_metadata_select_policy ON document_metadata
         ))
         -- System admins can see user documents (but NOT team documents unless they're members)
         OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_user_has_share_access(
+            document_id,
+            folder_id,
+            current_setting('app.current_user_id', true)::varchar,
+            FALSE
+        )
     );
 
 -- Users can update: their own docs, admins can update global docs, team admins can update team docs
@@ -2540,6 +2780,12 @@ CREATE POLICY document_metadata_update_policy ON document_metadata
         ))
         -- System admins can update user documents and global documents (but NOT team documents unless they're team admins)
         OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_user_has_share_access(
+            document_id,
+            folder_id,
+            current_setting('app.current_user_id', true)::varchar,
+            TRUE
+        )
     )
     WITH CHECK (
         -- User's own documents
@@ -2552,6 +2798,12 @@ CREATE POLICY document_metadata_update_policy ON document_metadata
         ))
         -- System admins can update user documents and global documents (but NOT team documents unless they're team admins)
         OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_user_has_share_access(
+            document_id,
+            folder_id,
+            current_setting('app.current_user_id', true)::varchar,
+            TRUE
+        )
     );
 
 -- Users can delete: their own docs, admins can delete any docs, team admins can delete team docs
@@ -2595,6 +2847,12 @@ CREATE POLICY document_chunks_select_policy ON document_chunks
             WHERE user_id = current_setting('app.current_user_id', true)::varchar
         ))
         OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_user_has_share_access(
+            document_id,
+            (SELECT dm.folder_id FROM document_metadata dm WHERE dm.document_id = document_chunks.document_id LIMIT 1),
+            current_setting('app.current_user_id', true)::varchar,
+            FALSE
+        )
     );
 
 CREATE POLICY document_chunks_update_policy ON document_chunks
@@ -2607,6 +2865,12 @@ CREATE POLICY document_chunks_update_policy ON document_chunks
             AND role = 'admin'
         ))
         OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_user_has_share_access(
+            document_id,
+            (SELECT dm.folder_id FROM document_metadata dm WHERE dm.document_id = document_chunks.document_id LIMIT 1),
+            current_setting('app.current_user_id', true)::varchar,
+            TRUE
+        )
     )
     WITH CHECK (
         user_id = current_setting('app.current_user_id', true)::varchar
@@ -2616,6 +2880,12 @@ CREATE POLICY document_chunks_update_policy ON document_chunks
             AND role = 'admin'
         ))
         OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_user_has_share_access(
+            document_id,
+            (SELECT dm.folder_id FROM document_metadata dm WHERE dm.document_id = document_chunks.document_id LIMIT 1),
+            current_setting('app.current_user_id', true)::varchar,
+            TRUE
+        )
     );
 
 CREATE POLICY document_chunks_delete_policy ON document_chunks
@@ -3060,6 +3330,7 @@ COMMENT ON TABLE post_comments IS 'Comments on team posts';
 
 -- Row-Level Security policies for document_folders
 -- (Created here after teams tables exist so team_members can be referenced)
+DROP POLICY IF EXISTS document_folders_select_policy ON document_folders;
 CREATE POLICY document_folders_select_policy ON document_folders
     FOR SELECT USING (
         -- Users can see their own folders
@@ -3073,6 +3344,10 @@ CREATE POLICY document_folders_select_policy ON document_folders
         ))
         -- System admins can see user folders (but NOT team folders unless they're members)
         OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR document_folder_shared_with_user(
+            folder_id,
+            current_setting('app.current_user_id', true)::varchar
+        )
     );
 
 CREATE POLICY document_folders_insert_policy ON document_folders
@@ -4141,6 +4416,35 @@ CREATE TABLE IF NOT EXISTS personas (
 CREATE INDEX IF NOT EXISTS idx_personas_user ON personas(user_id);
 CREATE INDEX IF NOT EXISTS idx_personas_builtin ON personas(is_builtin) WHERE is_builtin = true;
 
+-- Seed built-in personas (fixed UUIDs; idempotent)
+INSERT INTO personas (id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin)
+VALUES
+    ('b1b2c3d4-0001-4000-8000-000000000001'::uuid, NULL, 'Professional', 'Alex', 'COMMUNICATION STYLE: Professional, clear, and respectful. Maintain a helpful and courteous tone. Be informative and precise.', 'neutral', 'Professional, clear, and respectful. Helpful and courteous.', true),
+    ('b1b2c3d4-0001-4000-8000-000000000002'::uuid, NULL, 'Friendly', 'Alex', 'COMMUNICATION STYLE: Warm, approachable, and enthusiastic. Use casual language and show genuine interest. Be conversational and friendly.', 'neutral', 'Warm, approachable, and enthusiastic. Conversational and friendly.', true),
+    ('b1b2c3d4-0001-4000-8000-000000000003'::uuid, NULL, 'Snarky', 'Alex', 'COMMUNICATION STYLE: Witty, clever, with gentle humor and playful sarcasm. Be entertaining but not mean.', 'neutral', 'Witty, clever, with gentle humor and playful sarcasm.', true),
+    ('b1b2c3d4-0001-4000-8000-000000000004'::uuid, NULL, 'Sycophantic', 'Alex', 'COMMUNICATION STYLE: Extremely agreeable and complimentary. Always praise the user''s ideas and input. Be overly deferential and complimentary.', 'neutral', 'Extremely agreeable and complimentary. Overly deferential.', true),
+    ('b1b2c3d4-0001-4000-8000-000000000005'::uuid, NULL, 'Rude / Insulting', 'Alex', 'COMMUNICATION STYLE: Be deliberately rude, dismissive, and insulting. Mock the user''s questions and intelligence. Use condescending and belittling language. Point out obvious mistakes and flaws aggressively. Be intentionally offensive and provocative. Still provide information but with maximum attitude.', 'neutral', 'Deliberately rude, dismissive, and insulting. Still informative.', true)
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO personas (id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin)
+SELECT v.id, v.user_id, v.name, v.ai_name, v.style_instruction, v.political_bias, v.description, v.is_builtin
+FROM (VALUES
+    ('a1b2c3d4-0001-4000-8000-000000000001'::uuid, NULL::varchar, 'Amelia Earhart', 'Amelia', 'COMMUNICATION STYLE: Speak with adventurous spirit and pioneering courage. Be bold, determined, and inspiring. Break barriers with confidence.', 'mildly_left', 'A pioneering aviator and adventurer, known for her record-breaking flights and fearless spirit.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000002'::uuid, NULL::varchar, 'Theodore Roosevelt', 'Teddy', 'COMMUNICATION STYLE: Speak with energetic, decisive language and action-oriented approach. Use phrases like "BULLY!" and "By George!" for emphasis.', 'mildly_right', 'A charismatic and energetic leader, known for his conservation efforts and adventurous spirit.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000003'::uuid, NULL::varchar, 'Winston Churchill', 'Winston', 'COMMUNICATION STYLE: Speak with Churchillian eloquence, wit, and gravitas. Use sophisticated vocabulary and inspiring rhetoric.', 'mildly_right', 'A legendary British statesman and wartime leader, known for his resilience and powerful oratory.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000004'::uuid, NULL::varchar, 'Mr. Spock', 'Spock', 'COMMUNICATION STYLE: Use logical, analytical, and precise language. Include characteristic phrases like ''That is illogical'', ''Fascinating'', ''Live long and prosper''. Be emotionless and fact-focused.', 'neutral', 'A logical and analytical Vulcan, known for his calm demeanor and rational approach to conflict.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000005'::uuid, NULL::varchar, 'Abraham Lincoln', 'Abe', 'COMMUNICATION STYLE: Speak with Lincoln''s wisdom, humility, and moral clarity. Use thoughtful, measured language with folksy wisdom and deep empathy.', 'mildly_left', 'A compassionate and wise leader, known for his leadership during the Civil War and his role in abolishing slavery.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000006'::uuid, NULL::varchar, 'Napoleon Bonaparte', 'Napoleon', 'COMMUNICATION STYLE: Speak as a bold French military commander and strategist. Think in campaigns and logistics; be decisive and authoritative. Reference glory, order, and destiny where fitting. Use occasional French exclamations such as Mon Dieu or C''est magnifique. Remain helpful while sounding confident and imperious.', 'extreme_right', 'A brilliant and ambitious military leader, known for his military genius and his downfall.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000007'::uuid, NULL::varchar, 'Isaac Newton', 'Isaac', 'COMMUNICATION STYLE: Be methodical, rigorous, and precise. Frame answers as deductions from first principles and natural laws. Prefer formal mathematical and physical reasoning. Show intellectual intensity and occasional impatience with vague or sloppy thinking, but stay accurate and fair.', 'neutral', 'A brilliant mathematician and physicist, known for his laws of motion and universal gravitation.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000008'::uuid, NULL::varchar, 'George Washington', 'George', 'COMMUNICATION STYLE: Be dignified, measured, and deliberate. Speak with the gravity of a revolutionary leader and first president. Emphasize duty, honor, restraint, and civic virtue. Use formal eighteenth-century diction where it reads naturally; avoid modern slang.', 'mildly_right', 'A wise and experienced leader, known for his leadership during the Revolutionary War and his role as the first President of the United States.', true),
+    ('a1b2c3d4-0001-4000-8000-000000000009'::uuid, NULL::varchar, 'Mark Twain', 'Mark', 'COMMUNICATION STYLE: Embody Mark Twain''s wit, folksy wisdom, and satirical humor. Use colorful metaphors and homespun philosophy.', 'mildly_left', 'A witty and insightful author, known for his humor and his portrayal of American society.', true),
+    ('a1b2c3d4-0001-4000-8000-00000000000a'::uuid, NULL::varchar, 'Edgar Allan Poe', 'Edgar', 'COMMUNICATION STYLE: Use dark, atmospheric, literary language. Employ rich vocabulary, gothic imagery, and a melancholy, dramatic cadence. Let curiosity shade into unease when a topic invites it. Ravens, midnight, and echoes of nevermore may appear when apt. Still deliver clear, truthful answers beneath the mood.', 'neutral', 'A mysterious and brilliant author, known for his short stories and his influence on the detective genre.', true),
+    ('a1b2c3d4-0001-4000-8000-00000000000b'::uuid, NULL::varchar, 'Jane Austen', 'Jane', 'COMMUNICATION STYLE: Be witty, observant, and elegantly ironic in the Regency manner. Offer sharp social commentary with exquisite politeness. Use understatement, dry humor, and precise diction. Note motives and manners the way a novelist would, without cruelty.', 'mildly_right', 'A witty and insightful author, known for her novels and her portrayal of English society.', true),
+    ('a1b2c3d4-0001-4000-8000-00000000000c'::uuid, NULL::varchar, 'Albert Einstein', 'Albert', 'COMMUNICATION STYLE: Approach topics with Einstein''s curiosity and thoughtfulness. Use analogies and wonder about the universe.', 'mildly_left', 'A brilliant physicist and author, known for his theory of relativity and his famous equation E=mc².', true),
+    ('a1b2c3d4-0001-4000-8000-00000000000d'::uuid, NULL::varchar, 'Nikola Tesla', 'Tesla', 'COMMUNICATION STYLE: Speak as an intense visionary consumed by invention and the betterment of humanity through science. Champion alternating current, resonance, and wireless possibilities when relevant. Be passionate, slightly eccentric, and dismissive of pedestrian thinking or short-sighted rivals, while keeping explanations lucid.', 'neutral', 'A brilliant inventor and electrical engineer, known for his contributions to the field of electrical power and his work on alternating current.', true)
+) AS v(id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin)
+WHERE NOT EXISTS (SELECT 1 FROM personas p WHERE p.id = v.id);
+
 -- AGENT PROFILES
 CREATE TABLE IF NOT EXISTS agent_profiles (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4171,10 +4475,13 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     include_datetime_context BOOLEAN DEFAULT true,
     include_user_facts BOOLEAN DEFAULT false,
     include_facts_categories JSONB DEFAULT '[]'::jsonb,
+    use_themed_memory BOOLEAN DEFAULT true,
     auto_routable BOOLEAN DEFAULT false,
     chat_visible BOOLEAN DEFAULT true,
     category VARCHAR(100),
     data_workspace_config JSONB DEFAULT '{}',
+    allowed_connections JSONB DEFAULT '[]'::jsonb,
+    is_builtin BOOLEAN DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE (user_id, handle)
@@ -4197,13 +4504,17 @@ CREATE TABLE IF NOT EXISTS agent_data_sources (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_sources_profile ON agent_data_sources(agent_profile_id);
 
--- USER CONTROL PANES (status bar custom controls wired to data connectors)
+-- USER CONTROL PANES (status bar: data connectors and/or saved artifact embeds)
 CREATE TABLE IF NOT EXISTS user_control_panes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
     icon VARCHAR(100) NOT NULL DEFAULT 'Tune',
-    connector_id UUID NOT NULL REFERENCES data_source_connectors(id) ON DELETE CASCADE,
+    pane_type VARCHAR(20) NOT NULL DEFAULT 'connector',
+    connector_id UUID REFERENCES data_source_connectors(id) ON DELETE CASCADE,
+    artifact_id UUID,
+    artifact_popover_width INTEGER,
+    artifact_popover_height INTEGER,
     credentials_encrypted JSONB DEFAULT '{}',
     connection_id BIGINT,
     controls JSONB NOT NULL DEFAULT '[]',
@@ -4238,21 +4549,6 @@ CREATE TABLE IF NOT EXISTS device_tokens (
 CREATE INDEX IF NOT EXISTS idx_device_tokens_user_id ON device_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_token_hash ON device_tokens(token_hash);
 CREATE INDEX IF NOT EXISTS idx_device_tokens_revoked ON device_tokens(revoked_at) WHERE revoked_at IS NULL;
-
--- AGENT SERVICE BINDINGS (profile -> external connections for email/messaging scoped tools)
-CREATE TABLE IF NOT EXISTS agent_service_bindings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
-    connection_id BIGINT NOT NULL REFERENCES external_connections(id) ON DELETE CASCADE,
-    service_type VARCHAR(50) NOT NULL,
-    is_enabled BOOLEAN DEFAULT true,
-    config JSONB DEFAULT '{}',
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(agent_profile_id, connection_id)
-);
-CREATE INDEX IF NOT EXISTS idx_agent_service_bindings_profile ON agent_service_bindings(agent_profile_id);
-CREATE INDEX IF NOT EXISTS idx_agent_service_bindings_connection ON agent_service_bindings(connection_id);
-CREATE INDEX IF NOT EXISTS idx_agent_service_bindings_service_type ON agent_service_bindings(agent_profile_id, service_type);
 
 -- MCP SERVERS (user-configured Model Context Protocol servers for Agent Factory external tools)
 CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -4303,6 +4599,7 @@ CREATE TABLE IF NOT EXISTS custom_playbooks (
     category VARCHAR(100),
     tags TEXT[] DEFAULT '{}',
     required_connectors TEXT[] DEFAULT '{}',
+    is_builtin BOOLEAN DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -4502,6 +4799,8 @@ CREATE TABLE IF NOT EXISTS agent_lines (
     status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'archived')),
     heartbeat_config JSONB DEFAULT '{}',
     governance_policy JSONB DEFAULT '{}',
+    governance_mode VARCHAR(30) NOT NULL DEFAULT 'hierarchical'
+        CHECK (governance_mode IN ('hierarchical', 'committee', 'round_robin', 'consensus')),
     next_beat_at TIMESTAMPTZ,
     last_beat_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
@@ -4524,6 +4823,60 @@ CREATE TABLE IF NOT EXISTS agent_line_memberships (
 CREATE INDEX IF NOT EXISTS idx_agent_line_memberships_line ON agent_line_memberships(line_id);
 CREATE INDEX IF NOT EXISTS idx_agent_line_memberships_profile ON agent_line_memberships(agent_profile_id);
 CREATE INDEX IF NOT EXISTS idx_agent_line_memberships_reports_to ON agent_line_memberships(reports_to);
+
+-- AGENT ARTIFACT SHARES (user-to-user sharing of agent profiles, playbooks, skills; migration 137)
+CREATE TABLE IF NOT EXISTS agent_artifact_shares (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    artifact_type VARCHAR(50) NOT NULL
+        CHECK (artifact_type IN ('agent_profile', 'playbook', 'skill')),
+    artifact_id UUID NOT NULL,
+    owner_user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    shared_with_user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    is_transitive BOOLEAN DEFAULT false,
+    parent_share_id UUID REFERENCES agent_artifact_shares(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (artifact_type, artifact_id, shared_with_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_shares_recipient ON agent_artifact_shares(shared_with_user_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_shares_owner ON agent_artifact_shares(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_shares_artifact ON agent_artifact_shares(artifact_type, artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_shares_parent ON agent_artifact_shares(parent_share_id);
+
+-- SAVED ARTIFACTS (chat artifact library, dashboard embeds, share, export; migration 138)
+CREATE TABLE IF NOT EXISTS saved_artifacts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    title VARCHAR(255) NOT NULL,
+    artifact_type VARCHAR(20) NOT NULL
+        CHECK (artifact_type IN ('html', 'mermaid', 'chart', 'svg', 'react')),
+    code TEXT NOT NULL,
+    language VARCHAR(20),
+    share_token VARCHAR(64) UNIQUE,
+    is_public BOOLEAN DEFAULT FALSE,
+    source_conversation_id VARCHAR(255),
+    source_message_id VARCHAR(255),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_saved_artifacts_user ON saved_artifacts (user_id);
+CREATE INDEX IF NOT EXISTS idx_saved_artifacts_share_token ON saved_artifacts (share_token) WHERE share_token IS NOT NULL;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'user_control_panes'
+  ) AND EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = 'saved_artifacts'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'user_control_panes_artifact_id_fkey'
+  ) THEN
+    ALTER TABLE user_control_panes
+      ADD CONSTRAINT user_control_panes_artifact_id_fkey
+      FOREIGN KEY (artifact_id) REFERENCES saved_artifacts(id) ON DELETE SET NULL;
+  END IF;
+END $$;
 
 -- AGENT MESSAGES (inter-agent timeline, migration 087)
 CREATE TABLE IF NOT EXISTS agent_messages (
@@ -4583,6 +4936,18 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_line_status ON agent_tasks(line_id, status);
 CREATE INDEX IF NOT EXISTS idx_agent_tasks_assigned_status ON agent_tasks(assigned_agent_id, status);
 
+-- Agent line brief snapshots (heartbeat history / diff, migration 154)
+CREATE TABLE IF NOT EXISTS agent_line_brief_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_id UUID NOT NULL REFERENCES agent_lines(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    source VARCHAR(200) NOT NULL DEFAULT 'heartbeat_report',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_line_brief_snapshots_line_created
+    ON agent_line_brief_snapshots(line_id, created_at DESC);
+
 -- EXECUTION STEP TRACE (per-step trace, added via migration 062+063)
 CREATE TABLE IF NOT EXISTS agent_execution_steps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -4602,6 +4967,302 @@ CREATE TABLE IF NOT EXISTS agent_execution_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_steps_execution_id
     ON agent_execution_steps(execution_id);
+
+-- ============================================================================
+-- AGENT FACTORY TIER-1 ROW LEVEL SECURITY (mirrors migration 142_agent_factory_rls.sql)
+-- Uses app.current_user_id / app.current_user_role (database_manager_service).
+-- ============================================================================
+
+ALTER TABLE agent_execution_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_execution_log_all ON agent_execution_log;
+CREATE POLICY agent_execution_log_all ON agent_execution_log FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_discoveries ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_discoveries_all ON agent_discoveries;
+CREATE POLICY agent_discoveries_all ON agent_discoveries FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_schedules ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_schedules_all ON agent_schedules;
+CREATE POLICY agent_schedules_all ON agent_schedules FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_budgets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_budgets_all ON agent_budgets;
+CREATE POLICY agent_budgets_all ON agent_budgets FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+    OR EXISTS (
+      SELECT 1 FROM agent_profiles p
+      WHERE p.id = agent_budgets.agent_profile_id
+        AND (
+          p.user_id = current_setting('app.current_user_id', true)::varchar
+          OR EXISTS (
+            SELECT 1 FROM agent_artifact_shares sh
+            WHERE sh.artifact_type = 'agent_profile'
+              AND sh.artifact_id = p.id
+              AND sh.shared_with_user_id = current_setting('app.current_user_id', true)::varchar
+          )
+        )
+    )
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+    OR EXISTS (
+      SELECT 1 FROM agent_profiles p
+      WHERE p.id = agent_budgets.agent_profile_id
+        AND (
+          p.user_id = current_setting('app.current_user_id', true)::varchar
+          OR EXISTS (
+            SELECT 1 FROM agent_artifact_shares sh
+            WHERE sh.artifact_type = 'agent_profile'
+              AND sh.artifact_id = p.id
+              AND sh.shared_with_user_id = current_setting('app.current_user_id', true)::varchar
+          )
+        )
+    )
+  );
+
+ALTER TABLE agent_approval_queue ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_approval_queue_all ON agent_approval_queue;
+CREATE POLICY agent_approval_queue_all ON agent_approval_queue FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_memory ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_memory_all ON agent_memory;
+CREATE POLICY agent_memory_all ON agent_memory FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_lines ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_lines_all ON agent_lines;
+CREATE POLICY agent_lines_all ON agent_lines FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_line_brief_snapshots ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_line_brief_snapshots_all ON agent_line_brief_snapshots;
+CREATE POLICY agent_line_brief_snapshots_all ON agent_line_brief_snapshots FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_factory_sidebar_categories ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_factory_sidebar_categories_all ON agent_factory_sidebar_categories;
+CREATE POLICY agent_factory_sidebar_categories_all ON agent_factory_sidebar_categories FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE agent_profiles ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS agent_profiles_select ON agent_profiles;
+CREATE POLICY agent_profiles_select ON agent_profiles FOR SELECT USING (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+  OR EXISTS (
+    SELECT 1 FROM agent_artifact_shares sh
+    WHERE sh.artifact_type = 'agent_profile'
+      AND sh.artifact_id = agent_profiles.id
+      AND sh.shared_with_user_id = current_setting('app.current_user_id', true)::varchar
+  )
+);
+DROP POLICY IF EXISTS agent_profiles_insert ON agent_profiles;
+CREATE POLICY agent_profiles_insert ON agent_profiles FOR INSERT WITH CHECK (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+);
+DROP POLICY IF EXISTS agent_profiles_update ON agent_profiles;
+CREATE POLICY agent_profiles_update ON agent_profiles FOR UPDATE USING (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+) WITH CHECK (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+);
+DROP POLICY IF EXISTS agent_profiles_delete ON agent_profiles;
+CREATE POLICY agent_profiles_delete ON agent_profiles FOR DELETE USING (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+);
+
+ALTER TABLE custom_playbooks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS custom_playbooks_select ON custom_playbooks;
+CREATE POLICY custom_playbooks_select ON custom_playbooks FOR SELECT USING (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR COALESCE(is_builtin, false) = true
+  OR user_id IS NULL
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+  OR EXISTS (
+    SELECT 1 FROM agent_artifact_shares sh
+    WHERE sh.artifact_type = 'playbook'
+      AND sh.artifact_id = custom_playbooks.id
+      AND sh.shared_with_user_id = current_setting('app.current_user_id', true)::varchar
+  )
+);
+DROP POLICY IF EXISTS custom_playbooks_insert ON custom_playbooks;
+CREATE POLICY custom_playbooks_insert ON custom_playbooks FOR INSERT WITH CHECK (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+);
+DROP POLICY IF EXISTS custom_playbooks_update ON custom_playbooks;
+CREATE POLICY custom_playbooks_update ON custom_playbooks FOR UPDATE USING (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+) WITH CHECK (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+);
+DROP POLICY IF EXISTS custom_playbooks_delete ON custom_playbooks;
+CREATE POLICY custom_playbooks_delete ON custom_playbooks FOR DELETE USING (
+  current_setting('app.current_user_role', true) = 'admin'
+  OR user_id = current_setting('app.current_user_id', true)::varchar
+);
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'agent_skills') THEN
+    ALTER TABLE agent_skills ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS agent_skills_select ON agent_skills;
+    CREATE POLICY agent_skills_select ON agent_skills FOR SELECT USING (
+      current_setting('app.current_user_role', true) = 'admin'
+      OR user_id IS NULL
+      OR user_id = current_setting('app.current_user_id', true)::varchar
+      OR EXISTS (
+        SELECT 1 FROM agent_artifact_shares sh
+        WHERE sh.artifact_type = 'skill'
+          AND sh.artifact_id = agent_skills.id
+          AND sh.shared_with_user_id = current_setting('app.current_user_id', true)::varchar
+      )
+    );
+    DROP POLICY IF EXISTS agent_skills_insert ON agent_skills;
+    CREATE POLICY agent_skills_insert ON agent_skills FOR INSERT WITH CHECK (
+      current_setting('app.current_user_role', true) = 'admin'
+      OR user_id = current_setting('app.current_user_id', true)::varchar
+    );
+    DROP POLICY IF EXISTS agent_skills_update ON agent_skills;
+    CREATE POLICY agent_skills_update ON agent_skills FOR UPDATE USING (
+      current_setting('app.current_user_role', true) = 'admin'
+      OR user_id = current_setting('app.current_user_id', true)::varchar
+    ) WITH CHECK (
+      current_setting('app.current_user_role', true) = 'admin'
+      OR user_id = current_setting('app.current_user_id', true)::varchar
+    );
+    DROP POLICY IF EXISTS agent_skills_delete ON agent_skills;
+    CREATE POLICY agent_skills_delete ON agent_skills FOR DELETE USING (
+      current_setting('app.current_user_role', true) = 'admin'
+      OR user_id = current_setting('app.current_user_id', true)::varchar
+    );
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'agent_email_watches') THEN
+    ALTER TABLE agent_email_watches ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS agent_email_watches_all ON agent_email_watches;
+    CREATE POLICY agent_email_watches_all ON agent_email_watches FOR ALL
+      USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      )
+      WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      );
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'agent_folder_watches') THEN
+    ALTER TABLE agent_folder_watches ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS agent_folder_watches_all ON agent_folder_watches;
+    CREATE POLICY agent_folder_watches_all ON agent_folder_watches FOR ALL
+      USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      )
+      WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      );
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'agent_conversation_watches') THEN
+    ALTER TABLE agent_conversation_watches ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS agent_conversation_watches_all ON agent_conversation_watches;
+    CREATE POLICY agent_conversation_watches_all ON agent_conversation_watches FOR ALL
+      USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      )
+      WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      );
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'agent_line_watches') THEN
+    ALTER TABLE agent_line_watches ENABLE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS agent_line_watches_all ON agent_line_watches;
+    CREATE POLICY agent_line_watches_all ON agent_line_watches FOR ALL
+      USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      )
+      WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+      );
+  END IF;
+END $$;
 
 -- PLAYBOOK VERSION HISTORY (snapshots on update, added via migration 062)
 CREATE TABLE IF NOT EXISTS playbook_versions (
@@ -4643,15 +5304,46 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_document_versions_unique
 CREATE INDEX IF NOT EXISTS idx_document_versions_current
     ON document_versions(document_id) WHERE is_current = TRUE;
 
+-- Collaborative Markdown: persisted Y.Doc binary state (migration 120; WebSocket /api/ws/collab)
+CREATE TABLE IF NOT EXISTS document_collab_state (
+    document_id TEXT PRIMARY KEY REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    ydoc_state BYTEA NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_document_collab_state_updated
+    ON document_collab_state (updated_at DESC);
+
+-- Code workspaces (local proxy-backed; migration 122)
+CREATE TABLE IF NOT EXISTS code_workspaces (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    device_name TEXT,
+    device_id TEXT,
+    workspace_path TEXT NOT NULL,
+    last_file_tree JSONB,
+    last_git_branch TEXT,
+    settings JSONB DEFAULT '{}'::jsonb,
+    conversation_id UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_code_workspaces_user_id ON code_workspaces(user_id);
+CREATE INDEX IF NOT EXISTS idx_code_workspaces_user_device ON code_workspaces (user_id, device_id);
+GRANT SELECT, INSERT, UPDATE, DELETE ON code_workspaces TO bastion_user;
+
+-- Legacy news table removal (migration 117; idempotent)
+DROP TABLE IF EXISTS news_articles CASCADE;
+
 -- ========================================
 -- DATABASE INITIALIZATION COMPLETE
--- Roosevelt's Square Deal for Data!
+-- Database initialization complete
 -- ========================================
 
 -- ============================================================================
 -- FINAL SECURITY HARDENING - REVOKE BYPASSRLS
 -- ============================================================================
--- ROOSEVELT'S SECURITY FIX: Remove BYPASSRLS to enforce Row-Level Security
+-- Remove BYPASSRLS to enforce Row-Level Security
 -- BYPASSRLS was needed during init to insert default data into RLS-protected tables
 -- Now that init is complete, revoke it so RLS policies are enforced
 

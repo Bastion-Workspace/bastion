@@ -1,6 +1,6 @@
 -- ========================================
--- ROOSEVELT'S MESSAGING SYSTEM MIGRATION
--- User-to-User Communication Cavalry!
+-- Messaging system migration
+-- Direct and group chat tables
 -- ========================================
 -- This migration can be run on existing databases without data loss
 -- Idempotent design - safe to run multiple times
@@ -339,7 +339,7 @@ COMMENT ON TABLE user_presence IS 'User online/offline/away status tracking';
 DO $$
 BEGIN
     RAISE NOTICE '========================================';
-    RAISE NOTICE 'BULLY! Messaging system migration complete!';
+    RAISE NOTICE 'Messaging system migration complete';
     RAISE NOTICE 'Tables created: chat_rooms, room_participants, chat_messages, message_reactions, room_encryption_keys, user_presence';
     RAISE NOTICE 'Indexes created: 12 performance indexes';
     RAISE NOTICE 'RLS policies enabled for all tables';

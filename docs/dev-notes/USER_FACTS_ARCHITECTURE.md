@@ -189,7 +189,7 @@ When a fact is updated, the system detects conflicts and protects user-authored 
 
 - Migrations: `backend/sql/migrations/066_enhance_user_facts.sql`, `backend/sql/migrations/067_add_episodic_memory_and_fact_history.sql`
 - Backend: `backend/services/settings_service.py`, `backend/services/grpc_context_gatherer.py`, `backend/services/grpc_tool_service.py`, `backend/services/episode_service.py`
-- Orchestrator: `llm-orchestrator/orchestrator/utils/fact_utils.py`, `llm-orchestrator/orchestrator/agents/custom_agent_runner.py`, `llm-orchestrator/orchestrator/agents/chat_agent.py`, `llm-orchestrator/orchestrator/tools/user_profile_tools.py`
+- Orchestrator: `llm-orchestrator/orchestrator/utils/fact_utils.py`, `llm-orchestrator/orchestrator/agents/custom_agent_runner.py`, `llm-orchestrator/orchestrator/tools/user_profile_tools.py`
 - Celery: `backend/services/celery_tasks/fact_tasks.py`, `backend/services/celery_tasks/episode_tasks.py`
 - API: `backend/api/settings_api.py` (facts, episodes, pending, history)
 - Frontend: `frontend/src/components/SettingsPage.js` (Remembered Facts, Activity History, Pending Fact Updates, Fact Change History)

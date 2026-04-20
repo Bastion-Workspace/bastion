@@ -22,7 +22,7 @@ function IsolatedPromptTemplateField({
     if (promptDraftRef) {
       promptDraftRef.current = seedPrompt;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- seedPrompt is intentional snapshot when resetKey changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- seedPrompt is snapshot when resetKey changes
   }, [resetKey, promptDraftRef]);
 
   useEffect(

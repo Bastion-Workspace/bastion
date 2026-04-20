@@ -48,15 +48,12 @@ import {
 import apiService from '../services/apiService';
 import orgService from '../services/org/OrgService';
 import OrgRefileDialog from './OrgRefileDialog';
+import OrgArchiveDialog from './OrgArchiveDialog';
 
 /**
  * Org TODOs view: all TODO items across org files (hierarchy, filters, inline state).
  */
 const ORG_TODOS_PREFS_KEY = 'orgTodosView.filters';
-
-/** State Select + Refile + gaps — ListItem `secondaryAction` overlays the row; reserve width so text does not run under controls. */
-const TODO_LIST_SECONDARY_RESERVE_FULL_PX = 196;
-const TODO_LIST_SECONDARY_RESERVE_REFILE_ONLY_PX = 52;
 
 /** Org keyword values unchanged; labels match sentence case in the UI */
 const TODO_STATE_OPTIONS = [
@@ -150,6 +147,10 @@ const OrgTodosView = ({ onOpenDocument }) => {
   const [error, setError] = useState(null);
   const [refileDialogOpen, setRefileDialogOpen] = useState(false);
   const [refileItem, setRefileItem] = useState(null);
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [archiveItem, setArchiveItem] = useState(null);
+  const [moveMenuAnchor, setMoveMenuAnchor] = useState(null);
+  const [moveMenuItem, setMoveMenuItem] = useState(null);
   const [bulkArchiveDialogOpen, setBulkArchiveDialogOpen] = useState(false);
   const [bulkArchiveFile, setBulkArchiveFile] = useState('');
   const [bulkArchiving, setBulkArchiving] = useState(false);
@@ -502,7 +503,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
      * {
      *   heading: "Parent Heading",
      *   level: 1,
-     *   todos: [todo1, todo2],  // TODOs directly under this heading
+     *   todos: [todo1, todo2],  // Org TODO entries directly under this heading
      *   children: [childNode1, childNode2],  // Sub-headings
      *   path: ["Parent", "Child"],  // Full path to this node
      *   isOrphan: false  // True if this is the "File Root" section
@@ -534,7 +535,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
       return node;
     };
 
-    // Process each TODO
+    // Process each org TODO row
     todos.forEach(todo => {
       const parentPath = todo.parent_path || [];
       const parentLevels = todo.parent_levels || [];
@@ -659,6 +660,28 @@ const OrgTodosView = ({ onOpenDocument }) => {
     }
   };
 
+  const openMoveMenu = useCallback((e, item) => {
+    e.stopPropagation();
+    setMoveMenuAnchor(e.currentTarget);
+    setMoveMenuItem(item);
+  }, []);
+
+  const closeMoveMenu = useCallback(() => {
+    setMoveMenuAnchor(null);
+    setMoveMenuItem(null);
+  }, []);
+
+  const handleArchiveDialogComplete = useCallback(
+    (result) => {
+      setArchiveDialogOpen(false);
+      setArchiveItem(null);
+      if (result?.success) {
+        loadTodos();
+      }
+    },
+    [loadTodos]
+  );
+
   const sortedTodos = getSortedTodos(todosData?.results || []);
   const groupedTodos = sortBy === 'file' ? groupByFile(sortedTodos) : null;
 
@@ -733,72 +756,29 @@ const OrgTodosView = ({ onOpenDocument }) => {
           </Box>
         )}
         
-        {/* TODOs directly under this heading (when expanded) */}
-        {/* For orphan nodes, show TODOs when file is expanded (no "File Root" wrapper) */}
+        {/* Org TODO entries directly under this heading (when expanded) */}
+        {/* For orphan nodes, show org TODO entries when file is expanded (no "File Root" wrapper) */}
         {/* For regular nodes, show when heading is expanded */}
         {((node.isOrphan && shouldShowOrphanTodos) || (!node.isOrphan && isExpanded)) && node.todos.length > 0 && (
           <List disablePadding sx={{ ml: (nodeIndent + 1) * 3 }}>
             {node.todos.map((item, idx) => {
               const hasStateSelect = item.file_path != null && item.line_number != null;
-              const secondaryReservePx = hasStateSelect
-                ? TODO_LIST_SECONDARY_RESERVE_FULL_PX
-                : TODO_LIST_SECONDARY_RESERVE_REFILE_ONLY_PX;
               return (
               <React.Fragment key={idx}>
                 {idx > 0 && <Divider />}
-                <ListItem 
+                <ListItem
                   disablePadding
-                  secondaryAction={
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0, pr: 0.5 }}>
-                      {hasStateSelect && (
-                        <Select
-                          size="small"
-                          value={item.todo_state || 'TODO'}
-                          onChange={(e) => handleStateChange(item, e.target.value, e)}
-                          onClick={(e) => e.stopPropagation()}
-                          sx={todoRowStateSelectSx}
-                          MenuProps={todosStateRowMenuProps}
-                          disabled={!!actionItemId}
-                          renderValue={(v) => (
-                            <Typography variant="body2" component="span" sx={{ fontWeight: 500, lineHeight: 1.43 }}>
-                              {todoStateDisplayLabel(v)}
-                            </Typography>
-                          )}
-                        >
-                          {TODO_STATE_OPTIONS.map(({ value, label }) => (
-                            <MenuItem key={value} value={value} dense>
-                              <Typography variant="body2" component="span" sx={{ fontWeight: 400, lineHeight: 1.43 }}>
-                                {label}
-                              </Typography>
-                            </MenuItem>
-                          ))}
-                        </Select>
-                      )}
-                      <Tooltip title="Refile — move this task to another org file">
-                        <IconButton
-                          edge="end"
-                          size="small"
-                          color="primary"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setRefileItem(item);
-                            setRefileDialogOpen(true);
-                          }}
-                          aria-label="Refile"
-                        >
-                          <DriveFileMove fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    </Box>
-                  }
+                  alignItems="stretch"
+                  sx={{ display: 'flex', flexDirection: 'row', gap: 0.5 }}
                 >
                   <ListItemButton
                     onClick={() => handleItemClick(item)}
                     sx={{
+                      flex: 1,
+                      minWidth: 0,
                       py: 0.75,
-                      pr: `${secondaryReservePx}px`,
                       alignItems: 'flex-start',
-                      overflow: 'hidden'
+                      overflow: 'hidden',
                     }}
                   >
                     <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
@@ -892,12 +872,14 @@ const OrgTodosView = ({ onOpenDocument }) => {
                           sx={{
                             color: 'text.secondary',
                             mt: 0.25,
+                            display: 'block',
+                            minWidth: 0,
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap',
                             opacity: 0.7,
                             width: '100%',
-                            maxWidth: '100%'
+                            maxWidth: '100%',
                           }}
                         >
                           {item.body_preview}
@@ -905,6 +887,60 @@ const OrgTodosView = ({ onOpenDocument }) => {
                       )}
                     </Box>
                   </ListItemButton>
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      flexShrink: 0,
+                      gap: 0.5,
+                      pr: 0.5,
+                    }}
+                  >
+                    {hasStateSelect && (
+                      <Select
+                        size="small"
+                        value={item.todo_state || 'TODO'}
+                        onChange={(e) => handleStateChange(item, e.target.value, e)}
+                        onClick={(e) => e.stopPropagation()}
+                        sx={todoRowStateSelectSx}
+                        MenuProps={todosStateRowMenuProps}
+                        disabled={!!actionItemId}
+                        renderValue={(v) => (
+                          <Typography variant="body2" component="span" sx={{ fontWeight: 500, lineHeight: 1.43 }}>
+                            {todoStateDisplayLabel(v)}
+                          </Typography>
+                        )}
+                      >
+                        {TODO_STATE_OPTIONS.map(({ value, label }) => (
+                          <MenuItem key={value} value={value} dense>
+                            <Typography variant="body2" component="span" sx={{ fontWeight: 400, lineHeight: 1.43 }}>
+                              {label}
+                            </Typography>
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    )}
+                    <Tooltip title="Refile or archive…">
+                      <IconButton
+                        edge="end"
+                        size="small"
+                        color="primary"
+                        onClick={(e) => openMoveMenu(e, item)}
+                        aria-label="Refile or archive"
+                        sx={{
+                          flexShrink: 0,
+                          border: '1px solid',
+                          borderColor: 'divider',
+                          borderRadius: 1,
+                        }}
+                      >
+                        <Box sx={{ display: 'flex', alignItems: 'center', lineHeight: 0 }}>
+                          <DriveFileMove sx={{ fontSize: '1.125rem' }} />
+                          <ArrowDropDown sx={{ fontSize: '1.125rem', ml: -0.5 }} />
+                        </Box>
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
                 </ListItem>
               </React.Fragment>
               );
@@ -920,7 +956,16 @@ const OrgTodosView = ({ onOpenDocument }) => {
         )}
       </Box>
     );
-  }, [handleItemClick, handleStateChange, actionItemId, setRefileItem, setRefileDialogOpen, getTodoStateColor, isPathExpanded, togglePath, isFileExpanded]);
+  }, [
+    handleItemClick,
+    handleStateChange,
+    actionItemId,
+    getTodoStateColor,
+    isPathExpanded,
+    togglePath,
+    isFileExpanded,
+    openMoveMenu,
+  ]);
 
   const refineFilterCount = [tagFilter, priorityFilter, categoryFilter].filter(Boolean).length;
 
@@ -1388,11 +1433,20 @@ const OrgTodosView = ({ onOpenDocument }) => {
                   /* Flat list view */
                   <Paper variant="outlined">
                     <List disablePadding>
-                      {sortedTodos.map((item, idx) => (
+                      {sortedTodos.map((item, idx) => {
+                        const hasStateSelectFlat = item.file_path != null && item.line_number != null;
+                        return (
                         <React.Fragment key={idx}>
                           {idx > 0 && <Divider />}
-                          <ListItem disablePadding>
-                            <ListItemButton onClick={() => handleItemClick(item)} sx={{ py: 0.75, overflow: 'hidden' }}>
+                          <ListItem
+                            disablePadding
+                            alignItems="stretch"
+                            sx={{ display: 'flex', flexDirection: 'row', gap: 0.5 }}
+                          >
+                            <ListItemButton
+                              onClick={() => handleItemClick(item)}
+                              sx={{ flex: 1, minWidth: 0, py: 0.75, overflow: 'hidden' }}
+                            >
                               <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
                                 <Box
                                   sx={{
@@ -1506,9 +1560,64 @@ const OrgTodosView = ({ onOpenDocument }) => {
                                 )}
                               </Box>
                             </ListItemButton>
+                            <Box
+                              sx={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                flexShrink: 0,
+                                gap: 0.5,
+                                pr: 0.5,
+                              }}
+                            >
+                              {hasStateSelectFlat && (
+                                <Select
+                                  size="small"
+                                  value={item.todo_state || 'TODO'}
+                                  onChange={(e) => handleStateChange(item, e.target.value, e)}
+                                  onClick={(e) => e.stopPropagation()}
+                                  sx={todoRowStateSelectSx}
+                                  MenuProps={todosStateRowMenuProps}
+                                  disabled={!!actionItemId}
+                                  renderValue={(v) => (
+                                    <Typography variant="body2" component="span" sx={{ fontWeight: 500, lineHeight: 1.43 }}>
+                                      {todoStateDisplayLabel(v)}
+                                    </Typography>
+                                  )}
+                                >
+                                  {TODO_STATE_OPTIONS.map(({ value, label }) => (
+                                    <MenuItem key={value} value={value} dense>
+                                      <Typography variant="body2" component="span" sx={{ fontWeight: 400, lineHeight: 1.43 }}>
+                                        {label}
+                                      </Typography>
+                                    </MenuItem>
+                                  ))}
+                                </Select>
+                              )}
+                              <Tooltip title="Refile or archive…">
+                                <IconButton
+                                  edge="end"
+                                  size="small"
+                                  color="primary"
+                                  onClick={(e) => openMoveMenu(e, item)}
+                                  aria-label="Refile or archive"
+                                  sx={{
+                                    flexShrink: 0,
+                                    border: '1px solid',
+                                    borderColor: 'divider',
+                                    borderRadius: 1,
+                                  }}
+                                >
+                                  <Box sx={{ display: 'flex', alignItems: 'center', lineHeight: 0 }}>
+                                    <DriveFileMove sx={{ fontSize: '1.125rem' }} />
+                                    <ArrowDropDown sx={{ fontSize: '1.125rem', ml: -0.5 }} />
+                                  </Box>
+                                </IconButton>
+                              </Tooltip>
+                            </Box>
                           </ListItem>
                         </React.Fragment>
-                      ))}
+                        );
+                      })}
                     </List>
                   </Paper>
                 )}
@@ -1526,13 +1635,64 @@ const OrgTodosView = ({ onOpenDocument }) => {
           onClose={(result) => {
             setRefileDialogOpen(false);
             if (result?.success) {
-              console.log('Refile completed, refreshing TODOs');
-              loadTodos(); // Refresh the TODO list
+              loadTodos();
             }
           }}
           sourceFile={`OrgMode/${refileItem.filename}`}
           sourceLine={refileItem.line_number}
           sourceHeading={refileItem.heading}
+        />
+      )}
+
+      <Menu
+        anchorEl={moveMenuAnchor}
+        open={Boolean(moveMenuAnchor)}
+        onClose={closeMoveMenu}
+        onClick={(e) => e.stopPropagation()}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+      >
+        <MenuItem
+          onClick={(e) => {
+            e.stopPropagation();
+            const it = moveMenuItem;
+            closeMoveMenu();
+            if (it) {
+              setRefileItem(it);
+              setRefileDialogOpen(true);
+            }
+          }}
+        >
+          <DriveFileMove fontSize="small" sx={{ mr: 1, verticalAlign: 'middle' }} />
+          Refile…
+        </MenuItem>
+        <MenuItem
+          onClick={(e) => {
+            e.stopPropagation();
+            const it = moveMenuItem;
+            closeMoveMenu();
+            if (it) {
+              setArchiveItem(it);
+              setArchiveDialogOpen(true);
+            }
+          }}
+        >
+          <Archive fontSize="small" sx={{ mr: 1, verticalAlign: 'middle' }} />
+          Archive…
+        </MenuItem>
+      </Menu>
+
+      {archiveItem && (
+        <OrgArchiveDialog
+          open={archiveDialogOpen}
+          onClose={() => {
+            setArchiveDialogOpen(false);
+            setArchiveItem(null);
+          }}
+          sourceFile={`OrgMode/${archiveItem.filename}`}
+          sourceLine={archiveItem.line_number}
+          sourceHeading={archiveItem.heading}
+          onArchiveComplete={handleArchiveDialogComplete}
         />
       )}
 

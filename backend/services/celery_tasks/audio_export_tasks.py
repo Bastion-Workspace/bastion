@@ -108,7 +108,7 @@ async def _async_export_document_audio(
             }
         combined.extend(data)
 
-    out_dir = Path(settings.UPLOAD_DIR) / "audio_exports"
+    out_dir = Path(settings.EXPORTS_DIR) / "audio_exports"
     out_dir.mkdir(parents=True, exist_ok=True)
     task_id = task.request.id
     out_path = out_dir / f"{task_id}.mp3"

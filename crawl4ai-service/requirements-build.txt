@@ -1,0 +1,2 @@
+# Build-time only: protoc / gRPC codegen (not installed in runtime image)
+grpcio-tools==1.80.0

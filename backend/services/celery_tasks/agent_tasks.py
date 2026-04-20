@@ -4,11 +4,13 @@ Background processing for individual agents
 Uses gRPC orchestrator for all agent processing
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
 import grpc
 
+from config import settings
 from services.celery_app import celery_app, update_task_progress, TaskStatus
 from services.celery_tasks.async_runner import run_async
 
@@ -87,40 +89,66 @@ async def _call_grpc_orchestrator(
             )
             
             logger.info(f"📤 Background task forwarding to gRPC orchestrator: {query[:100]}")
-            
-            # Collect all chunks from streaming response
-            full_response = ""
-            agent_name = None
-            status_messages = []
-            
-            async for chunk in stub.StreamChat(grpc_request):
-                if chunk.type == "status":
-                    status_messages.append(chunk.message)
-                    if chunk.agent_name:
-                        agent_name = chunk.agent_name
-                    logger.debug(f"📊 Status: {chunk.message}")
-                
-                elif chunk.type == "content":
-                    full_response += chunk.message
-                    if chunk.agent_name:
-                        agent_name = chunk.agent_name
-                
-                elif chunk.type == "error":
-                    logger.error(f"❌ gRPC orchestrator error: {chunk.message}")
-                    return {
-                        "success": False,
-                        "error": chunk.message,
-                        "message": "Background task processing failed"
-                    }
-            
-            logger.info(f"✅ Background task received response from {agent_name or 'orchestrator'}: {len(full_response)} chars")
-            
-            return {
-                "success": True,
-                "response": full_response,
-                "agent_type": agent_name or agent_type or "unknown",
-                "status_messages": status_messages
+
+            acc: Dict[str, Any] = {
+                "full_response": "",
+                "agent_name": None,
+                "status_messages": [],
             }
+
+            async def _consume_stream() -> Dict[str, Any]:
+                async for chunk in stub.StreamChat(grpc_request):
+                    if chunk.type == "status":
+                        acc["status_messages"].append(chunk.message)
+                        if chunk.agent_name:
+                            acc["agent_name"] = chunk.agent_name
+                        logger.debug(f"📊 Status: {chunk.message}")
+
+                    elif chunk.type == "content":
+                        acc["full_response"] += chunk.message
+                        if chunk.agent_name:
+                            acc["agent_name"] = chunk.agent_name
+
+                    elif chunk.type == "error":
+                        logger.error(f"❌ gRPC orchestrator error: {chunk.message}")
+                        return {
+                            "success": False,
+                            "error": chunk.message,
+                            "message": "Background task processing failed",
+                        }
+
+                logger.info(
+                    "✅ Background task received response from %s: %s chars",
+                    acc["agent_name"] or "orchestrator",
+                    len(acc["full_response"]),
+                )
+                return {
+                    "success": True,
+                    "response": acc["full_response"],
+                    "agent_type": acc["agent_name"] or agent_type or "unknown",
+                    "status_messages": acc["status_messages"],
+                }
+
+            try:
+                return await asyncio.wait_for(
+                    _consume_stream(),
+                    timeout=settings.CELERY_ORCHESTRATOR_STREAM_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                cap = settings.CELERY_ORCHESTRATOR_STREAM_TIMEOUT_SEC
+                plen = len(acc["full_response"])
+                logger.error(
+                    "Background task StreamChat exceeded %.0fs (partial response %s chars)",
+                    cap,
+                    plen,
+                )
+                return {
+                    "success": False,
+                    "error": f"orchestrator_stream_timeout_{int(cap)}s_partial_{plen}_chars",
+                    "message": (
+                        f"Orchestrator stream exceeded {cap}s; partial response was {plen} characters."
+                    ),
+                }
             
     except Exception as e:
         logger.error(f"❌ Background task gRPC orchestrator error: {e}")
@@ -178,36 +206,63 @@ async def _call_grpc_orchestrator_custom_agent(
                 agent_type=None,
                 routing_reason="Scheduled agent execution",
             )
-            full_response = ""
-            agent_name = None
-            task_status = None
-            approval_queue_id = None
-            async for chunk in stub.StreamChat(grpc_request):
-                if chunk.type == "status" and chunk.agent_name:
-                    agent_name = chunk.agent_name
-                elif chunk.type == "content":
-                    full_response += chunk.message
-                    if chunk.agent_name:
-                        agent_name = chunk.agent_name
-                elif chunk.type == "complete" and chunk.metadata:
-                    task_status = chunk.metadata.get("task_status") or task_status
-                    approval_queue_id = chunk.metadata.get("approval_queue_id") or approval_queue_id
-                elif chunk.type == "error":
-                    return {
-                        "success": False,
-                        "error": chunk.message,
-                        "message": "Scheduled agent processing failed",
-                    }
-            out = {
-                "success": True,
-                "response": full_response,
-                "agent_type": agent_name or "custom_agent",
+            acc: Dict[str, Any] = {
+                "full_response": "",
+                "agent_name": None,
+                "task_status": None,
+                "approval_queue_id": None,
             }
-            if task_status:
-                out["task_status"] = task_status
-            if approval_queue_id:
-                out["approval_queue_id"] = approval_queue_id
-            return out
+
+            async def _consume_custom_stream() -> Dict[str, Any]:
+                async for chunk in stub.StreamChat(grpc_request):
+                    if chunk.type == "status" and chunk.agent_name:
+                        acc["agent_name"] = chunk.agent_name
+                    elif chunk.type == "content":
+                        acc["full_response"] += chunk.message
+                        if chunk.agent_name:
+                            acc["agent_name"] = chunk.agent_name
+                    elif chunk.type == "complete" and chunk.metadata:
+                        acc["task_status"] = chunk.metadata.get("task_status") or acc["task_status"]
+                        acc["approval_queue_id"] = (
+                            chunk.metadata.get("approval_queue_id") or acc["approval_queue_id"]
+                        )
+                    elif chunk.type == "error":
+                        return {
+                            "success": False,
+                            "error": chunk.message,
+                            "message": "Scheduled agent processing failed",
+                        }
+                out: Dict[str, Any] = {
+                    "success": True,
+                    "response": acc["full_response"],
+                    "agent_type": acc["agent_name"] or "custom_agent",
+                }
+                if acc["task_status"]:
+                    out["task_status"] = acc["task_status"]
+                if acc["approval_queue_id"]:
+                    out["approval_queue_id"] = acc["approval_queue_id"]
+                return out
+
+            try:
+                return await asyncio.wait_for(
+                    _consume_custom_stream(),
+                    timeout=settings.CELERY_ORCHESTRATOR_STREAM_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                cap = settings.CELERY_ORCHESTRATOR_STREAM_TIMEOUT_SEC
+                plen = len(acc["full_response"])
+                logger.error(
+                    "Scheduled agent StreamChat exceeded %.0fs (partial response %s chars)",
+                    cap,
+                    plen,
+                )
+                return {
+                    "success": False,
+                    "error": f"orchestrator_stream_timeout_{int(cap)}s_partial_{plen}_chars",
+                    "message": (
+                        f"Orchestrator stream exceeded {cap}s; partial response was {plen} characters."
+                    ),
+                }
     except Exception as e:
         logger.error("Scheduled agent gRPC error: %s", e)
         return {
@@ -550,6 +605,7 @@ def resume_approved_agent(self, approval_id: str, user_id: str) -> Dict[str, Any
             "SELECT agent_profile_id, execution_id, playbook_config, governance_type, preview_data, status FROM agent_approval_queue WHERE id = $1 AND user_id = $2",
             uuid_mod.UUID(approval_id),
             user_id,
+            rls_context={"user_id": user_id, "user_role": "user"},
         ))
         if not row:
             logger.warning("resume_approved_agent: approval not found %s", approval_id)
@@ -722,6 +778,66 @@ def dispatch_folder_file_reaction(
         return {"success": False, "error": str(e), "message": "Folder file reaction failed"}
 
 
+async def _get_agent_bot_user_id(agent_profile_id: str) -> Optional[str]:
+    """Look up the bot_user_id for an agent profile."""
+    from services.database_manager.database_helpers import fetch_one
+    from utils.grpc_rls import grpc_admin_rls as _bot_lookup_rls
+    row = await fetch_one(
+        "SELECT bot_user_id FROM agent_profiles WHERE id = $1::uuid",
+        agent_profile_id,
+        rls_context=_bot_lookup_rls(),
+    )
+    return row["bot_user_id"] if row and row.get("bot_user_id") else None
+
+
+async def _load_room_history_context(room_id: str, limit: int = 20) -> str:
+    """Load recent room messages for agent context."""
+    from services.messaging.messaging_service import MessagingService
+    svc = MessagingService()
+    try:
+        msgs = await svc.get_room_messages(room_id=room_id, user_id="system", limit=limit)
+        if not msgs:
+            return ""
+        lines = []
+        for m in msgs:
+            sender = m.get("display_name") or m.get("username") or m.get("sender_id", "Unknown")
+            lines.append(f"[{sender}]: {m.get('content', '')}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("Failed to load room history for context: %s", e)
+        return ""
+
+
+async def _post_agent_response_to_room(
+    agent_profile_id: str,
+    room_id: str,
+    response_text: str,
+) -> None:
+    """Write the agent's response back to the chat room and broadcast via WebSocket."""
+    bot_user_id = await _get_agent_bot_user_id(agent_profile_id)
+    if not bot_user_id:
+        logger.warning("No bot_user_id for agent %s, cannot post to room", agent_profile_id)
+        return
+    from services.messaging.messaging_service import MessagingService
+    svc = MessagingService()
+    msg = await svc.send_message(
+        room_id=room_id,
+        sender_id=bot_user_id,
+        content=response_text,
+        message_type="text",
+        metadata={"from_agent_profile_id": str(agent_profile_id)},
+    )
+    if msg:
+        from utils.websocket_manager import get_websocket_manager
+        ws_mgr = get_websocket_manager()
+        await ws_mgr.broadcast_to_room(
+            room_id=room_id,
+            message={"type": "new_message", "message": msg},
+            exclude_user_id=None,
+        )
+        logger.info("Agent %s posted response to room %s", agent_profile_id, room_id)
+
+
 @celery_app.task(bind=True, name="agents.dispatch_conversation_reaction")
 def dispatch_conversation_reaction(
     self,
@@ -736,6 +852,7 @@ def dispatch_conversation_reaction(
     """
     Trigger a custom agent when a new message appears in a watched AI conversation or chat room.
     Uses Redis cooldown lock per (agent_profile_id, target_id) to avoid rapid re-triggering.
+    For chat_room watches, loads room history as context and posts the response back to the room.
     """
     target_id = conversation_id or room_id or ""
     try:
@@ -760,6 +877,10 @@ def dispatch_conversation_reaction(
                 extra_context["conversation_id"] = conversation_id
             if room_id:
                 extra_context["room_id"] = room_id
+                room_history = run_async(_load_room_history_context(room_id, limit=20))
+                if room_history:
+                    extra_context["room_history"] = room_history
+
             result = run_async(
                 _call_grpc_orchestrator_custom_agent(
                     agent_profile_id=agent_profile_id,
@@ -770,6 +891,14 @@ def dispatch_conversation_reaction(
                     extra_context=extra_context,
                 )
             )
+
+            if room_id and result.get("success") and result.get("response"):
+                run_async(_post_agent_response_to_room(
+                    agent_profile_id=agent_profile_id,
+                    room_id=room_id,
+                    response_text=result["response"],
+                ))
+
             return result
         finally:
             try:
@@ -800,11 +929,13 @@ async def _async_poll_watched_emails() -> Dict[str, Any]:
     """Fetch new emails for all active email watches, apply filters, dispatch reactions."""
     from datetime import timezone
     from services.database_manager.celery_database_helpers import celery_fetch_all, celery_execute
+    from utils.grpc_rls import grpc_admin_rls as _email_poll_admin_rls
 
     try:
         watches = await celery_fetch_all(
             "SELECT agent_profile_id, connection_id, user_id, is_active, subject_pattern, "
-            "sender_pattern, folder, last_checked_at FROM agent_email_watches WHERE is_active = true"
+            "sender_pattern, folder, last_checked_at FROM agent_email_watches WHERE is_active = true",
+            rls_context=_email_poll_admin_rls(),
         )
         if not watches:
             return {"processed": 0, "dispatched": 0}
@@ -866,6 +997,7 @@ async def _async_poll_watched_emails() -> Dict[str, Any]:
                     "WHERE agent_profile_id = $1::uuid AND connection_id = $2",
                     w["agent_profile_id"],
                     w["connection_id"],
+                    rls_context={"user_id": str(w["user_id"]), "user_role": "user"},
                 )
         return {"processed": len(watches), "dispatched": dispatched}
     except Exception as e:

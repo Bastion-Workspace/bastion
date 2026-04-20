@@ -1,7 +1,11 @@
-grpcio==1.60.0
-grpcio-tools==1.60.0
+grpcio==1.80.0
+# Required for generated *_pb2.py (grpcio does not install protobuf); align with grpcio-tools 1.80 / backend stack
+protobuf>=6.31.1,<7
 httpx>=0.27.0
-openai==1.99.1
+openai==1.109.1
 python-dotenv==1.0.0
 pydantic==2.12.5
-qdrant-client==1.14.1
+qdrant-client==1.17.1
+pymilvus==2.4.9
+elasticsearch>=8.14,<9
+opensearch-py>=2.4,<4

@@ -2,10 +2,13 @@
 
 mod clipboard;
 mod desktop_notify;
+mod file_tree;
 mod filesystem;
+mod git_info;
 mod open_url;
 mod processes;
 mod screenshot;
+mod search_files;
 mod shell;
 mod system_info;
 
@@ -25,18 +28,25 @@ pub const CAPABILITIES_UI: &[(&str, &str)] = &[
     ("read_file", "Read file"),
     ("list_directory", "List directory"),
     ("write_file", "Write file"),
+    ("create_directory", "Create directory"),
+    ("file_tree", "File tree"),
+    ("search_files", "Search files"),
+    ("git_info", "Git info"),
     ("list_processes", "List processes"),
     ("open_url", "Open URL"),
 ];
 
 pub use clipboard::{ClipboardReadCapability, ClipboardWriteCapability};
 pub use desktop_notify::DesktopNotifyCapability;
+pub use file_tree::FileTreeCapability;
 pub use filesystem::{
     ListDirectoryCapability, ReadFileCapability, WriteFileCapability,
 };
+pub use git_info::GitInfoCapability;
 pub use open_url::OpenUrlCapability;
 pub use processes::ListProcessesCapability;
 pub use screenshot::ScreenshotCapability;
+pub use search_files::SearchFilesCapability;
 pub use shell::ShellExecuteCapability;
 pub use system_info::SystemInfoCapability;
 
@@ -96,6 +106,22 @@ impl CapabilityRegistry {
         capabilities.insert(
             "write_file".to_string(),
             Box::new(WriteFileCapability) as Box<dyn Capability>,
+        );
+        capabilities.insert(
+            "create_directory".to_string(),
+            Box::new(CreateDirectoryCapability) as Box<dyn Capability>,
+        );
+        capabilities.insert(
+            "file_tree".to_string(),
+            Box::new(FileTreeCapability) as Box<dyn Capability>,
+        );
+        capabilities.insert(
+            "search_files".to_string(),
+            Box::new(SearchFilesCapability) as Box<dyn Capability>,
+        );
+        capabilities.insert(
+            "git_info".to_string(),
+            Box::new(GitInfoCapability) as Box<dyn Capability>,
         );
         capabilities.insert(
             "list_processes".to_string(),

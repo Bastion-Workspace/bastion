@@ -1,5 +1,5 @@
 """
-OrgMode WebDAV Provider - Roosevelt's Mobile Sync File Provider
+Org-mode WebDAV provider for mobile sync
 
 Provides WebDAV access to OrgMode files stored in Plato's database.
 Supports read/write operations for mobile sync with Orgzly and beorg.

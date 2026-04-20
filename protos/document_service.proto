@@ -2,15 +2,101 @@ syntax = "proto3";
 
 package document_service;
 
-// Document Service - Entity extraction via spaCy
+import "protos/tool_service.proto";
+
+// Document Service: NER, processing (Phase 1), and consolidated document/file/folder I/O (Phase 2).
 service DocumentService {
   rpc ExtractEntities(ExtractEntitiesRequest) returns (ExtractEntitiesResponse);
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Client-streaming upload: first chunk must carry UploadMetadata; all chunks may carry data bytes.
+  rpc UploadAndProcess(stream UploadChunk) returns (UploadResponse);
+  rpc ReprocessDocument(ReprocessRequest) returns (ReprocessResponse);
+  rpc GetProcessingStatus(ProcessingStatusRequest) returns (ProcessingStatusResponse);
+
+  // --- Phase 2: content & search (reuse tool_service message types) ---
+  rpc SearchDocuments(tool_service.SearchRequest) returns (tool_service.SearchResponse);
+  rpc FindDocumentsByTags(tool_service.FindDocumentsByTagsRequest) returns (tool_service.FindDocumentsByTagsResponse);
+  rpc GetDocument(tool_service.DocumentRequest) returns (tool_service.DocumentResponse);
+  rpc GetDocumentContent(tool_service.DocumentRequest) returns (tool_service.DocumentContentResponse);
+  rpc GetDocumentChunks(tool_service.DocumentRequest) returns (tool_service.DocumentChunksResponse);
+  rpc FindDocumentByPath(tool_service.FindDocumentByPathRequest) returns (tool_service.FindDocumentByPathResponse);
+  rpc RerankDocuments(tool_service.RerankRequest) returns (tool_service.RerankResponse);
+  rpc FindDocumentsByEntities(tool_service.FindDocumentsByEntitiesRequest) returns (tool_service.FindDocumentsByEntitiesResponse);
+  rpc FindRelatedDocumentsByEntities(tool_service.FindRelatedDocumentsByEntitiesRequest) returns (tool_service.FindRelatedDocumentsByEntitiesResponse);
+
+  // --- Phase 2: metadata & content mutation (tool_service types) ---
+  rpc UpdateDocumentMetadata(tool_service.UpdateDocumentMetadataRequest) returns (tool_service.UpdateDocumentMetadataResponse);
+  rpc UpdateDocumentContent(tool_service.UpdateDocumentContentRequest) returns (tool_service.UpdateDocumentContentResponse);
+  rpc CreateUserFile(tool_service.CreateUserFileRequest) returns (tool_service.CreateUserFileResponse);
+  rpc CreateUserFolder(tool_service.CreateUserFolderRequest) returns (tool_service.CreateUserFolderResponse);
+  rpc GetFolderTree(tool_service.GetFolderTreeRequest) returns (tool_service.GetFolderTreeResponse);
+  rpc ListFolderDocuments(tool_service.ListFolderDocumentsRequest) returns (tool_service.ListFolderDocumentsResponse);
+  rpc PickRandomDocumentFromFolder(tool_service.PickRandomDocumentFromFolderRequest) returns (tool_service.PickRandomDocumentFromFolderResponse);
+
+  // --- Phase 2: edit proposals (tool_service types) ---
+  rpc ProposeDocumentEdit(tool_service.ProposeDocumentEditRequest) returns (tool_service.ProposeDocumentEditResponse);
+  rpc ApplyDocumentEditProposal(tool_service.ApplyDocumentEditProposalRequest) returns (tool_service.ApplyDocumentEditProposalResponse);
+  rpc ApplyOperationsDirectly(tool_service.ApplyOperationsDirectlyRequest) returns (tool_service.ApplyOperationsDirectlyResponse);
+  rpc ListDocumentProposals(tool_service.ListDocumentProposalsRequest) returns (tool_service.ListDocumentProposalsResponse);
+  rpc GetDocumentEditProposal(tool_service.GetDocumentEditProposalRequest) returns (tool_service.GetDocumentEditProposalResponse);
+  rpc RejectDocumentEditProposal(tool_service.RejectDocumentEditProposalRequest) returns (tool_service.RejectDocumentEditProposalResponse);
+
+  // --- Phase 2: streaming download & zip ---
+  rpc DownloadDocument(DownloadDocumentRequest) returns (stream FileDownloadChunk);
+  rpc GenerateLibraryZip(GenerateLibraryZipRequest) returns (stream FileDownloadChunk);
+
+  // --- Phase 2: JSON-bridged file/folder/version/encryption/recovery (payload matches REST Pydantic models) ---
+  rpc PlaceFile(JsonToolRequest) returns (JsonToolResponse);
+  rpc MoveFile(JsonToolRequest) returns (JsonToolResponse);
+  rpc DeleteFile(JsonToolRequest) returns (JsonToolResponse);
+  rpc RenameFile(JsonToolRequest) returns (JsonToolResponse);
+  rpc CreateFolderStructure(JsonToolRequest) returns (JsonToolResponse);
+  rpc CreateFolder(JsonToolRequest) returns (JsonToolResponse);
+  rpc UpdateFolder(JsonToolRequest) returns (JsonToolResponse);
+  rpc DeleteFolder(JsonToolRequest) returns (JsonToolResponse);
+  rpc MoveFolder(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetFolderContents(JsonToolRequest) returns (JsonToolResponse);
+  // Payload: folder_ids[], optional limit, offset, max_concurrent. Result: contents map + per-id errors.
+  rpc GetFolderContentsBatch(JsonToolRequest) returns (JsonToolResponse);
+  rpc UpdateFolderMetadata(JsonToolRequest) returns (JsonToolResponse);
+  rpc ExemptFolder(JsonToolRequest) returns (JsonToolResponse);
+  rpc RemoveFolderExemption(JsonToolRequest) returns (JsonToolResponse);
+  rpc OverrideFolderExemption(JsonToolRequest) returns (JsonToolResponse);
+  rpc ExemptDocument(JsonToolRequest) returns (JsonToolResponse);
+  rpc RemoveDocumentExemption(JsonToolRequest) returns (JsonToolResponse);
+
+  rpc DeleteDocument(JsonToolRequest) returns (JsonToolResponse);
+  rpc StoreTextDocument(JsonToolRequest) returns (JsonToolResponse);
+
+  rpc GetDocumentVersions(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetVersionContent(JsonToolRequest) returns (JsonToolResponse);
+  rpc DiffVersions(JsonToolRequest) returns (JsonToolResponse);
+  rpc RollbackToVersion(JsonToolRequest) returns (JsonToolResponse);
+
+  rpc EncryptDocument(JsonToolRequest) returns (JsonToolResponse);
+  rpc CreateDecryptSession(JsonToolRequest) returns (JsonToolResponse);
+  rpc TryDecrypt(JsonToolRequest) returns (JsonToolResponse);
+  rpc EncryptionHeartbeat(JsonToolRequest) returns (JsonToolResponse);
+  rpc EncryptionLock(JsonToolRequest) returns (JsonToolResponse);
+  rpc ChangeEncryptionPassword(JsonToolRequest) returns (JsonToolResponse);
+  rpc RemoveEncryption(JsonToolRequest) returns (JsonToolResponse);
+  // Save plaintext for an encrypted doc when client holds a valid decrypt session (same as backend write_encrypted_content_from_session).
+  rpc WriteEncryptedContentFromSession(JsonToolRequest) returns (JsonToolResponse);
+  // Paths are relative to the document library root (UPLOAD_DIR), e.g. "Users/alice/Org/inbox.org". Caller must enforce auth.
+  rpc ReadUploadRelativeFile(JsonToolRequest) returns (JsonToolResponse);
+  rpc WriteUploadRelativeFile(JsonToolRequest) returns (JsonToolResponse);
+  rpc ListUploadRelativeDir(JsonToolRequest) returns (JsonToolResponse);
+
+  rpc FlushCollaborativeDocument(FlushCollaborativeDocumentRequest) returns (FlushCollaborativeDocumentResponse);
+  rpc ScanAndRecoverFiles(JsonToolRequest) returns (JsonToolResponse);
+  // Backend facade: JSON dispatch to document-service ParallelDocumentService (metadata, imports, ZIP ops).
+  rpc DocumentMirror(JsonToolRequest) returns (JsonToolResponse);
 }
 
 message ExtractEntitiesRequest {
   string text = 1;
-  int32 max_length = 2;  // optional, defaults to 1000000
+  int32 max_length = 2;
 }
 
 message ExtractEntitiesResponse {
@@ -32,4 +118,95 @@ message HealthCheckResponse {
   string status = 1;
   string service_version = 2;
   bool gliner_loaded = 3;
+}
+
+message UploadMetadata {
+  string filename = 1;
+  string doc_type = 2;
+  string user_id = 3;
+  string folder_id = 4;
+  string team_id = 5;
+  string collection_type = 6;
+  bool exempt_from_vectorization = 7;
+}
+
+message UploadChunk {
+  UploadMetadata metadata = 1;
+  bytes data = 2;
+}
+
+message UploadResponse {
+  bool success = 1;
+  string document_id = 2;
+  string filename = 3;
+  string status = 4;
+  string message = 5;
+  bool duplicate = 6;
+  string error = 7;
+}
+
+message ReprocessRequest {
+  string document_id = 1;
+  string user_id = 2;
+  // When false, skip if document is already indexed for current file_hash and schema version.
+  bool force_reprocess = 3;
+}
+
+message ReprocessResponse {
+  bool success = 1;
+  string document_id = 2;
+  string error = 3;
+}
+
+message ProcessingStatusRequest {
+  string document_id = 1;
+}
+
+message ProcessingStatusResponse {
+  bool found = 1;
+  string status = 2;
+  string message = 3;
+}
+
+// --- Streaming file bytes (download / library zip) ---
+message DownloadDocumentRequest {
+  string document_id = 1;
+  string user_id = 2;
+  string role = 3; // optional; for RLS-style checks in DS
+}
+
+message GenerateLibraryZipRequest {
+  string user_id = 1;
+}
+
+message FileDownloadChunk {
+  bytes data = 1;
+  string filename = 2;
+  string content_type = 3;
+  bool done = 4;
+}
+
+// --- JSON bridge: payload_json is a serialized API body; result_json is JSON response body ---
+message JsonToolRequest {
+  string user_id = 1;
+  string payload_json = 2;
+}
+
+message JsonToolResponse {
+  bool success = 1;
+  string result_json = 2;
+  optional string error = 3;
+}
+
+message FlushCollaborativeDocumentRequest {
+  string document_id = 1;
+  string user_id = 2;
+  string new_content = 3;
+  string role = 4;
+}
+
+message FlushCollaborativeDocumentResponse {
+  bool success = 1;
+  optional string error = 2;
+  string message = 3;
 }

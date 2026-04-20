@@ -82,21 +82,37 @@ class DiscordProvider(BaseMessagingProvider):
                 sender_name = message.author.display_name or message.author.name or "Unknown"
                 text = (message.content or "").strip()
                 images: List[Dict[str, Any]] = []
+                audio_part: Optional[Dict[str, Any]] = None
 
                 for attachment in message.attachments:
-                    if attachment.content_type and attachment.content_type.startswith("image/"):
+                    ct = attachment.content_type or ""
+                    if ct.startswith("image/"):
                         try:
                             async with httpx.AsyncClient(timeout=30.0) as client:
                                 resp = await client.get(attachment.url)
                                 resp.raise_for_status()
                                 data_b64 = base64.b64encode(resp.content).decode("utf-8")
-                            images.append({"data": data_b64, "mime": attachment.content_type or "image/png"})
+                            images.append({"data": data_b64, "mime": ct or "image/png"})
                         except Exception as e:
                             logger.warning("Failed to download Discord attachment: %s", e)
+                    elif ct.startswith("audio/") and audio_part is None:
+                        try:
+                            async with httpx.AsyncClient(timeout=60.0) as client:
+                                resp = await client.get(attachment.url)
+                                resp.raise_for_status()
+                                raw = resp.content
+                            fn = (attachment.filename or "").strip() or "audio.bin"
+                            audio_part = {
+                                "data": base64.b64encode(raw).decode("utf-8"),
+                                "mime": ct or "application/octet-stream",
+                                "filename": fn,
+                            }
+                        except Exception as e:
+                            logger.warning("Failed to download Discord audio attachment: %s", e)
 
-                if not text and not images:
+                if not text and not images and not audio_part:
                     return
-                if not text:
+                if not text and images and not audio_part:
                     text = "[Image]"
 
                 inbound = InboundMessage(
@@ -108,6 +124,7 @@ class DiscordProvider(BaseMessagingProvider):
                     platform="discord",
                     timestamp=message.created_at.isoformat() if message.created_at else None,
                     connection_id=outer_self._provider._connection_id,
+                    audio=audio_part,
                 )
                 try:
                     await outer_self._provider._message_callback(inbound)

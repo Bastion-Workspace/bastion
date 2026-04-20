@@ -38,8 +38,8 @@ class LangGraphPostgresCheckpointer:
                 return self.checkpointer
             
             try:
-                # Build PostgreSQL connection string
-                self._connection_string = settings.postgres_connection_string
+                # Build PostgreSQL connection string (dedicated LangGraph role when configured)
+                self._connection_string = settings.langgraph_connection_string
                 
                 logger.info("Initializing LangGraph PostgreSQL checkpointer...")
                 logger.info(f"Database: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}")

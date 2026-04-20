@@ -1,35 +1,32 @@
 /**
- * Roosevelt's Room Chat Interface
- * Message display and input for a specific room
- * 
- * BULLY! Real-time messaging in action!
+ * Room Chat Interface
+ * Orchestrates message display, input, reactions, search, reply, and edit.
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Box,
-  TextField,
   IconButton,
   Typography,
-  Paper,
   Avatar,
+  Popover,
   Tooltip,
-  Button,
+  TextField,
+  InputAdornment,
+  Alert,
+  Chip,
 } from '@mui/material';
-import {
-  Send,
-  ArrowBack,
-  AttachFile,
-  Close,
-  Download,
-} from '@mui/icons-material';
+import { ArrowBack, Search, Close, Hub } from '@mui/icons-material';
 import { useMessaging } from '../../contexts/MessagingContext';
 import PresenceIndicator from './PresenceIndicator';
 import messagingService from '../../services/messagingService';
-import AudioPlayer from '../AudioPlayer';
+import apiService from '../../services/apiService';
 import TeamInvitationMessage from './TeamInvitationMessage';
-import { formatTimestamp } from '../../utils/chatUtils';
+import RoomMessageBubble from './RoomMessageBubble';
+import RoomChatInput from './RoomChatInput';
 import { useImageLightbox } from '../common/ImageLightbox';
+
+const QUICK_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🎉', '🔥', '👀'];
 
 const RoomChat = () => {
   const {
@@ -37,502 +34,366 @@ const RoomChat = () => {
     currentRoom,
     messages,
     sendMessage,
+    editMessage,
     selectRoom,
     presence,
+    federatedPresenceByPeer,
+    federatedAttachmentsByMessage,
+    federatedReadReceiptByRoom,
+    addReaction,
+    removeReaction,
+    typingUsers,
   } = useMessaging();
 
-  const [inputValue, setInputValue] = useState('');
-  const [imagePreview, setImagePreview] = useState(null);
-  const [previewFile, setPreviewFile] = useState(null);
   const [messageAttachments, setMessageAttachments] = useState({});
-  const { openLightbox } = useImageLightbox();
   const [imageBlobUrls, setImageBlobUrls] = useState({});
+  const [emojiAnchor, setEmojiAnchor] = useState(null);
+  const [emojiTargetMessageId, setEmojiTargetMessageId] = useState(null);
+  const [replyTo, setReplyTo] = useState(null);
+  const [editingMessage, setEditingMessage] = useState(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [federationRoomStatus, setFederationRoomStatus] = useState(null);
+  const { openLightbox } = useImageLightbox();
   const messagesEndRef = useRef(null);
-  const fileInputRef = useRef(null);
-  const textFieldRef = useRef(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  useEffect(() => { scrollToBottom(); }, [messages]);
 
   useEffect(() => {
-    scrollToBottom();
-  }, [messages]);
+    let cancelled = false;
+    (async () => {
+      if (!currentRoom || currentRoom.room_type !== 'federated') {
+        setFederationRoomStatus(null);
+        return;
+      }
+      try {
+        const s = await apiService.get(
+          `/api/federation/rooms/${encodeURIComponent(currentRoom.room_id)}/status`
+        );
+        if (!cancelled) setFederationRoomStatus(s);
+      } catch {
+        if (!cancelled) setFederationRoomStatus(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentRoom?.room_id, currentRoom?.room_type]);
 
-  // Load attachments for messages and create blob URLs
+  // Load attachments
   useEffect(() => {
-    const loadAttachments = async () => {
-      const attachmentsMap = {};
-      const blobUrlsMap = {};
-      
-      for (const message of messages) {
-        if (message.message_id && !messageAttachments[message.message_id]) {
+    const load = async () => {
+      const aMap = {}, bMap = {};
+      for (const msg of messages) {
+        if (msg.message_id && !messageAttachments[msg.message_id]) {
           try {
-            const atts = await messagingService.getMessageAttachments(message.message_id);
-            if (atts && atts.length > 0) {
-              attachmentsMap[message.message_id] = atts;
-              
-              // Create blob URLs for images
+            const atts = await messagingService.getMessageAttachments(msg.message_id);
+            if (atts?.length > 0) {
+              aMap[msg.message_id] = atts;
               for (const att of atts) {
                 if (!imageBlobUrls[att.attachment_id]) {
                   try {
                     const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-                    const response = await fetch(
-                      `/api/messaging/attachments/${att.attachment_id}/file`,
-                      {
-                        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-                      }
-                    );
-                    if (response.ok) {
-                      const blob = await response.blob();
-                      const blobUrl = URL.createObjectURL(blob);
-                      blobUrlsMap[att.attachment_id] = blobUrl;
-                    }
-                  } catch (error) {
-                    console.error('Failed to load image blob:', error);
-                  }
+                    const resp = await fetch(`/api/messaging/attachments/${att.attachment_id}/file`, {
+                      headers: token ? { Authorization: `Bearer ${token}` } : {},
+                    });
+                    if (resp.ok) bMap[att.attachment_id] = URL.createObjectURL(await resp.blob());
+                  } catch {}
                 }
               }
             }
-          } catch (error) {
-            console.error('Failed to load attachments:', error);
-          }
+          } catch {}
         }
       }
-      
-      if (Object.keys(attachmentsMap).length > 0) {
-        setMessageAttachments(prev => ({ ...prev, ...attachmentsMap }));
+      for (const att of Object.values(federatedAttachmentsByMessage).flat()) {
+        if (att?.attachment_id && att.mime_type?.startsWith('image/') && !imageBlobUrls[att.attachment_id]) {
+          try {
+            const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+            const resp = await fetch(`/api/messaging/attachments/${att.attachment_id}/file`, {
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+            });
+            if (resp.ok) bMap[att.attachment_id] = URL.createObjectURL(await resp.blob());
+          } catch {}
+        }
       }
-      if (Object.keys(blobUrlsMap).length > 0) {
-        setImageBlobUrls(prev => ({ ...prev, ...blobUrlsMap }));
-      }
+      if (Object.keys(aMap).length) setMessageAttachments(p => ({ ...p, ...aMap }));
+      if (Object.keys(bMap).length) setImageBlobUrls(p => ({ ...p, ...bMap }));
     };
-    loadAttachments();
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages]);
+  }, [messages, federatedAttachmentsByMessage]);
 
-  // Cleanup blob URLs on unmount
-  useEffect(() => {
-    return () => {
-      Object.values(imageBlobUrls).forEach(url => URL.revokeObjectURL(url));
-    };
+  useEffect(() => () => {
+    Object.values(imageBlobUrls).forEach(url => URL.revokeObjectURL(url));
   }, [imageBlobUrls]);
 
-  const handleSend = async () => {
-    if ((!inputValue.trim() && !previewFile) || !currentRoom) return;
+  // Search
+  useEffect(() => {
+    if (!searchQuery.trim() || !currentRoom) { setSearchResults([]); return; }
+    const t = setTimeout(async () => {
+      try {
+        const res = await messagingService.searchMessages(currentRoom.room_id, searchQuery);
+        setSearchResults(res.results || []);
+      } catch { setSearchResults([]); }
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchQuery, currentRoom]);
 
-    try {
-      // Send message first
-      const message = await sendMessage(
-        currentRoom.room_id,
-        inputValue.trim() || (previewFile ? '📷' : ''),
-        'text',
-        null
-      );
+  // Reactions
+  const handleReactionClick = useCallback((e, msgId) => {
+    setEmojiAnchor(e.currentTarget);
+    setEmojiTargetMessageId(msgId);
+  }, []);
 
-      // Upload attachment if preview exists
-      if (previewFile && message && message.message_id) {
-        try {
-          const attachment = await messagingService.uploadAttachment(
-            currentRoom.room_id,
-            message.message_id,
-            previewFile
-          );
-          
-          console.log('✅ Attachment uploaded successfully:', attachment);
-          
-          // Reload attachments for this message after upload completes
-          try {
-            const atts = await messagingService.getMessageAttachments(message.message_id);
-            console.log('📎 Reloaded attachments:', atts);
-            
-            if (atts && atts.length > 0) {
-              // Update messageAttachments state
-              setMessageAttachments(prev => ({
-                ...prev,
-                [message.message_id]: atts
-              }));
-              
-              // Create blob URLs for newly uploaded images
-              const blobUrlsMap = {};
-              for (const att of atts) {
-                if (att.mime_type?.startsWith('image/')) {
-                  try {
-                    const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-                    const response = await fetch(
-                      `/api/messaging/attachments/${att.attachment_id}/file`,
-                      {
-                        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-                      }
-                    );
-                    if (response.ok) {
-                      const blob = await response.blob();
-                      const blobUrl = URL.createObjectURL(blob);
-                      blobUrlsMap[att.attachment_id] = blobUrl;
-                      console.log('🖼️ Created blob URL for attachment:', att.attachment_id);
-                    } else {
-                      console.error('❌ Failed to fetch attachment file:', response.status, response.statusText);
-                    }
-                  } catch (error) {
-                    console.error('❌ Failed to load image blob:', error);
-                  }
-                }
-              }
-              
-              if (Object.keys(blobUrlsMap).length > 0) {
-                setImageBlobUrls(prev => ({ ...prev, ...blobUrlsMap }));
-                console.log('✅ Image blob URLs created:', Object.keys(blobUrlsMap));
-              }
-            } else {
-              console.warn('⚠️ No attachments found after upload');
+  const handleEmojiSelect = useCallback(async (emoji) => {
+    if (!emojiTargetMessageId || !currentRoom) return;
+    const msg = messages.find(m => m.message_id === emojiTargetMessageId);
+    const existing = (msg?.reactions || []).find(r => r.emoji === emoji && r.user_id === user?.user_id);
+    if (existing) await removeReaction(currentRoom.room_id, existing.reaction_id);
+    else await addReaction(currentRoom.room_id, emojiTargetMessageId, emoji);
+    setEmojiAnchor(null);
+    setEmojiTargetMessageId(null);
+  }, [emojiTargetMessageId, currentRoom, messages, user, addReaction, removeReaction]);
+
+  const handleReactionChipClick = useCallback(async (msgId, emoji, reactions) => {
+    if (!currentRoom) return;
+    const mine = reactions.find(r => r.emoji === emoji && r.user_id === user?.user_id);
+    if (mine) await removeReaction(currentRoom.room_id, mine.reaction_id);
+    else await addReaction(currentRoom.room_id, msgId, emoji);
+  }, [currentRoom, user, addReaction, removeReaction]);
+
+  // Send / edit handler from input
+  const handleSend = useCallback(async ({ content, mentions, replyToMessageId, editingMessageId, file }) => {
+    if (!currentRoom) return;
+    const peerSt = federationRoomStatus?.federation_peer_status;
+    const fedBlocked =
+      currentRoom.room_type === 'federated' &&
+      federationRoomStatus?.federated &&
+      peerSt &&
+      peerSt !== 'active';
+    if (fedBlocked && !editingMessageId) return;
+    if (editingMessageId) {
+      await editMessage(currentRoom.room_id, editingMessageId, content);
+      setEditingMessage(null);
+      return;
+    }
+    const msg = await sendMessage(currentRoom.room_id, content, 'text', null, mentions, replyToMessageId);
+    setReplyTo(null);
+
+    if (file && msg?.message_id) {
+      try {
+        await messagingService.uploadAttachment(currentRoom.room_id, msg.message_id, file);
+        const atts = await messagingService.getMessageAttachments(msg.message_id);
+        if (atts?.length) {
+          setMessageAttachments(p => ({ ...p, [msg.message_id]: atts }));
+          const bMap = {};
+          for (const att of atts) {
+            if (att.mime_type?.startsWith('image/')) {
+              try {
+                const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+                const resp = await fetch(`/api/messaging/attachments/${att.attachment_id}/file`, {
+                  headers: token ? { Authorization: `Bearer ${token}` } : {},
+                });
+                if (resp.ok) bMap[att.attachment_id] = URL.createObjectURL(await resp.blob());
+              } catch {}
             }
-          } catch (error) {
-            console.error('❌ Failed to reload attachments after upload:', error);
           }
-        } catch (error) {
-          console.error('❌ Failed to upload attachment:', error);
-          console.error('❌ Error details:', error.message, error.response);
+          if (Object.keys(bMap).length) setImageBlobUrls(p => ({ ...p, ...bMap }));
         }
-      }
-
-      // Clear input and preview
-      setInputValue('');
-      setImagePreview(null);
-      setPreviewFile(null);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    } catch (error) {
-      console.error('Failed to send message:', error);
-    }
-  };
-
-  const handleKeyPress = (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
-    }
-  };
-
-  const handlePaste = async (e) => {
-    const items = e.clipboardData.items;
-    for (let item of items) {
-      if (item.type.indexOf('image') !== -1) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        await handleImageSelect(file);
-        break;
+      } catch (err) {
+        console.error('Failed to upload attachment:', err);
       }
     }
-  };
-
-  const handleFileSelect = async (e) => {
-    const file = e.target.files?.[0];
-    if (file && file.type.startsWith('image/')) {
-      await handleImageSelect(file);
-    }
-  };
-
-  const handleImageSelect = async (file) => {
-    // Validate file type
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-    if (!allowedTypes.includes(file.type)) {
-      alert('Only image files (JPG, PNG, GIF, WebP) are allowed');
-      return;
-    }
-
-    // Validate file size (10MB)
-    if (file.size > 10 * 1024 * 1024) {
-      alert('File size must be less than 10MB');
-      return;
-    }
-
-    // Create preview
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      setImagePreview(e.target.result);
-      setPreviewFile(file);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const removePreview = () => {
-    setImagePreview(null);
-    setPreviewFile(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-  };
-
+  }, [currentRoom, sendMessage, editMessage, federationRoomStatus]);
 
   if (!currentRoom) return null;
 
   const currentUserId = user?.user_id;
-  const otherParticipants = currentRoom.participants?.filter(
-    p => p.user_id !== currentUserId
-  ) || [];
+  const otherParticipants = currentRoom.participants?.filter(p => p.user_id !== currentUserId) || [];
+  const peerSt = federationRoomStatus?.federation_peer_status;
+  const federationPeerInactive =
+    currentRoom.room_type === 'federated' &&
+    !!federationRoomStatus?.federated &&
+    !!peerSt &&
+    peerSt !== 'active';
+  const federationPeerLabel =
+    federationRoomStatus?.federation_peer_display_name ||
+    federationRoomStatus?.federation_peer_url ||
+    'peer';
+
+  const fedMeta = currentRoom?.federation_metadata;
+  const fedPeerId = fedMeta && typeof fedMeta === 'object' ? fedMeta.peer_id : null;
+  const fedPresenceBucket = fedPeerId ? federatedPresenceByPeer[fedPeerId] : null;
+  let federatedRemotePresenceStatus = 'offline';
+  if (fedPresenceBucket && typeof fedPresenceBucket === 'object') {
+    const statuses = Object.values(fedPresenceBucket).map((x) => x.status);
+    if (statuses.includes('online')) federatedRemotePresenceStatus = 'online';
+    else if (statuses.includes('away')) federatedRemotePresenceStatus = 'away';
+    else if (statuses.length) federatedRemotePresenceStatus = statuses[0];
+  }
+  const fedRead = currentRoom?.room_id
+    ? federatedReadReceiptByRoom[currentRoom.room_id]
+    : null;
+
+  const mergeMessageAttachments = (messageId) => {
+    const base = messageAttachments[messageId] || [];
+    const extra = federatedAttachmentsByMessage[messageId] || [];
+    if (!extra.length) return base;
+    const seen = new Set(base.map((a) => a.attachment_id));
+    return [...base, ...extra.filter((a) => a.attachment_id && !seen.has(a.attachment_id))];
+  };
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {/* Room header */}
-      <Box
-        sx={{
-          p: 2,
-          display: 'flex',
-          alignItems: 'center',
-          gap: 2,
-          borderBottom: 1,
-          borderColor: 'divider',
-        }}
-      >
-        <IconButton size="small" onClick={() => selectRoom(null)}>
-          <ArrowBack />
-        </IconButton>
+      {/* Header */}
+      <Box sx={{ p: 2, display: 'flex', alignItems: 'center', gap: 2, borderBottom: 1, borderColor: 'divider' }}>
+        <IconButton size="small" onClick={() => selectRoom(null)}><ArrowBack /></IconButton>
         <Box sx={{ flex: 1 }}>
-          <Typography variant="subtitle1">
-            {currentRoom.display_name || currentRoom.room_name}
-          </Typography>
-          {!currentRoom.team_id && otherParticipants.length > 0 && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+            <Typography variant="subtitle1">{currentRoom.display_name || currentRoom.room_name}</Typography>
+            {currentRoom.room_type === 'federated' && (
+              <Chip size="small" icon={<Hub sx={{ fontSize: '16px !important' }} />} label="Federated" variant="outlined" />
+            )}
+          </Box>
+          {!currentRoom.team_id && otherParticipants.length > 0 && currentRoom.room_type !== 'federated' && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <PresenceIndicator
-                status={presence[otherParticipants[0].user_id]?.status || 'offline'}
-                size="small"
-              />
+              <PresenceIndicator status={presence[otherParticipants[0].user_id]?.status || 'offline'} size="small" />
               <Typography variant="caption" color="text.secondary">
                 {presence[otherParticipants[0].user_id]?.status || 'offline'}
               </Typography>
             </Box>
           )}
+          {currentRoom.room_type === 'federated' && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+              <PresenceIndicator status={federatedRemotePresenceStatus} size="small" />
+              <Typography variant="caption" color="text.secondary">
+                Remote presence: {federatedRemotePresenceStatus}
+              </Typography>
+              {fedRead?.last_read_at && (
+                <Typography variant="caption" color="text.secondary" sx={{ ml: 0.5 }}>
+                  · Last read {fedRead.user_address || 'peer'}: {new Date(fedRead.last_read_at).toLocaleString()}
+                </Typography>
+              )}
+            </Box>
+          )}
         </Box>
+        <Tooltip title="Search messages">
+          <IconButton size="small" onClick={() => setSearchOpen(o => !o)}>
+            <Search />
+          </IconButton>
+        </Tooltip>
       </Box>
 
-      {/* Messages area */}
-      <Box
-        sx={{
-          flex: 1,
-          overflow: 'auto',
-          p: 2,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 2,
-        }}
-      >
-        {messages.length === 0 ? (
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              height: '100%',
-            }}
-          >
-            <Typography color="text.secondary">
-              No messages yet. Start the conversation!
-            </Typography>
-          </Box>
-        ) : (
-          messages.map((message) => {
-            // Check if this is a team invitation message
-            if (message.message_type === 'team_invitation' || message.metadata?.invitation_id) {
-              return (
-                <Box
-                  key={message.message_id}
-                  sx={{
-                    display: 'flex',
-                    justifyContent: 'center',
-                    my: 1
-                  }}
-                >
-                  <TeamInvitationMessage message={message} />
-                </Box>
-              );
-            }
+      {federationPeerInactive && (
+        <Alert severity="warning" sx={{ borderRadius: 0 }}>
+          Federation with {federationPeerLabel} is suspended. Messages cannot be delivered until the
+          connection is restored.
+        </Alert>
+      )}
 
-            const isOwn = message.sender_id === currentUserId;
-            
+      {/* Search bar */}
+      {searchOpen && (
+        <Box sx={{ px: 2, py: 1, borderBottom: 1, borderColor: 'divider' }}>
+          <TextField
+            fullWidth size="small" placeholder="Search messages..."
+            value={searchQuery} onChange={e => setSearchQuery(e.target.value)} autoFocus
+            InputProps={{
+              endAdornment: (
+                <InputAdornment position="end">
+                  <IconButton size="small" onClick={() => { setSearchOpen(false); setSearchQuery(''); setSearchResults([]); }}>
+                    <Close fontSize="small" />
+                  </IconButton>
+                </InputAdornment>
+              ),
+            }}
+          />
+          {searchResults.length > 0 && (
+            <Box sx={{ maxHeight: 200, overflow: 'auto', mt: 1 }}>
+              {searchResults.map(r => (
+                <Box key={r.message_id} sx={{ py: 0.5, borderBottom: '1px solid', borderColor: 'divider' }}>
+                  <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                    {r.display_name || r.username}
+                  </Typography>
+                  <Typography variant="body2" noWrap>{r.content}</Typography>
+                </Box>
+              ))}
+            </Box>
+          )}
+        </Box>
+      )}
+
+      {/* Messages */}
+      <Box sx={{ flex: 1, overflow: 'auto', p: 2, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {messages.length === 0 ? (
+          <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+            <Typography color="text.secondary">No messages yet. Start the conversation!</Typography>
+          </Box>
+        ) : messages.map(message => {
+          if (message.message_type === 'team_invitation' || message.metadata?.invitation_id) {
             return (
-              <Box
-                key={message.message_id}
-                sx={{
-                  display: 'flex',
-                  justifyContent: isOwn ? 'flex-end' : 'flex-start',
-                  gap: 1,
-                }}
-              >
-                {!isOwn && (
-                  <Avatar sx={{ width: 32, height: 32 }}>
-                    {message.display_name?.charAt(0) || message.username?.charAt(0) || '?'}
-                  </Avatar>
-                )}
-                <Paper
-                  elevation={1}
-                  sx={{
-                    p: 1.5,
-                    maxWidth: '70%',
-                    backgroundColor: isOwn ? 'primary.main' : 'background.paper',
-                    color: isOwn ? 'primary.contrastText' : 'text.primary',
-                  }}
-                >
-                  {!isOwn && (
-                    <Typography variant="caption" sx={{ fontWeight: 600, color: 'inherit' }}>
-                      {message.display_name || message.username}
-                    </Typography>
-                  )}
-                  <Typography 
-                    variant="body2" 
-                    sx={{ 
-                      whiteSpace: 'pre-wrap', 
-                      wordBreak: 'break-word',
-                      color: 'inherit'
-                    }}
-                  >
-                    {message.content}
-                  </Typography>
-                  
-                  {/* Display attachments */}
-                  {messageAttachments[message.message_id]?.map((attachment) => (
-                    <Box key={attachment.attachment_id} mt={1}>
-                      {attachment.mime_type?.startsWith('audio/') ? (
-                        <AudioPlayer
-                          src={messagingService.getAttachmentUrl(attachment.attachment_id)}
-                          filename={attachment.filename}
-                        />
-                      ) : attachment.mime_type?.startsWith('image/') ? (
-                        <Box
-                          component="img"
-                          src={imageBlobUrls[attachment.attachment_id] || messagingService.getAttachmentUrl(attachment.attachment_id)}
-                          alt={attachment.filename}
-                          onClick={() => openLightbox(
-                            imageBlobUrls[attachment.attachment_id] || messagingService.getAttachmentUrl(attachment.attachment_id),
-                            { filename: attachment.filename }
-                          )}
-                          sx={{
-                            maxWidth: '100%',
-                            maxHeight: '300px',
-                            height: 'auto',
-                            borderRadius: 1,
-                            cursor: 'pointer',
-                            display: 'block',
-                            objectFit: 'contain',
-                          }}
-                        />
-                      ) : (
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          href={messagingService.getAttachmentUrl(attachment.attachment_id)}
-                          download={attachment.filename || 'attachment'}
-                          startIcon={<Download />}
-                        >
-                          {attachment.filename || 'Download attachment'}
-                        </Button>
-                      )}
-                    </Box>
-                  ))}
-                  <Typography
-                    variant="caption"
-                    sx={{
-                      display: 'block',
-                      mt: 0.5,
-                      opacity: 0.7,
-                      fontSize: '0.7rem',
-                      color: 'inherit',
-                    }}
-                  >
-                    {formatTimestamp(message.created_at)}
-                  </Typography>
-                </Paper>
+              <Box key={message.message_id} sx={{ display: 'flex', justifyContent: 'center', my: 1 }}>
+                <TeamInvitationMessage message={message} />
               </Box>
             );
-          })
-        )}
+          }
+          const isOwn = message.sender_id === currentUserId;
+          return (
+            <Box key={message.message_id} sx={{ display: 'flex', justifyContent: isOwn ? 'flex-end' : 'flex-start', gap: 1 }}>
+              {!isOwn && (
+                <Avatar sx={{ width: 32, height: 32 }}>
+                  {message.display_name?.charAt(0) || message.username?.charAt(0) || '?'}
+                </Avatar>
+              )}
+              <RoomMessageBubble
+                message={message}
+                isOwn={isOwn}
+                currentUserId={currentUserId}
+                roomIsFederated={currentRoom.room_type === 'federated'}
+                onReactionClick={handleReactionClick}
+                onReactionChipClick={handleReactionChipClick}
+                onReply={setReplyTo}
+                onEdit={setEditingMessage}
+                attachmentsList={mergeMessageAttachments(message.message_id)}
+                imageBlobUrls={imageBlobUrls}
+                openLightbox={openLightbox}
+              />
+            </Box>
+          );
+        })}
         <div ref={messagesEndRef} />
       </Box>
 
-      {/* Input area */}
-      <Box
-        sx={{
-          p: 2,
-          borderTop: 1,
-          borderColor: 'divider',
-          display: 'flex',
-          gap: 1,
-        }}
+      {/* Emoji picker */}
+      <Popover
+        open={Boolean(emojiAnchor)} anchorEl={emojiAnchor}
+        onClose={() => { setEmojiAnchor(null); setEmojiTargetMessageId(null); }}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
       >
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
-          {imagePreview && (
-            <Box sx={{ position: 'relative', display: 'inline-block' }}>
-              <Box
-                component="img"
-                src={imagePreview}
-                alt="Preview"
-                sx={{
-                  maxWidth: '200px',
-                  maxHeight: '200px',
-                  borderRadius: 1,
-                  border: '1px solid',
-                  borderColor: 'divider',
-                }}
-              />
-              <IconButton
-                size="small"
-                onClick={removePreview}
-                sx={{
-                  position: 'absolute',
-                  top: 0,
-                  right: 0,
-                  backgroundColor: 'rgba(0,0,0,0.5)',
-                  color: 'white',
-                  '&:hover': { backgroundColor: 'rgba(0,0,0,0.7)' },
-                }}
-              >
-                <Close fontSize="small" />
-              </IconButton>
-            </Box>
-          )}
-          <TextField
-            ref={textFieldRef}
-            fullWidth
-            multiline
-            maxRows={4}
-            placeholder="Type a message or paste an image..."
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyPress={handleKeyPress}
-            onPaste={handlePaste}
-            size="small"
-          />
-        </Box>
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            style={{ display: 'none' }}
-            onChange={handleFileSelect}
-          />
-          <Tooltip title="Attach image">
-            <IconButton
-              size="small"
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <AttachFile fontSize="small" />
+        <Box sx={{ display: 'flex', gap: 0.5, p: 1 }}>
+          {QUICK_EMOJIS.map(emoji => (
+            <IconButton key={emoji} size="small" onClick={() => handleEmojiSelect(emoji)} sx={{ fontSize: '1.2rem', p: 0.5 }}>
+              {emoji}
             </IconButton>
-          </Tooltip>
-          <Tooltip title="Send">
-            <IconButton
-              color="primary"
-              onClick={handleSend}
-              disabled={!inputValue.trim() && !previewFile}
-            >
-              <Send fontSize="small" />
-            </IconButton>
-          </Tooltip>
+          ))}
         </Box>
-      </Box>
+      </Popover>
+
+      {/* Input */}
+      <RoomChatInput
+        roomId={currentRoom.room_id}
+        onSend={handleSend}
+        typingUsers={typingUsers}
+        replyTo={replyTo}
+        onCancelReply={() => setReplyTo(null)}
+        editingMessage={editingMessage}
+        onCancelEdit={() => setEditingMessage(null)}
+        sendDisabled={federationPeerInactive}
+      />
     </Box>
   );
 };
 
 export default RoomChat;
-

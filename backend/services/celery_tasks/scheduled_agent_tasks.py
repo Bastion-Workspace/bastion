@@ -25,6 +25,7 @@ from services.database_manager.celery_database_helpers import (
     celery_fetch_all,
     celery_fetch_one,
 )
+from utils.grpc_rls import grpc_admin_rls as _celery_admin_rls
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +85,7 @@ async def _fetch_due_schedules() -> List[Dict[str, Any]]:
         WHERE s.is_active = true AND s.next_run_at IS NOT NULL AND s.next_run_at <= NOW()
         ORDER BY s.next_run_at ASC
     """
-    rows = await celery_fetch_all(query)
+    rows = await celery_fetch_all(query, rls_context=_celery_admin_rls())
     return rows
 
 
@@ -93,12 +94,14 @@ async def _update_schedule_next_run(schedule_id: str, next_run_at: Optional[date
         await celery_execute(
             "UPDATE agent_schedules SET next_run_at = NULL, updated_at = NOW() WHERE id = $1",
             uuid.UUID(schedule_id),
+            rls_context=_celery_admin_rls(),
         )
     else:
         await celery_execute(
             "UPDATE agent_schedules SET next_run_at = $1, updated_at = NOW() WHERE id = $2",
             next_run_at,
             uuid.UUID(schedule_id),
+            rls_context=_celery_admin_rls(),
         )
 
 
@@ -122,6 +125,7 @@ async def _insert_execution_log(
         query,
         uuid.UUID(schedule_id),
         uuid.UUID(playbook_id) if playbook_id else None,
+        rls_context={"user_id": user_id, "user_role": "user"},
     )
     return str(row["id"]) if row else None
 
@@ -142,6 +146,7 @@ async def _update_execution_log_complete(
         error_details,
         duration_ms,
         uuid.UUID(execution_id),
+        rls_context=_celery_admin_rls(),
     )
 
 
@@ -164,6 +169,7 @@ async def _update_schedule_after_run(
         is_active,
         next_run_at,
         uuid.UUID(schedule_id),
+        rls_context=_celery_admin_rls(),
     )
 
 
@@ -178,6 +184,7 @@ async def _check_agent_budget(agent_profile_id: str) -> tuple[bool, bool]:
     row = await celery_fetch_one(
         "SELECT monthly_limit_usd, current_period_start, current_period_spend_usd, enforce_hard_limit FROM agent_budgets WHERE agent_profile_id = $1",
         uuid.UUID(agent_profile_id),
+        rls_context=_celery_admin_rls(),
     )
     if not row or row.get("monthly_limit_usd") is None:
         return True, False
@@ -199,6 +206,7 @@ async def _pause_schedule_and_notify_budget(
     await celery_execute(
         "UPDATE agent_schedules SET is_active = false, updated_at = NOW() WHERE id = $1",
         uuid.UUID(schedule_id),
+        rls_context=_celery_admin_rls(),
     )
     base = os.getenv("BACKEND_URL", "http://backend:8000")
     try:
@@ -474,6 +482,7 @@ async def _get_schedule(schedule_id: str) -> Optional[Dict[str, Any]]:
         WHERE s.id = $1
         """,
         uuid.UUID(schedule_id),
+        rls_context=_celery_admin_rls(),
     )
     return row
 

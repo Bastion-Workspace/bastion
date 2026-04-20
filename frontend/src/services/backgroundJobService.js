@@ -3,6 +3,7 @@
  */
 
 import apiService from './apiService';
+import { devLog } from '../utils/devConsole';
 
 class BackgroundJobService {
   constructor(apiService) {
@@ -40,7 +41,7 @@ class BackgroundJobService {
         submittedAt: new Date()
       });
 
-      console.log('🎯 Background job submitted:', jobId);
+      devLog('🎯 Background job submitted:', jobId);
       return jobId;
     } catch (error) {
       console.error('❌ Failed to submit background job:', error);
@@ -104,7 +105,7 @@ class BackgroundJobService {
       // Close existing connection if any
       if (this.jobWebSockets.has(jobId)) {
         const existingWs = this.jobWebSockets.get(jobId);
-        console.log(`🔌 Closing existing WebSocket for job ${jobId}`);
+        devLog(`🔌 Closing existing WebSocket for job ${jobId}`);
         existingWs.close();
         this.jobWebSockets.delete(jobId);
       }
@@ -144,13 +145,13 @@ class BackgroundJobService {
       const maxPollingAttempts = 60; // 5 minutes with 5-second intervals
       
       const startPolling = () => {
-        console.log(`🔄 Starting polling fallback for job ${jobId}`);
+        devLog(`🔄 Starting polling fallback for job ${jobId}`);
         pollingInterval = setInterval(async () => {
           pollingAttempts++;
           try {
             const jobStatus = await this.getJobStatus(jobId);
             if (jobStatus && jobStatus.status === 'completed' && jobStatus.result) {
-              console.log(`✅ Job ${jobId} completed via polling fallback`);
+              devLog(`✅ Job ${jobId} completed via polling fallback`);
               clearInterval(pollingInterval);
               
               // Mark job as completed to prevent further polling
@@ -187,8 +188,8 @@ class BackgroundJobService {
       };
 
       ws.onopen = () => {
-        console.log(`📡 Connected to job progress for ${jobId}${expectedConversationId ? ` (conversation: ${expectedConversationId})` : ''}`);
-        console.log(`📡 WebSocket ready state: ${ws.readyState}`);
+        devLog(`📡 Connected to job progress for ${jobId}${expectedConversationId ? ` (conversation: ${expectedConversationId})` : ''}`);
+        devLog(`📡 WebSocket ready state: ${ws.readyState}`);
         clearTimeout(connectionTimeout); // Clear connection timeout
         if (callbacks.onConnect) callbacks.onConnect(jobId);
       };
@@ -202,25 +203,25 @@ class BackgroundJobService {
       };
 
       ws.onclose = (event) => {
-        console.log(`📡 Disconnected from job progress for ${jobId}. Code: ${event.code}, Reason: ${event.reason}`);
+        devLog(`📡 Disconnected from job progress for ${jobId}. Code: ${event.code}, Reason: ${event.reason}`);
         clearTimeout(connectionTimeout); // Clear connection timeout
         
         // Only start polling if WebSocket closed unexpectedly and we haven't already completed
         if (event.code !== 1000 && !this.completedJobs.has(jobId)) {
-          console.log(`🔄 WebSocket closed unexpectedly, starting polling fallback for job ${jobId}`);
+          devLog(`🔄 WebSocket closed unexpectedly, starting polling fallback for job ${jobId}`);
           startPolling();
         } else {
-          console.log(`✅ WebSocket closed normally for job ${jobId}, no polling needed`);
+          devLog(`✅ WebSocket closed normally for job ${jobId}, no polling needed`);
         }
       };
 
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log(`📡 Received job progress for ${jobId}:`, data);
+          devLog(`📡 Received job progress for ${jobId}:`, data);
           
           if (data.type === 'job_completed') {
-            console.log(`✅ Job ${jobId} completed via WebSocket`);
+            devLog(`✅ Job ${jobId} completed via WebSocket`);
             clearTimeout(connectionTimeout); // Clear connection timeout
             
             // Mark job as completed to prevent polling
@@ -303,7 +304,7 @@ class BackgroundJobService {
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
-        console.log(`📡 Connected to conversation jobs for ${conversationId}`);
+        devLog(`📡 Connected to conversation jobs for ${conversationId}`);
         if (callbacks.onConnect) callbacks.onConnect(conversationId);
       };
 
@@ -312,10 +313,10 @@ class BackgroundJobService {
           const update = JSON.parse(event.data);
           
           if (update.type === 'ongoing_jobs') {
-            console.log(`📋 Ongoing jobs for conversation ${conversationId}:`, update.jobs);
+            devLog(`📋 Ongoing jobs for conversation ${conversationId}:`, update.jobs);
             if (callbacks.onOngoingJobs) callbacks.onOngoingJobs(conversationId, update.jobs);
           } else if (update.type === 'background_job_completed') {
-            console.log(`✅ Job completed in conversation ${conversationId}:`, update.job_id);
+            devLog(`✅ Job completed in conversation ${conversationId}:`, update.job_id);
             if (callbacks.onJobCompleted) callbacks.onJobCompleted(conversationId, update);
           }
         } catch (error) {
@@ -324,7 +325,7 @@ class BackgroundJobService {
       };
 
       ws.onclose = () => {
-        console.log(`📡 Disconnected from conversation jobs for ${conversationId}`);
+        devLog(`📡 Disconnected from conversation jobs for ${conversationId}`);
         if (callbacks.onDisconnect) callbacks.onDisconnect(conversationId);
       };
 
@@ -345,13 +346,13 @@ class BackgroundJobService {
    */
   async checkAndReconnectToOngoingJobs(conversationId, onJobFound) {
     try {
-      console.log(`🔍 Checking for jobs in conversation ${conversationId}`);
+      devLog(`🔍 Checking for jobs in conversation ${conversationId}`);
       
       // First check for ongoing jobs
       const ongoingJobs = await apiService.get(`/api/background-chat/conversation/${conversationId}/ongoing`);
       
       if (ongoingJobs.length > 0) {
-        console.log(`🔄 Found ${ongoingJobs.length} ongoing jobs for conversation ${conversationId}`);
+        devLog(`🔄 Found ${ongoingJobs.length} ongoing jobs for conversation ${conversationId}`);
         
         for (const job of ongoingJobs) {
           // CRITICAL: Validate that job belongs to the current conversation
@@ -375,13 +376,13 @@ class BackgroundJobService {
                 result: jobData.result,
                 progress: jobData.progress
               };
-              console.log('✅ Job completed during reconnection:', completedJob);
+              devLog('✅ Job completed during reconnection:', completedJob);
               if (onJobFound) {
                 onJobFound(completedJob);
               }
             },
             onProgress: (jobId, progress) => {
-              console.log(`🔄 Reconnected job progress for ${jobId}:`, progress);
+              devLog(`🔄 Reconnected job progress for ${jobId}:`, progress);
             }
           }, conversationId); // Pass conversation ID for validation
         }
@@ -398,9 +399,9 @@ class BackgroundJobService {
    * Disconnect from all job WebSockets
    */
   disconnectAll() {
-    console.log(`🔌 Disconnecting ${this.jobWebSockets.size} WebSocket connections`);
+    devLog(`🔌 Disconnecting ${this.jobWebSockets.size} WebSocket connections`);
     for (const [jobId, ws] of this.jobWebSockets.entries()) {
-      console.log(`🔌 Closing WebSocket for job ${jobId}`);
+      devLog(`🔌 Closing WebSocket for job ${jobId}`);
       ws.close();
     }
     this.jobWebSockets.clear();
@@ -428,7 +429,7 @@ class BackgroundJobService {
    * Set the current active conversation ID
    */
   setCurrentConversationId(conversationId) {
-    console.log(`🔄 BackgroundJobService: Setting current conversation to ${conversationId}`);
+    devLog(`🔄 BackgroundJobService: Setting current conversation to ${conversationId}`);
     this.currentConversationId = conversationId;
   }
 
@@ -445,27 +446,27 @@ class BackgroundJobService {
   shouldProcessJobCompletion(jobConversationId) {
     // If no current conversation ID, allow processing (new conversation scenario)
     if (!this.currentConversationId) {
-      console.log(`✅ Allowing job completion for conversation ${jobConversationId} - no current conversation set`);
+      devLog(`✅ Allowing job completion for conversation ${jobConversationId} - no current conversation set`);
       return true;
     }
     
     // If job conversation matches current conversation, allow processing
     if (jobConversationId === this.currentConversationId) {
-      console.log(`✅ Allowing job completion for conversation ${jobConversationId} - matches current conversation`);
+      devLog(`✅ Allowing job completion for conversation ${jobConversationId} - matches current conversation`);
       return true;
     }
     
     // RELAXED: Allow processing if current conversation is null or undefined
     // This handles cases where the conversation context might be in transition
     if (!this.currentConversationId || this.currentConversationId === 'null' || this.currentConversationId === 'undefined') {
-      console.log(`✅ Allowing job completion for conversation ${jobConversationId} - current conversation is null/undefined`);
+      devLog(`✅ Allowing job completion for conversation ${jobConversationId} - current conversation is null/undefined`);
       return true;
     }
     
     // RELAXED: Allow processing if the job conversation is a substring of current conversation
     // This handles cases where conversation IDs might have slight variations
     if (this.currentConversationId.includes(jobConversationId) || jobConversationId.includes(this.currentConversationId)) {
-      console.log(`✅ Allowing job completion for conversation ${jobConversationId} - substring match with current ${this.currentConversationId}`);
+      devLog(`✅ Allowing job completion for conversation ${jobConversationId} - substring match with current ${this.currentConversationId}`);
       return true;
     }
     
@@ -498,7 +499,7 @@ class BackgroundJobService {
    */
   markJobCompleted(jobId) {
     this.completedJobs.add(jobId);
-    console.log(`✅ Marked job ${jobId} as completed to prevent further polling`);
+    devLog(`✅ Marked job ${jobId} as completed to prevent further polling`);
   }
 }
 

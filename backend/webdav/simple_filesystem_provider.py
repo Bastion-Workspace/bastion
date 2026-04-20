@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class MD5FileResource(FileResource):
     """
-    **ROOSEVELT'S CONTENT-HASH FILE RESOURCE!**
+    Content-hash based WebDAV file resource
     
     Custom FileResource that generates ETags based on MD5 content hash
     instead of mtime+size. This provides more reliable sync conflict detection.
@@ -47,7 +47,7 @@ class MD5FileResource(FileResource):
         - File is too large (> 50MB) - avoid performance hit
         - File read fails
         
-        **By George!** Content hashing for reliable sync!
+        Content hashing for reliable sync.
         """
         try:
             file_stat = os.stat(self.file_path)
@@ -59,7 +59,7 @@ class MD5FileResource(FileResource):
                 logger.debug(f"📦 ETag cache hit for: {self.name}")
                 return self._etag_cache
             
-            # **ROOSEVELT:** For large files (> 100MB), use faster mtime-based ETag
+            # Large files (>100MB): prefer mtime-based ETag for performance
             # Still use MD5 for files up to 100MB to maintain consistency
             MAX_HASH_SIZE = 100 * 1024 * 1024  # 100 MB (increased from 50MB)
             if file_size > MAX_HASH_SIZE:
@@ -111,9 +111,9 @@ class MD5FilesystemProvider(FilesystemProvider):
     """
     Custom FilesystemProvider that uses MD5-based ETags for files.
     
-    **BULLY!** Content hashing instead of timestamp guessing!
+    Use content hashing instead of timestamp-only heuristics.
     
-    **ROOSEVELT FIX:** Configure to use MD5-based ETags consistently!
+    Use MD5-based ETags consistently for this provider
     We pass fs_opts to ensure proper configuration.
     """
     
@@ -139,7 +139,7 @@ class MD5FilesystemProvider(FilesystemProvider):
         # Get the filesystem path
         file_path = self._loc_to_file_path(path, environ)
         
-        # **ROOSEVELT DEBUG:** Log resource resolution for iOS troubleshooting
+        # Verbose logging for resource resolution (mobile clients)
         logger.debug(f"🔍 MD5Provider.get_resource_inst: path='{path}', file_path='{file_path}'")
         
         # Check if path exists
@@ -152,7 +152,7 @@ class MD5FilesystemProvider(FilesystemProvider):
             logger.debug(f"📁 Returning FolderResource for: {path}")
             return FolderResource(path, environ, file_path)
         else:
-            # **ROOSEVELT!** Use our MD5FileResource instead of default FileResource!
+            # Use MD5FileResource instead of default FileResource
             logger.debug(f"📄 Returning MD5FileResource for: {path}")
             return MD5FileResource(path, environ, file_path)
 
@@ -188,17 +188,17 @@ class UserFilteredFilesystemProvider(DAVProvider):
         
         # Set other required attributes
         self.readonly = False
-        # **BULLY!** share_path must be EMPTY to avoid double-slash in URLs!
+        # share_path must be empty to avoid double slashes in URLs
         # mount_path is "/" so share_path should be ""
         self.share_path = ""
         
         logger.info(f"📁 UserFilteredFilesystemProvider initialized")
-        logger.info(f"📂 Base path: {root_path}")
+        logger.debug(f"📂 Base path: {root_path}")
     
     @property
     def mount_path(self):
         """Get mount_path - ensures it's never None or empty"""
-        # **BULLY!** Handle both None AND empty string - default to "/"
+        # Treat None and empty string as root path "/"
         if not self._mount_path:  # Catches None, "", etc.
             return "/"
         return self._mount_path
@@ -211,12 +211,12 @@ class UserFilteredFilesystemProvider(DAVProvider):
         WsgiDAV calls this after instantiation to set the mount path.
         We need to propagate it to all child FilesystemProvider instances.
         
-        **ROOSEVELT FIX:** Handle both None and empty string!
+        Treat None and empty string as equivalent where noted
         """
         # **TRUST BUST!** WsgiDAV might set this to "" (empty string) OR None!
         # We want "/" in either case (nginx strips /dav prefix)
         self._mount_path = value if value else "/"
-        logger.info(f"📂 Mount path set to: '{self._mount_path}' (received: '{value}')")
+        logger.debug(f"📂 Mount path set to: '{self._mount_path}' (received: '{value}')")
         
         # Propagate to all cached child providers (if they exist yet)
         # Use getattr for defensive initialization handling
@@ -224,7 +224,7 @@ class UserFilteredFilesystemProvider(DAVProvider):
         if provider_cache:
             for user_id, provider in provider_cache.items():
                 provider.mount_path = self._mount_path
-                logger.info(f"📂 Updated mount_path for cached provider (user: {user_id})")
+                logger.debug(f"📂 Updated mount_path for cached provider (user: {user_id})")
     
     def _get_username_from_db_sync(self, user_id: str) -> str:
         """Get username from database (synchronous)"""
@@ -243,7 +243,7 @@ class UserFilteredFilesystemProvider(DAVProvider):
             row = cur.fetchone()
             cur.close()
             username = row[0] if row else user_id
-            logger.info(f"📂 Resolved user_id {user_id} to username: {username}")
+            logger.debug(f"📂 Resolved user_id {user_id} to username: {username}")
             return username
         except Exception as e:
             logger.error(f"❌ Failed to get username for {user_id}: {e}")
@@ -276,26 +276,26 @@ class UserFilteredFilesystemProvider(DAVProvider):
             user_root.mkdir(parents=True, exist_ok=True)
             
             user_root_str = str(user_root)
-            logger.info(f"📂 Creating NEW MD5FilesystemProvider for user '{username}'")
-            logger.info(f"📂 User root directory: {user_root_str}")
+            logger.debug(f"📂 Creating NEW MD5FilesystemProvider for user '{username}'")
+            logger.debug(f"📂 User root directory: {user_root_str}")
             
             # Create a fresh MD5FilesystemProvider instance for this user
             # This provider will handle ALL filesystem operations for this user
-            # **BULLY!** Using MD5-based ETags for accurate sync conflict detection!
+            # MD5-based ETags for sync conflict detection
             provider = MD5FilesystemProvider(user_root_str)
 
-            # **ROOSEVELT'S FINAL CLEAN FIX:** Child providers use mount_path="" (EMPTY!)
+            # Child providers use empty mount_path
             # nginx strips /dav prefix, provider at "/" (parent), child at "" (empty)
             # Child: mount_path="" + resource path "/OrgMode/file.org" = "/OrgMode/file.org" ✅
             # Clients add their base URL (/dav) back: /dav + /OrgMode/file.org = /dav/OrgMode/file.org
             # NOTE: mount_path="/" would cause DOUBLE SLASH: "/" + "/OrgMode" = "//OrgMode" ❌
             provider.mount_path = ""
             provider.share_path = ""
-            logger.info(f"📂 Set child provider mount_path='' (empty) and share_path='' (clean hrefs)")
+            logger.debug(f"📂 Set child provider mount_path='' (empty) and share_path='' (clean hrefs)")
             
             # Store in cache
             self._provider_cache[cache_key] = provider
-            logger.info(f"✅ Provider cached for user: {username}")
+            logger.debug(f"✅ Provider cached for user: {username}")
         
         # Always return the cached provider
         provider = self._provider_cache[cache_key]
@@ -319,26 +319,26 @@ class UserFilteredFilesystemProvider(DAVProvider):
         """
         user_id = environ.get("webdav.auth.user_id", "unknown")
 
-        # **ROOSEVELT'S CLEAN FIX:** nginx strips /dav, provider mounted at /
+        # nginx strips /dav; mount provider at /
         # nginx: /dav/OrgMode → (strips /dav) → WsgiDAV: /OrgMode
         # Provider at "/" receives clean paths like /OrgMode
         # hrefs generated: /OrgMode/file.org (clients add /dav base back)
         
-        logger.info(f"📂 ========== WebDAV Request ==========")
-        logger.info(f"📂 User: {user_id}")
-        logger.info(f"📂 Path received: '{path}'")
-        logger.info(f"📂 HTTP Method: {environ.get('REQUEST_METHOD', 'N/A')}")
-        logger.info(f"📂 User-Agent: {environ.get('HTTP_USER_AGENT', 'N/A')}")
-        logger.info(f"📂 Depth: {environ.get('HTTP_DEPTH', 'N/A')}")
+        logger.debug(f"📂 ========== WebDAV Request ==========")
+        logger.debug(f"📂 User: {user_id}")
+        logger.debug(f"📂 Path received: '{path}'")
+        logger.debug(f"📂 HTTP Method: {environ.get('REQUEST_METHOD', 'N/A')}")
+        logger.debug(f"📂 User-Agent: {environ.get('HTTP_USER_AGENT', 'N/A')}")
+        logger.debug(f"📂 Depth: {environ.get('HTTP_DEPTH', 'N/A')}")
         
         # Get user-specific provider
         provider = self._get_user_provider(user_id, environ)
         
-        logger.info(f"📂 Provider root_folder_path: {provider.root_folder_path}")
-        logger.info(f"📂 Provider mount_path: {provider.mount_path}")
-        logger.info(f"📂 Provider share_path: {provider.share_path}")
+        logger.debug(f"📂 Provider root_folder_path: {provider.root_folder_path}")
+        logger.debug(f"📂 Provider mount_path: {provider.mount_path}")
+        logger.debug(f"📂 Provider share_path: {provider.share_path}")
         
-        # **ROOSEVELT'S CLEAN FIX:** Override environ to make resources reference child
+        # Adjust WSGI environ so resources resolve under child provider
         original_provider = environ.get('wsgidav.provider')
         environ['wsgidav.provider'] = provider
         
@@ -353,24 +353,24 @@ class UserFilteredFilesystemProvider(DAVProvider):
                 environ.pop('wsgidav.provider', None)
         
         if resource:
-            # **ROOSEVELT:** Do NOT modify resource.path! WsgiDAV requires paths start with /
+            # Do not modify resource.path; paths must start with /
             # Child provider has mount_path="" so: "" + "" + "/OrgMode" = "/OrgMode" ✅
             # 
-            # **ROOSEVELT DEBUG:** Log the ACTUAL href that will be in XML response
+            # Log resolved href for XML response debugging
             try:
                 ref_url = resource.get_ref_url() if hasattr(resource, 'get_ref_url') else 'N/A'
                 href = resource.get_href() if hasattr(resource, 'get_href') else 'N/A'
-                logger.info(f"✅ Resource found: ref_url={ref_url}, href={href}")
+                logger.debug(f"✅ Resource found: ref_url={ref_url}, href={href}")
             except Exception as e:
-                logger.info(f"✅ Resource found (href error: {e})")
+                logger.debug(f"✅ Resource found (href error: {e})")
                 
-            logger.info(f"📂 Resource path: {resource.path if hasattr(resource, 'path') else 'N/A'}")
-            logger.info(f"📂 Resource provider type: {type(resource.provider).__name__ if hasattr(resource, 'provider') else 'N/A'}")
-            logger.info(f"📂 Resource is_collection: {resource.is_collection if hasattr(resource, 'is_collection') else 'N/A'}")
+            logger.debug(f"📂 Resource path: {resource.path if hasattr(resource, 'path') else 'N/A'}")
+            logger.debug(f"📂 Resource provider type: {type(resource.provider).__name__ if hasattr(resource, 'provider') else 'N/A'}")
+            logger.debug(f"📂 Resource is_collection: {resource.is_collection if hasattr(resource, 'is_collection') else 'N/A'}")
         else:
-            logger.info(f"❌ Resource not found for path: {path}")
+            logger.debug(f"❌ Resource not found for path: {path}")
         
-        logger.info(f"📂 =====================================")
+        logger.debug(f"📂 =====================================")
         
         return resource
 

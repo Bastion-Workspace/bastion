@@ -41,7 +41,7 @@ class WebSocketManager:
             if key not in self.session_connections:
                 self.session_connections[key] = []
             self.session_connections[key].append(websocket)
-        logger.info(f"📡 WebSocket connected (session: {key})")
+        logger.debug(f"📡 WebSocket connected (session: {key})")
     
     async def connect_to_job(self, websocket: WebSocket, job_id: str):
         """Accept a WebSocket connection for job progress tracking"""
@@ -53,17 +53,16 @@ class WebSocketManager:
                 self.job_connections[job_id] = []
             self.job_connections[job_id].append(websocket)
             
-            logger.info(f"📡 WebSocket connected to job: {job_id}")
-            logger.info(f"📡 Total job connections: {len(self.job_connections)}")
-            logger.info(f"📡 Active connections for job {job_id}: {len(self.job_connections[job_id])}")
-            logger.info(f"📡 All job IDs with connections: {list(self.job_connections.keys())}")
+            logger.debug(f"📡 WebSocket connected to job: {job_id}")
+            logger.debug(f"📡 Total job connections: {len(self.job_connections)}")
+            logger.debug(f"📡 All job IDs with connections: {list(self.job_connections.keys())}")
         except Exception as e:
             logger.error(f"❌ Failed to connect WebSocket to job {job_id}: {e}")
             raise
     
     async def connect_to_conversation(self, websocket: WebSocket, conversation_id: str, user_id: str):
         """
-        ROOSEVELT'S AGENT STATUS CHANNEL: Accept WebSocket for real-time agent status updates
+        WebSocket endpoint for real-time agent status updates
         This creates an out-of-band channel for LLM tool execution status
         """
         try:
@@ -80,9 +79,8 @@ class WebSocketManager:
                 self.user_connections[user_id] = []
             self.user_connections[user_id].append(websocket)
             
-            logger.info(f"🤖 AGENT STATUS CHANNEL: WebSocket connected to conversation {conversation_id} for user {user_id}")
-            logger.info(f"📊 Active conversation connections: {len(self.conversation_connections)}")
-            logger.info(f"📊 Connections for this conversation: {len(self.conversation_connections[conversation_id])}")
+            logger.debug(f"🤖 AGENT STATUS CHANNEL: WebSocket connected to conversation {conversation_id} for user {user_id}")
+            logger.debug(f"📊 Active conversation connections: {len(self.conversation_connections)}")
         except Exception as e:
             logger.error(f"❌ Failed to connect WebSocket to conversation {conversation_id}: {e}")
             raise
@@ -98,17 +96,17 @@ class WebSocketManager:
     def disconnect(self, websocket: WebSocket, session_id: str = None):
         """Remove a WebSocket connection. session_id normalized to str for consistent lookup."""
         key = str(session_id) if session_id is not None else None
-        logger.info(f"🔌 Disconnecting WebSocket (session: {key})")
+        logger.debug(f"🔌 Disconnecting WebSocket (session: {key})")
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-            logger.info(f"🧹 Removed from active connections")
+            logger.debug(f"🧹 Removed from active connections")
         if key and key in self.session_connections:
             if websocket in self.session_connections[key]:
                 self.session_connections[key].remove(websocket)
-                logger.info(f"🧹 Removed from session connections for {key}")
+                logger.debug(f"🧹 Removed from session connections for {key}")
             if not self.session_connections[key]:
                 del self.session_connections[key]
-                logger.info(f"🧹 Cleaned up empty session {key}")
+                logger.debug(f"🧹 Cleaned up empty session {key}")
         
         # Also clean up from job connections
         disconnected_jobs = []
@@ -116,33 +114,33 @@ class WebSocketManager:
             if websocket in connections:
                 connections.remove(websocket)
                 disconnected_jobs.append(job_id)
-                logger.info(f"🧹 Removed from job connections for {job_id}")
+                logger.debug(f"🧹 Removed from job connections for {job_id}")
         
         # Clean up empty job connection lists
         empty_jobs = [job_id for job_id, connections in self.job_connections.items() if not connections]
         for job_id in empty_jobs:
             del self.job_connections[job_id]
-            logger.info(f"🧹 Cleaned up empty job connections for {job_id}")
+            logger.debug(f"🧹 Cleaned up empty job connections for {job_id}")
         
-        # ROOSEVELT'S AGENT STATUS: Clean up from conversation connections
+        # Remove agent status connection from conversation map
         disconnected_conversations = []
         for conversation_id, connections in self.conversation_connections.items():
             if websocket in connections:
                 connections.remove(websocket)
                 disconnected_conversations.append(conversation_id)
-                logger.info(f"🧹 Removed from conversation connections for {conversation_id}")
+                logger.debug(f"🧹 Removed from conversation connections for {conversation_id}")
         
         # Clean up empty conversation connection lists
         empty_conversations = [conv_id for conv_id, connections in self.conversation_connections.items() if not connections]
         for conv_id in empty_conversations:
             del self.conversation_connections[conv_id]
-            logger.info(f"🧹 Cleaned up empty conversation connections for {conv_id}")
+            logger.debug(f"🧹 Cleaned up empty conversation connections for {conv_id}")
         
         # Clean up from user connections
         for user_id, connections in self.user_connections.items():
             if websocket in connections:
                 connections.remove(websocket)
-                logger.info(f"🧹 Removed from user connections for {user_id}")
+                logger.debug(f"🧹 Removed from user connections for {user_id}")
 
         # Clean up from team timeline connections
         if hasattr(self, 'line_timeline_connections'):
@@ -156,21 +154,21 @@ class WebSocketManager:
         empty_users = [uid for uid, connections in self.user_connections.items() if not connections]
         for uid in empty_users:
             del self.user_connections[uid]
-            logger.info(f"🧹 Cleaned up empty user connections for {uid}")
+            logger.debug(f"🧹 Cleaned up empty user connections for {uid}")
         
         # Clean up device proxy connections
         for user_id, devices in list(self.device_connections.items()):
             for device_id, ws in list(devices.items()):
                 if ws == websocket:
                     self.unregister_device(user_id, device_id)
-                    logger.info(f"🧹 Removed device {device_id} for user {user_id}")
+                    logger.debug(f"🧹 Removed device {device_id} for user {user_id}")
         
         if disconnected_jobs:
-            logger.info(f"📡 WebSocket disconnected from jobs: {disconnected_jobs}")
+            logger.debug(f"📡 WebSocket disconnected from jobs: {disconnected_jobs}")
         elif disconnected_conversations:
-            logger.info(f"🤖 WebSocket disconnected from conversations: {disconnected_conversations}")
+            logger.debug(f"🤖 WebSocket disconnected from conversations: {disconnected_conversations}")
         else:
-            logger.info(f"📡 WebSocket disconnected (session: {session_id})")
+            logger.debug(f"📡 WebSocket disconnected (session: {session_id})")
 
     async def send_personal_message(self, message: Any, websocket: WebSocket):
         """Send a message to a specific WebSocket connection"""
@@ -204,13 +202,11 @@ class WebSocketManager:
 
     async def send_to_job(self, message: Any, job_id: str):
         """Send a message to all connections tracking a specific job"""
-        logger.info(f"📡 Attempting to send message to job {job_id}")
-        logger.info(f"📡 Job connections available: {list(self.job_connections.keys())}")
-        logger.info(f"📡 Total active connections: {len(self.active_connections)}")
-        
+        logger.debug(f"📡 Attempting to send message to job {job_id}")
+
         if job_id in self.job_connections:
             connections = self.job_connections[job_id]
-            logger.info(f"📡 Found {len(connections)} connections for job {job_id}")
+            logger.debug(f"📡 Found {len(connections)} connections for job {job_id}")
             broken_connections = []
             
             for i, websocket in enumerate(connections):
@@ -220,7 +216,7 @@ class WebSocketManager:
                     else:
                         message_str = str(message)
                     await websocket.send_text(message_str)
-                    logger.info(f"✅ Successfully sent message to job {job_id} connection {i+1}/{len(connections)}")
+                    logger.debug(f"✅ Successfully sent message to job {job_id} connection {i+1}/{len(connections)}")
                 except Exception as e:
                     logger.error(f"❌ Failed to send message to job {job_id} connection {i+1}: {e}")
                     broken_connections.append(websocket)
@@ -229,16 +225,9 @@ class WebSocketManager:
             for websocket in broken_connections:
                 if websocket in self.job_connections[job_id]:
                     self.job_connections[job_id].remove(websocket)
-                    logger.info(f"🧹 Removed broken connection for job {job_id}")
+                    logger.debug(f"🧹 Removed broken connection for job {job_id}")
         else:
             logger.warning(f"⚠️ No connections found for job {job_id}")
-            logger.info(f"📡 Available job connections: {list(self.job_connections.keys())}")
-            logger.info(f"📡 Job ID being looked for: {job_id}")
-            logger.info(f"📡 Job ID type: {type(job_id)}")
-            for available_job_id in self.job_connections.keys():
-                logger.info(f"📡 Available job ID: {available_job_id} (type: {type(available_job_id)})")
-                if str(job_id) == str(available_job_id):
-                    logger.info(f"📡 String comparison matches for job {job_id}")
 
     async def broadcast(self, message: Any):
         """Send a message to all active connections"""
@@ -269,16 +258,26 @@ class WebSocketManager:
             if user_id:
                 # Send to specific user's sessions
                 await self.send_to_session(message, user_id)
-                logger.info(f"📁 Sent folder update to user {user_id}")
+                logger.debug(f"📁 Sent folder update to user {user_id}")
             else:
                 # Global folder update - send to all sessions
                 await self.broadcast(message)
-                logger.info(f"📁 Broadcasted global folder update")
+                logger.debug(f"📁 Broadcasted global folder update")
                 
         except Exception as e:
             logger.error(f"❌ Failed to send folder update: {e}")
 
-    async def send_document_status_update(self, document_id: str, status: str, folder_id: str = None, user_id: str = None, filename: str = None, proposal_data: Dict[str, Any] = None):
+    async def send_document_status_update(
+        self,
+        document_id: str,
+        status: str,
+        folder_id: str = None,
+        user_id: str = None,
+        filename: str = None,
+        proposal_data: Dict[str, Any] = None,
+        updated_at: str = None,
+        content_source: str = None,
+    ):
         """Send document status update to appropriate sessions. Includes filename for toasts and has_pending_proposals for file tree indicator."""
         try:
             message = {
@@ -287,8 +286,12 @@ class WebSocketManager:
                 "status": status,
                 "folder_id": folder_id,
                 "filename": filename,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
             }
+            if content_source:
+                message["content_source"] = content_source
+            if updated_at is not None:
+                message["updated_at"] = updated_at
             if proposal_data is not None and "has_pending_proposals" in proposal_data:
                 message["has_pending_proposals"] = proposal_data["has_pending_proposals"]
 
@@ -308,18 +311,27 @@ class WebSocketManager:
                 
                 if user_id:
                     await self.send_to_session(proposal_message, user_id)
-                    logger.info(f"📝 Sent document edit proposal to user {user_id}: {document_id} (proposal: {proposal_data.get('proposal_id')})")
+                    logger.debug(f"📝 Sent document edit proposal to user {user_id}: {document_id} (proposal: {proposal_data.get('proposal_id')})")
                 else:
                     await self.broadcast(proposal_message)
-                    logger.info(f"📝 Broadcasted document edit proposal: {document_id} (proposal: {proposal_data.get('proposal_id')})")
+                    logger.debug(f"📝 Broadcasted document edit proposal: {document_id} (proposal: {proposal_data.get('proposal_id')})")
             
-            if user_id:
+            # Library timestamp (collaborative persist, etc.): all connected clients must see the same updated_at.
+            if updated_at is not None:
+                await self.broadcast(message)
+                logger.debug(
+                    "Broadcast document status update (with updated_at): %s (%s) -> %s",
+                    document_id,
+                    filename,
+                    status,
+                )
+            elif user_id:
                 await self.send_to_session(message, user_id)
-                logger.info(f"📄 Sent document status update to user {user_id}: {document_id} ({filename}) -> {status}")
+                logger.debug(f"📄 Sent document status update to user {user_id}: {document_id} ({filename}) -> {status}")
             else:
                 # Global document update
                 await self.broadcast(message)
-                logger.info(f"📄 Broadcasted global document status update: {document_id} ({filename}) -> {status}")
+                logger.debug(f"📄 Broadcasted global document status update: {document_id} ({filename}) -> {status}")
                 
         except Exception as e:
             logger.error(f"❌ Failed to send document status update: {e}")
@@ -337,7 +349,7 @@ class WebSocketManager:
         metadata: Dict[str, Any] = None
     ):
         """
-        ROOSEVELT'S AGENT STATUS STREAMING: Send real-time agent tool execution status
+        Stream real-time agent tool execution status
         
         This is the OUT-OF-BAND channel for LLM status updates that appear/disappear
         as the agent works through its iterative research process.
@@ -348,7 +360,7 @@ class WebSocketManager:
             status_type: tool_start, tool_complete, tool_error, iteration_start, synthesis
             message: Human-readable status message
             agent_type: research_agent, chat_agent, etc.
-            tool_name: search_local, search_and_crawl, etc.
+            tool_name: search_documents, search_and_crawl, etc.
             iteration: Current iteration number (1-8)
             max_iterations: Maximum iterations (8)
             metadata: Additional context
@@ -371,7 +383,7 @@ class WebSocketManager:
             sent_to_conversation = False
             if conversation_id in self.conversation_connections:
                 connections = self.conversation_connections[conversation_id]
-                logger.info(f"🤖 AGENT STATUS: Sending to {len(connections)} conversation connections for {conversation_id}")
+                logger.debug(f"🤖 AGENT STATUS: Sending to {len(connections)} conversation connections for {conversation_id}")
                 
                 broken_connections = []
                 for websocket in connections:
@@ -390,7 +402,7 @@ class WebSocketManager:
             # Fallback: Send to user connections if no conversation-specific connection
             if not sent_to_conversation and user_id in self.user_connections:
                 connections = self.user_connections[user_id]
-                logger.info(f"🤖 AGENT STATUS: Fallback to user connections - sending to {len(connections)} user connections for {user_id}")
+                logger.debug(f"🤖 AGENT STATUS: Fallback to user connections - sending to {len(connections)} user connections for {user_id}")
                 
                 broken_connections = []
                 for websocket in connections:
@@ -406,7 +418,7 @@ class WebSocketManager:
                         self.user_connections[user_id].remove(websocket)
             
             if sent_to_conversation or (user_id in self.user_connections):
-                logger.info(f"✅ AGENT STATUS SENT: {status_type} - {message} (conv: {conversation_id[:8]}...)")
+                logger.debug(f"✅ AGENT STATUS SENT: {status_type} - {message} (conv: {conversation_id[:8]}...)")
             else:
                 logger.debug(f"📡 AGENT STATUS: No active connections for conversation {conversation_id} or user {user_id}")
                 
@@ -445,7 +457,7 @@ class WebSocketManager:
             logger.error("Failed to send line_agent_chat_update: %s", e)
     
     # =====================
-    # ROOSEVELT'S MESSAGING CAVALRY
+    # Messaging WebSocket
     # Room-based messaging WebSocket methods
     # =====================
     
@@ -481,9 +493,8 @@ class WebSocketManager:
             if websocket not in self.user_connections[user_id]:
                 self.user_connections[user_id].append(websocket)
             
-            logger.info(f"💬 WebSocket connected to room {room_id} for user {user_id}")
-            logger.info(f"📊 Active room connections: {len(self.room_connections)}")
-            logger.info(f"📊 Connections for this user: {len(self.user_connections[user_id])}")
+            logger.debug(f"💬 WebSocket connected to room {room_id} for user {user_id}")
+            logger.debug(f"📊 Active room connections: {len(self.room_connections)}")
         except Exception as e:
             logger.error(f"❌ Failed to connect WebSocket to room {room_id}: {e}")
             raise
@@ -507,7 +518,7 @@ class WebSocketManager:
             # Clean up empty room lists
             if not self.room_connections[room_id]:
                 del self.room_connections[room_id]
-                logger.info(f"🧹 Cleaned up empty room {room_id}")
+                logger.debug(f"🧹 Cleaned up empty room {room_id}")
         
         # Also remove from user_connections - handle list correctly
         if hasattr(self, 'user_connections') and user_id in self.user_connections:
@@ -518,16 +529,16 @@ class WebSocketManager:
                 ]
                 if not self.user_connections[user_id]:
                     del self.user_connections[user_id]
-                    logger.info(f"🧹 No more active connections for user {user_id}")
+                    logger.debug(f"🧹 No more active connections for user {user_id}")
             elif self.user_connections[user_id] == websocket:
                 del self.user_connections[user_id]
-                logger.info(f"🧹 No more active connections for user {user_id}")
+                logger.debug(f"🧹 No more active connections for user {user_id}")
 
         # Also remove from active connections
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
         
-        logger.info(f"💬 WebSocket disconnected from room {room_id} for user {user_id}")
+        logger.debug(f"💬 WebSocket disconnected from room {room_id} for user {user_id}")
 
     def is_user_connected(self, user_id: str) -> bool:
         """Check if a user has any active WebSocket connections"""
@@ -608,13 +619,13 @@ class WebSocketManager:
                             try:
                                 await websocket.send_json(message)
                                 sent_to_users += 1
-                            except:
+                            except Exception:
                                 pass
             except Exception as e:
                 logger.error(f"❌ Failed to broadcast new message globally: {e}")
 
         if sent_to_room > 0 or sent_to_users > 0:
-            logger.info(f"✅ Broadcast message type '{message.get('type')}' to {sent_to_room} room and {sent_to_users} user connections")
+            logger.debug(f"✅ Broadcast message type '{message.get('type')}' to {sent_to_room} room and {sent_to_users} user connections")
         else:
             logger.debug(f"📡 No recipients for broadcast in room {room_id}")
     
@@ -659,10 +670,10 @@ class WebSocketManager:
                     for websocket in (connections if isinstance(connections, list) else [connections]):
                         try:
                             await websocket.send_json(presence_message)
-                        except:
+                        except Exception:
                             pass
 
-            logger.info(f"✅ Broadcast presence update for user {user_id} ({status}) to all active connections")
+            logger.debug(f"✅ Broadcast presence update for user {user_id} ({status}) to all active connections")
             
         except Exception as e:
             logger.error(f"❌ Failed to broadcast presence update: {e}")
@@ -686,11 +697,11 @@ class WebSocketManager:
                     try:
                         await websocket.send_json(message)
                         sent_count += 1
-                    except:
+                    except Exception:
                         pass
         
         if sent_count > 0:
-            logger.info(f"✅ Broadcast message type '{message.get('type')}' to {sent_count} user connections")
+            logger.debug(f"✅ Broadcast message type '{message.get('type')}' to {sent_count} user connections")
 
     async def send_line_timeline_update(self, line_id: str, message: Dict[str, Any]):
         """Send a timeline update to all WebSockets subscribed to this line's timeline."""
@@ -762,6 +773,43 @@ class WebSocketManager:
             return result
         except asyncio.TimeoutError:
             return {"success": False, "error": "Device invocation timed out", "formatted": "Request timed out."}
+        finally:
+            self.pending_device_invocations.pop(request_id, None)
+
+    async def set_device_workspace(
+        self,
+        user_id: str,
+        workspace_root: str,
+        device_id: str = None,
+        timeout: int = 30,
+    ) -> dict:
+        """
+        Ask a connected device to set its active workspace root.
+        This is a protocol-level message (not a capability), so it does not require the tool
+        to appear in the device capability list.
+        """
+        import uuid
+
+        request_id = str(uuid.uuid4())
+        devices = self.device_connections.get(user_id) or {}
+        if not devices:
+            return {"success": False, "error": "No device connected", "formatted": "No device connected for this user."}
+        target_device_id = device_id if device_id and device_id in devices else next(iter(devices))
+        ws = devices[target_device_id]
+
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self.pending_device_invocations[request_id] = (user_id, future)
+        try:
+            await ws.send_json({
+                "type": "set_workspace",
+                "request_id": request_id,
+                "workspace_root": workspace_root,
+            })
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Set workspace timed out", "formatted": "Request timed out."}
         finally:
             self.pending_device_invocations.pop(request_id, None)
 

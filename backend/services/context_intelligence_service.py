@@ -359,7 +359,8 @@ class ContextIntelligenceService:
             "research_questions": research_questions,
             "user_intents": user_intents,
             "conversation_flow": conversation_flow,
-            "context_changes": [],  # TODO: Implement context change detection
+            # context_changes: reserved for future diff-based context tracking (currently empty)
+            "context_changes": [],
             "information_needs": information_needs
         }
     

@@ -1,5 +1,5 @@
 ---
-globs: backend/services/langgraph_agents/*.py,backend/services/langgraph_*.py
+globs: backend/services/langgraph_*.py,llm-orchestrator/orchestrator/agents/*.py
 description: Agent completion and state management best practices
 ---
 

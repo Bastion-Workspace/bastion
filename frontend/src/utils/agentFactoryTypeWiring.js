@@ -212,6 +212,73 @@ export function extractPromptPlaceholders(template) {
 
 const VALID_STEP_TYPES = new Set(['tool', 'llm_task', 'llm_agent', 'approval', 'loop', 'parallel', 'branch', 'deep_agent']);
 
+function stepHasNonemptyCondition(step) {
+  const c = step?.condition;
+  if (c == null) return false;
+  return String(c).trim().length > 0;
+}
+
+function stepExclusiveSet(step) {
+  return !!step?.exclusive;
+}
+
+function stepTypeForExclusiveWarn(step) {
+  return String(step?.step_type || step?.type || '').trim().toLowerCase();
+}
+
+/**
+ * Warn when 2+ consecutive steps have a condition but not `exclusive`, followed by an unconditional step.
+ * @param {Array<object>} steps - top-level playbook steps
+ * @returns {Array<{ stepIndex: number, stepName: string, inputKey: string, message: string }>}
+ */
+export function validateExclusiveConditions(steps) {
+  const errors = [];
+  if (!Array.isArray(steps) || steps.length < 3) return errors;
+  const n = steps.length;
+  let i = 0;
+  while (i < n) {
+    const step = steps[i];
+    if (!step || typeof step !== 'object' || !stepHasNonemptyCondition(step) || stepExclusiveSet(step)) {
+      i += 1;
+      continue;
+    }
+    let j = i;
+    const runIndices = [];
+    while (j < n) {
+      const s = steps[j];
+      if (!s || typeof s !== 'object' || !stepHasNonemptyCondition(s) || stepExclusiveSet(s)) break;
+      runIndices.push(j);
+      j += 1;
+    }
+    if (runIndices.length >= 2 && j < n) {
+      const nxt = steps[j];
+      if (nxt && typeof nxt === 'object' && !stepHasNonemptyCondition(nxt)) {
+        const allBranch = runIndices.every((k) => stepTypeForExclusiveWarn(steps[k]) === 'branch');
+        if (!allBranch) {
+          const names = runIndices.map((k) => {
+            const st = steps[k];
+            const nm = String(st?.name || st?.output_key || `step_${k}`).trim();
+            return nm ? `"${nm}"` : `step_${k}`;
+          });
+          const qnames = names.join(', ');
+          const lo = runIndices[0];
+          const hi = runIndices[runIndices.length - 1];
+          const catchName = String(nxt?.name || nxt?.output_key || `step_${j}`).trim() || `step_${j}`;
+          const stepName = String(steps[lo]?.name || steps[lo]?.output_key || `Step ${lo + 1}`);
+          errors.push({
+            stepIndex: lo,
+            stepName,
+            inputKey: 'exclusive',
+            message: `Steps ${qnames} (steps ${lo}-${hi}) have conditions but are not marked exclusive; step ${j} ("${catchName}") has no condition and will always run — even after a conditional step matches. Enable "Exclusive (stop after match)" on the conditional steps, or add a condition to "${catchName}".`,
+          });
+        }
+      }
+    }
+    i = runIndices[0] + 1;
+  }
+  return errors;
+}
+
 /**
  * Validate playbook step wirings: references must point to upstream steps and compatible output fields.
  * Also warns when a tool step has a required input with no value wired.

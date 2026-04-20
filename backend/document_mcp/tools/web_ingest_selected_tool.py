@@ -389,7 +389,7 @@ Ingestion date: {metadata['ingestion_date']}
             from urllib.parse import urlparse
             parsed = urlparse(url)
             return bool(parsed.scheme and parsed.netloc)
-        except:
+        except Exception:
             return False
     
     def _create_fallback_content(self, selected_result: SelectedResult, original_query: str) -> str:

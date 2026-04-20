@@ -1,7 +1,6 @@
 import logging
 from pathlib import Path
 from typing import Dict
-import asyncio
 
 from config import settings
 
@@ -9,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 
 def _user_org_base_dir(user_id: str, username: str = None) -> Path:
-    """Get user's Org directory using new folder structure"""
+    """Get user's Org directory using new folder structure (logical path; bytes live in document-service)."""
     folder_name = username if username else user_id
     return Path(settings.UPLOAD_DIR) / "Users" / folder_name / "Org"
 
@@ -40,16 +39,15 @@ async def ensure_user_org_files(user_id: str) -> Dict[str, str]:
     archive_dir = base_dir / "Archive"
 
     try:
-        base_dir.mkdir(parents=True, exist_ok=True)
-        archive_dir.mkdir(parents=True, exist_ok=True)
+        from services import ds_upload_library_fs as dsf
 
         inbox_path = base_dir / "inbox.org"
-        if not inbox_path.exists():
-            inbox_path.write_text("* Inbox\n", encoding="utf-8")
+        if not await dsf.exists(user_id, inbox_path):
+            await dsf.write_text(user_id, inbox_path, "* Inbox\n")
 
         archive_path = archive_dir / "archive.org"
-        if not archive_path.exists():
-            archive_path.write_text("* Archive\n", encoding="utf-8")
+        if not await dsf.exists(user_id, archive_path):
+            await dsf.write_text(user_id, archive_path, "* Archive\n")
 
         logger.info(
             f"✅ Ensured Org files for user {user_id} ({username}): {inbox_path} | {archive_path}"

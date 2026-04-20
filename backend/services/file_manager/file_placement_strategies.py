@@ -52,7 +52,7 @@ class RSSPlacementStrategy(FilePlacementStrategy):
             try:
                 date_str = datetime.fromisoformat(published_date.replace('Z', '+00:00')).strftime("%Y-%m-%d")
                 return f"{date_str}_{clean_title}.md"
-            except:
+            except Exception:
                 pass
         
         return f"{clean_title}.md"
@@ -254,7 +254,7 @@ class ManualPlacementStrategy(FilePlacementStrategy):
         """
         Return tags from request (folder inheritance happens elsewhere)
         
-        **ROOSEVELT FIX**: Don't add "manual" tags - let folder inheritance work!
+        Avoid adding manual tags when folder inheritance applies
         """
         return request.tags.copy()
 

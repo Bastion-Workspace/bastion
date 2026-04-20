@@ -6,7 +6,9 @@ Used by both the REST API (agent_factory_api.py) and gRPC tool handlers (grpc_to
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+import re
+import uuid
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import asyncpg
 
@@ -54,6 +56,9 @@ def _ensure_json_obj(val: Any, fallback: Any = None) -> Any:
 def _row_to_profile(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not row:
         return {}
+    ownership = row.get("ownership") or "owned"
+    if row.get("is_builtin"):
+        ownership = "builtin"
     out = {
         "id": str(row["id"]),
         "user_id": row["user_id"],
@@ -81,17 +86,22 @@ def _row_to_profile(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "include_datetime_context": row.get("include_datetime_context", True),
         "include_user_facts": row.get("include_user_facts", False),
         "include_facts_categories": _ensure_json_obj(row.get("include_facts_categories"), []),
+        "use_themed_memory": row.get("use_themed_memory", True),
         "include_agent_memory": row.get("include_agent_memory", False),
         "auto_routable": row.get("auto_routable", False),
         "chat_visible": row.get("chat_visible", True),
         "category": row.get("category"),
         "data_workspace_config": _ensure_json_obj(row.get("data_workspace_config"), {}),
+        "allowed_connections": _ensure_json_obj(row.get("allowed_connections"), []),
         "default_run_context": row.get("default_run_context") or "interactive",
         "default_approval_policy": row.get("default_approval_policy") or "require",
         "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
         "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
         "is_locked": row.get("is_locked", False),
         "is_builtin": row.get("is_builtin", False),
+        "ownership": ownership,
+        "owner_username": row.get("owner_username"),
+        "owner_display_name": row.get("owner_display_name"),
     }
     if "last_execution_status" in row:
         out["last_execution_status"] = row.get("last_execution_status")
@@ -119,6 +129,130 @@ def _is_empty_value(val: Any) -> bool:
     return False
 
 
+# Step fields where [] is a deliberate save (clearing packs/tools/skills), not "omit for merge".
+_MERGE_PRESERVE_EXPLICIT_EMPTY = frozenset(
+    {"tool_packs", "available_tools", "skill_ids", "skills", "subagents"}
+)
+
+
+def ensure_step_ids(definition: Dict[str, Any]) -> None:
+    """Assign _step_id (UUID) to every step dict missing one, including nested steps. Mutates in place."""
+    if not isinstance(definition, dict):
+        return
+    steps = definition.get("steps")
+    if not isinstance(steps, list):
+        return
+    for step in steps:
+        if isinstance(step, dict):
+            _ensure_step_ids_on_step(step)
+
+
+def _ensure_step_ids_on_step(step: Dict[str, Any]) -> None:
+    if not isinstance(step, dict):
+        return
+    sid = (step.get("_step_id") or "").strip()
+    if not sid:
+        step["_step_id"] = str(uuid.uuid4())
+    for key in ("then_steps", "else_steps", "parallel_steps", "steps"):
+        children = step.get(key)
+        if isinstance(children, list):
+            for child in children:
+                if isinstance(child, dict):
+                    _ensure_step_ids_on_step(child)
+
+
+def _build_step_merge_lookups(
+    old_steps: List[Any],
+) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Dict[str, Any]], Dict[str, int], Dict[str, Dict[str, Any]]]:
+    """Index old step dicts by _step_id, output_key, and name (with duplicate-name count)."""
+    old_by_step_id: Dict[str, Dict[str, Any]] = {}
+    old_by_output_key: Dict[str, Dict[str, Any]] = {}
+    old_name_counts: Dict[str, int] = {}
+    old_by_name: Dict[str, Dict[str, Any]] = {}
+    for old_step in old_steps:
+        if not isinstance(old_step, dict):
+            continue
+        sid = (old_step.get("_step_id") or "").strip()
+        ok = (old_step.get("output_key") or "").strip()
+        n = (old_step.get("name") or "").strip()
+        if sid:
+            old_by_step_id[sid] = old_step
+        if ok:
+            old_by_output_key[ok] = old_step
+        if n:
+            old_name_counts[n] = old_name_counts.get(n, 0) + 1
+            old_by_name[n] = old_step
+    return old_by_step_id, old_by_output_key, old_name_counts, old_by_name
+
+
+def _find_merge_partner_for_new_step(
+    new_step: Dict[str, Any],
+    *,
+    old_by_step_id: Dict[str, Dict[str, Any]],
+    old_by_output_key: Dict[str, Dict[str, Any]],
+    old_name_counts: Dict[str, int],
+    old_by_name: Dict[str, Dict[str, Any]],
+    consumed: Set[int],
+) -> Optional[Dict[str, Any]]:
+    """Pick an unconsumed old step matching new_step by _step_id, then output_key, then unique name."""
+    if not isinstance(new_step, dict):
+        return None
+    sid = (new_step.get("_step_id") or "").strip()
+    ok = (new_step.get("output_key") or "").strip()
+    n = (new_step.get("name") or "").strip()
+
+    def _try(cand: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not cand or not isinstance(cand, dict):
+            return None
+        if id(cand) in consumed:
+            return None
+        return cand
+
+    for cand in (
+        old_by_step_id.get(sid) if sid else None,
+        old_by_output_key.get(ok) if ok else None,
+        old_by_name.get(n) if n and old_name_counts.get(n, 0) == 1 else None,
+    ):
+        taken = _try(cand)
+        if taken is not None:
+            return taken
+    return None
+
+
+def _merge_step_child_lists(old_children: List[Any], new_children: List[Any]) -> None:
+    """
+    Merge old nested step dicts into new list by identity (_step_id, output_key, unique name),
+    with positional fallback and legacy tail append. Mutates new_children in place.
+    """
+    if not isinstance(old_children, list) or not isinstance(new_children, list):
+        return
+    old_by_step_id, old_by_output_key, old_name_counts, old_by_name = _build_step_merge_lookups(old_children)
+    consumed: Set[int] = set()
+    for i, new_child in enumerate(new_children):
+        if not isinstance(new_child, dict):
+            continue
+        matched = _find_merge_partner_for_new_step(
+            new_child,
+            old_by_step_id=old_by_step_id,
+            old_by_output_key=old_by_output_key,
+            old_name_counts=old_name_counts,
+            old_by_name=old_by_name,
+            consumed=consumed,
+        )
+        if matched is None and i < len(old_children) and isinstance(old_children[i], dict):
+            cand = old_children[i]
+            if id(cand) not in consumed:
+                matched = cand
+        if matched is not None:
+            consumed.add(id(matched))
+            _merge_step(matched, new_child)
+    for i in range(len(new_children), len(old_children)):
+        old_child = old_children[i]
+        if isinstance(old_child, dict) and id(old_child) not in consumed:
+            new_children.append(old_child)
+            consumed.add(id(old_child))
+
+
 def _merge_phase(old_p: Dict[str, Any], new_p: Dict[str, Any]) -> None:
     """Copy keys from old phase into new when new is missing or empty. Mutates new_p."""
     if not isinstance(old_p, dict) or not isinstance(new_p, dict):
@@ -138,11 +272,7 @@ def _merge_step(old_s: Dict[str, Any], new_s: Dict[str, Any]) -> None:
     for k, v in old_s.items():
         if k in ("then_steps", "else_steps", "parallel_steps", "steps"):
             if isinstance(v, list) and isinstance(new_s.get(k), list):
-                for i, old_child in enumerate(v):
-                    if i < len(new_s[k]) and isinstance(old_child, dict) and isinstance(new_s[k][i], dict):
-                        _merge_step(old_child, new_s[k][i])
-                    elif i >= len(new_s[k]):
-                        new_s[k].append(old_child)
+                _merge_step_child_lists(v, new_s[k])
             elif _is_empty_value(new_s.get(k)) and isinstance(v, list):
                 new_s[k] = list(v)
             continue
@@ -155,6 +285,12 @@ def _merge_step(old_s: Dict[str, Any], new_s: Dict[str, Any]) -> None:
                         new_s[k].append(dict(old_phase))
             elif _is_empty_value(new_s.get(k)) and isinstance(v, list):
                 new_s[k] = [dict(p) for p in v]
+            continue
+        if k in _MERGE_PRESERVE_EXPLICIT_EMPTY:
+            # Client sent the key (including []): do not resurrect cleared tool packs / tools / skills.
+            if k in new_s:
+                continue
+            new_s[k] = v
             continue
         if _is_empty_value(new_s.get(k)):
             new_s[k] = v
@@ -170,6 +306,7 @@ def merge_playbook_definition_steps(
     """
     if not isinstance(old_definition, dict) or not isinstance(new_definition, dict):
         return
+    ensure_step_ids(new_definition)
     if _is_empty_value(new_definition.get("run_context")) and old_definition.get("run_context"):
         new_definition["run_context"] = old_definition["run_context"]
     old_steps = old_definition.get("steps") or []
@@ -177,32 +314,34 @@ def merge_playbook_definition_steps(
     if not isinstance(new_steps, list):
         return
 
-    # Build lookup by identity (name, output_key) so insert/remove/reorder don't misalign prompts
-    old_by_name: Dict[str, Dict[str, Any]] = {}
-    old_by_output_key: Dict[str, Dict[str, Any]] = {}
-    for old_step in old_steps:
-        if not isinstance(old_step, dict):
-            continue
-        n = (old_step.get("name") or "").strip()
-        ok = (old_step.get("output_key") or "").strip()
-        if n:
-            old_by_name[n] = old_step
-        if ok:
-            old_by_output_key[ok] = old_step
-
+    old_by_step_id, old_by_output_key, old_name_counts, old_by_name = _build_step_merge_lookups(
+        old_steps if isinstance(old_steps, list) else []
+    )
+    consumed: Set[int] = set()
     for new_step in new_steps:
         if not isinstance(new_step, dict):
             continue
-        n = (new_step.get("name") or "").strip()
-        ok = (new_step.get("output_key") or "").strip()
-        matched = old_by_name.get(n) or old_by_output_key.get(ok)
+        matched = _find_merge_partner_for_new_step(
+            new_step,
+            old_by_step_id=old_by_step_id,
+            old_by_output_key=old_by_output_key,
+            old_name_counts=old_name_counts,
+            old_by_name=old_by_name,
+            consumed=consumed,
+        )
         if matched:
+            consumed.add(id(matched))
             _merge_step(matched, new_step)
 
 
 def _row_to_playbook(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not row:
         return {}
+    ownership = row.get("ownership") or "owned"
+    if row.get("is_builtin"):
+        ownership = "builtin"
+    elif row.get("is_template"):
+        ownership = "template"
     return {
         "id": str(row["id"]),
         "user_id": row.get("user_id"),
@@ -219,6 +358,9 @@ def _row_to_playbook(row: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
         "is_locked": row.get("is_locked", False),
         "is_builtin": row.get("is_builtin", False),
+        "ownership": ownership,
+        "owner_username": row.get("owner_username"),
+        "owner_display_name": row.get("owner_display_name"),
     }
 
 
@@ -441,6 +583,67 @@ async def _sync_agent_folder_watches(
             logger.debug("Skip folder watch: folder_id=%s %s", folder_id_str, e)
 
 
+async def _ensure_agent_bot_user(agent_profile_id: str, user_id: str) -> Optional[str]:
+    """Ensure a bot user row exists for an agent profile. Returns bot_user_id."""
+    from services.database_manager.database_helpers import execute, fetch_one
+
+    profile = await fetch_one(
+        "SELECT id, name, handle, bot_user_id FROM agent_profiles WHERE id = $1::uuid",
+        agent_profile_id,
+    )
+    if not profile:
+        return None
+
+    if profile.get("bot_user_id"):
+        return profile["bot_user_id"]
+
+    bot_user_id = f"agent-bot-{agent_profile_id}"
+    display_name = profile.get("name") or profile.get("handle") or "Agent"
+    username = f"bot-{(profile.get('handle') or agent_profile_id)[:40]}"
+
+    existing = await fetch_one("SELECT user_id FROM users WHERE user_id = $1", bot_user_id)
+    if not existing:
+        await execute(
+            """
+            INSERT INTO users (user_id, username, display_name, password_hash, salt, role, is_active, is_bot)
+            VALUES ($1, $2, $3, 'noauth', 'noauth', 'user', true, true)
+            ON CONFLICT (user_id) DO UPDATE SET display_name = $3, is_bot = true
+            """,
+            bot_user_id,
+            username,
+            display_name,
+        )
+    await execute(
+        "UPDATE agent_profiles SET bot_user_id = $1 WHERE id = $2::uuid",
+        bot_user_id,
+        agent_profile_id,
+    )
+    return bot_user_id
+
+
+async def _ensure_bot_in_room(bot_user_id: str, room_id: str) -> None:
+    """Add bot user as a room participant if not already present."""
+    from services.database_manager.database_helpers import execute, fetch_one
+
+    exists = await fetch_one(
+        "SELECT 1 FROM room_participants WHERE room_id = $1::uuid AND user_id = $2",
+        room_id,
+        bot_user_id,
+    )
+    if not exists:
+        try:
+            await execute(
+                """
+                INSERT INTO room_participants (room_id, user_id, last_read_at)
+                VALUES ($1::uuid, $2, NOW())
+                """,
+                room_id,
+                bot_user_id,
+            )
+        except Exception:
+            pass
+
+
 async def _sync_agent_conversation_watches(
     agent_profile_id: str,
     user_id: str,
@@ -452,6 +655,7 @@ async def _sync_agent_conversation_watches(
         "DELETE FROM agent_conversation_watches WHERE agent_profile_id = $1",
         agent_profile_id,
     )
+    has_room_watches = False
     for w in watch_config.get("conversation_watches") or []:
         watch_type = (w.get("watch_type") or "").strip().lower()
         if watch_type == "ai_conversations":
@@ -495,8 +699,16 @@ async def _sync_agent_conversation_watches(
                     user_id,
                     room_id_str,
                 )
+                has_room_watches = True
             except Exception:
                 pass
+
+    if has_room_watches:
+        bot_user_id = await _ensure_agent_bot_user(agent_profile_id, user_id)
+        if bot_user_id:
+            for w in watch_config.get("conversation_watches") or []:
+                if (w.get("watch_type") or "").strip().lower() == "chat_room" and w.get("room_id"):
+                    await _ensure_bot_in_room(bot_user_id, str(w["room_id"]).strip())
 
 
 def _warn_invalid_user_facts_policy_on_step(step: Dict[str, Any], path: str, warnings: List[str]) -> None:
@@ -514,6 +726,84 @@ def _warn_invalid_user_facts_policy_on_step(step: Dict[str, Any], path: str, war
         for ci, child in enumerate(children):
             if isinstance(child, dict):
                 _warn_invalid_user_facts_policy_on_step(child, f"{path} → {key}[{ci}]", warnings)
+
+
+def _playbook_step_skill_discovery_off(step: Dict[str, Any]) -> bool:
+    """Return True only when skill discovery is explicitly disabled on a step."""
+    raw = step.get("discovery_mode") or step.get("skill_discovery_mode")
+    if isinstance(raw, str):
+        v = raw.strip().lower()
+        if v == "on_demand":
+            v = "full"
+        if v in ("off", "auto", "catalog", "full"):
+            return v == "off"
+    if step.get("inject_skill_manifest"):
+        return False
+    auto = step.get("auto_discover_skills")
+    dyn = step.get("dynamic_tool_discovery")
+    if auto is False and not dyn:
+        return True
+    return False
+
+
+def _step_has_nonempty_condition(step: Dict[str, Any]) -> bool:
+    c = step.get("condition")
+    if c is None:
+        return False
+    return bool(str(c).strip())
+
+
+def _step_exclusive_set(step: Dict[str, Any]) -> bool:
+    return bool(step.get("exclusive"))
+
+
+def _step_type_for_exclusive_warn(step: Dict[str, Any]) -> str:
+    return str(step.get("step_type") or step.get("type") or "").strip().lower()
+
+
+def _warn_missing_exclusive(steps: List[Any], warnings: List[str]) -> None:
+    """
+    Warn when 2+ consecutive steps have a condition but not `exclusive`, followed by a step
+    with no condition (catch-all). Without exclusive, the catch-all still runs after a match.
+    Skips runs where every step is type branch (different routing semantics).
+    """
+    if not isinstance(steps, list) or len(steps) < 3:
+        return
+    n = len(steps)
+    i = 0
+    while i < n:
+        step = steps[i]
+        if not isinstance(step, dict) or not _step_has_nonempty_condition(step) or _step_exclusive_set(step):
+            i += 1
+            continue
+        j = i
+        run_indices: List[int] = []
+        while j < n:
+            s = steps[j]
+            if not isinstance(s, dict) or not _step_has_nonempty_condition(s) or _step_exclusive_set(s):
+                break
+            run_indices.append(j)
+            j += 1
+        if len(run_indices) >= 2 and j < n:
+            nxt = steps[j]
+            if isinstance(nxt, dict) and not _step_has_nonempty_condition(nxt):
+                if not all(_step_type_for_exclusive_warn(steps[k]) == "branch" for k in run_indices):
+                    names: List[str] = []
+                    for k in run_indices:
+                        nm = str(steps[k].get("name") or steps[k].get("output_key") or f"step_{k}").strip()
+                        quoted = f'"{nm}"' if nm else f"step_{k}"
+                        names.append(quoted)
+                    qnames = ", ".join(names)
+                    lo, hi = run_indices[0], run_indices[-1]
+                    catch = nxt.get("name") or nxt.get("output_key") or f"step_{j}"
+                    catch_s = str(catch).strip() or f"step_{j}"
+                    warnings.append(
+                        f"Steps {qnames} (steps {lo}-{hi}) have conditions but are not marked exclusive; "
+                        f'step {j} ("{catch_s}") has no condition and will always run — even after a conditional '
+                        f'step matches. Enable "Exclusive (stop after match)" on the conditional steps, or add a '
+                        f'condition to "{catch_s}".'
+                    )
+        i = run_indices[0] + 1
 
 
 def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
@@ -585,6 +875,101 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
                 if not isinstance(ref, str) or not ref.strip():
                     warnings.append(f"step {i} ({name_str or '?'}): skill_ids/skills must be list of non-empty strings")
                     break
+        if step_type in ("llm_agent", "deep_agent"):
+            _step_tools = list(step.get("available_tools") or [])
+            _step_skills = list(skill_refs or [])
+            if not _step_tools and not _step_skills and _playbook_step_skill_discovery_off(step):
+                warnings.append(
+                    f"step {i} ({name_str or '?'}): {step_type} has no available_tools and no pinned skill_ids, "
+                    "and skill discovery is off — the agent will have no capabilities at runtime. "
+                    "Add tools to available_tools, add skill_ids, or enable skill discovery "
+                    "(set discovery_mode to 'auto' or 'catalog')."
+                )
+            # Best-of-N sampling
+            raw_samples = step.get("samples")
+            if raw_samples is not None:
+                try:
+                    sn = int(raw_samples)
+                    if sn < 1 or sn > 5:
+                        warnings.append(
+                            f"step {i} ({name_str or '?'}): samples must be an integer 1–5 (got {raw_samples!r})"
+                        )
+                    elif sn > 3:
+                        warnings.append(
+                            f"step {i} ({name_str or '?'}): samples={sn} increases cost and latency — "
+                            "consider 2–3 unless quality demands more."
+                        )
+                except (TypeError, ValueError):
+                    warnings.append(
+                        f"step {i} ({name_str or '?'}): samples must be an integer 1–5 (got {raw_samples!r})"
+                    )
+            ss_raw = step.get("selection_strategy")
+            if ss_raw is not None and str(ss_raw).strip():
+                ss = str(ss_raw).strip().lower()
+                if ss not in ("llm_judge", "highest_score"):
+                    warnings.append(
+                        f"step {i} ({name_str or '?'}): invalid selection_strategy {ss_raw!r} "
+                        "(use llm_judge or highest_score)"
+                    )
+                elif ss == "highest_score" and step_type != "deep_agent":
+                    warnings.append(
+                        f"step {i} ({name_str or '?'}): selection_strategy highest_score is only supported "
+                        "on deep_agent steps (use llm_judge for llm_agent)."
+                    )
+                elif ss == "highest_score" and step_type == "deep_agent":
+                    phases_chk = step.get("phases") if isinstance(step.get("phases"), list) else []
+                    has_eval = any(
+                        isinstance(p, dict) and str(p.get("type") or "").strip().lower() == "evaluate"
+                        for p in phases_chk
+                    )
+                    if not has_eval:
+                        warnings.append(
+                            f"step {i} ({name_str or '?'}): selection_strategy highest_score needs at least one "
+                            "evaluate phase in phases; otherwise the runtime falls back to llm_judge."
+                        )
+            sc = step.get("selection_criteria")
+            if sc is not None and not isinstance(sc, str):
+                warnings.append(
+                    f"step {i} ({name_str or '?'}): selection_criteria must be a string if set"
+                )
+            # Dynamic fan-out
+            fo = step.get("fan_out")
+            if fo is not None:
+                if step_type not in ("llm_agent", "deep_agent"):
+                    warnings.append(
+                        f"step {i} ({name_str or '?'}): fan_out is only supported on llm_agent and deep_agent steps"
+                    )
+                elif not isinstance(fo, dict):
+                    warnings.append(f"step {i} ({name_str or '?'}): fan_out must be an object")
+                else:
+                    src = str(fo.get("source") or "").strip()
+                    if not src:
+                        warnings.append(
+                            f"step {i} ({name_str or '?'}): fan_out.source is required (dot-path to a list)"
+                        )
+                    iv = fo.get("item_variable")
+                    if iv is not None and str(iv).strip():
+                        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(iv).strip()):
+                            warnings.append(
+                                f"step {i} ({name_str or '?'}): fan_out.item_variable must be a valid identifier"
+                            )
+                    mi = fo.get("max_items")
+                    if mi is not None:
+                        try:
+                            miv = int(mi)
+                            if miv < 1 or miv > 10:
+                                warnings.append(
+                                    f"step {i} ({name_str or '?'}): fan_out.max_items must be 1–10 (got {mi!r})"
+                                )
+                        except (TypeError, ValueError):
+                            warnings.append(
+                                f"step {i} ({name_str or '?'}): fan_out.max_items must be an integer 1–10"
+                            )
+                    mg = fo.get("merge")
+                    if mg is not None and str(mg).strip().lower() not in ("list", "concat", ""):
+                        warnings.append(
+                            f"step {i} ({name_str or '?'}): fan_out.merge must be list or concat (got {mg!r})"
+                        )
         heading_level = step.get("heading_level")
         if heading_level is not None:
             try:
@@ -604,6 +989,7 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
                             warnings.append(f"step {i} ({name_str or '?'}): input references unknown step '{step_ref}'")
         if name_str:
             seen_step_names.add(name_str)
+    _warn_missing_exclusive(steps, warnings)
     return warnings
 
 
@@ -705,8 +1091,9 @@ async def create_profile(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
             knowledge_config, default_playbook_id, default_run_context,
             default_approval_policy, journal_config, team_config, watch_config,
             chat_history_enabled, chat_history_lookback, summary_threshold_tokens, summary_keep_messages,
-            persona_mode, persona_id, include_user_context, include_datetime_context, include_user_facts, include_facts_categories, auto_routable, chat_visible, data_workspace_config
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::uuid, $13, $14, $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20, $21, $22, $23::uuid, $24, $25, $26, $27::jsonb, $28, $29, $30::jsonb)
+            persona_mode, persona_id, include_user_context, include_datetime_context, include_user_facts, include_facts_categories, use_themed_memory, auto_routable, chat_visible, data_workspace_config,
+            include_agent_memory, allowed_connections, category
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::uuid, $13, $14, $15::jsonb, $16::jsonb, $17::jsonb, $18, $19, $20, $21, $22, $23::uuid, $24, $25, $26, $27::jsonb, $28, $29, $30, $31::jsonb, $32, $33::jsonb, $34)
         RETURNING *
         """,
         user_id,
@@ -736,9 +1123,13 @@ async def create_profile(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         data.get("include_datetime_context", True),
         data.get("include_user_facts", False),
         json.dumps(data.get("include_facts_categories") or []),
+        data.get("use_themed_memory", True),
         data.get("auto_routable", False),
         data.get("chat_visible", True),
         json.dumps(data.get("data_workspace_config") or {}),
+        data.get("include_agent_memory", False),
+        json.dumps(data.get("allowed_connections") or []),
+        data.get("category"),
         rls_context=_rls(user_id),
     )
     if not row:
@@ -767,6 +1158,7 @@ async def create_playbook(user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
     definition_fixed, changed_steps, remediation_msgs = await validate_and_remediate_playbook_models_for_user(
         user_id, definition_in
     )
+    ensure_step_ids(definition_fixed)
 
     row = await fetch_one(
         """
@@ -803,11 +1195,17 @@ async def _ensure_agent_profiles_fact_columns() -> None:
     await execute(
         "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS include_facts_categories JSONB DEFAULT '[]'::jsonb"
     )
-    logger.info("Ensured agent_profiles columns: include_user_facts, include_facts_categories")
+    await execute(
+        "ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS use_themed_memory BOOLEAN DEFAULT true"
+    )
+    logger.info(
+        "Ensured agent_profiles columns: include_user_facts, include_facts_categories, use_themed_memory"
+    )
 
 
 DEFAULT_PLAYBOOK_ID = "00000000-0001-4000-8000-000000000001"
 RSS_MANAGER_PLAYBOOK_ID = "00000000-0001-4000-8000-000000000002"
+DEVOPS_ADVISOR_PLAYBOOK_ID = "00000000-0001-4000-8000-000000000003"
 
 _RSS_MANAGER_PLAYBOOK_DEFINITION = (
     '{"steps": [{"step_type": "llm_agent", "name": "rss_manager", "prompt_template": "{query}", '
@@ -940,6 +1338,145 @@ async def seed_rss_manager_profiles(user_id: Optional[str] = None) -> None:
             logger.warning("RSS Manager profile seed failed: %s", e)
 
 
+_DEVOPS_ADVISOR_PLAYBOOK_DEFINITION = (
+    '{"steps": ['
+    '{"step_type": "llm_agent", "name": "gather_devops_context", '
+    '"prompt_template": "You are a DevOps analysis assistant. Gather context from the user\'s Azure DevOps environment.\\n'
+    'Use read-only tools to collect: current sprint work items, team members, pipeline status, and active pull requests.\\n'
+    'Build a structured snapshot of the current project state.\\n\\nUser request: {query}", '
+    '"skills": ["azure-devops-reader"], "auto_discover_skills": false, "max_auto_skills": 0, '
+    '"max_iterations": 15, "available_tools": []}, '
+    '{"step_type": "llm_agent", "name": "analyze_and_advise", '
+    '"prompt_template": "You are a DevOps advisor. Based on the gathered context, analyze patterns and provide actionable recommendations.\\n'
+    'Look for: stale work items, unbalanced workload, items missing fields, blocked items, sprint carryover, '
+    'failing pipelines, and PRs needing attention.\\n\\nContext from previous step: {steps.gather_devops_context.output}\\n'
+    'Original request: {query}", '
+    '"skills": [], "auto_discover_skills": false, "max_auto_skills": 0, '
+    '"max_iterations": 5, "available_tools": []}]}'
+)
+
+
+async def _ensure_devops_advisor_playbook_row() -> bool:
+    """Ensure built-in DevOps Advisor playbook exists. Returns True if available."""
+    from services.database_manager.database_helpers import execute, fetch_one
+
+    ctx = _rls(None, "admin")
+    try:
+        await execute(
+            """
+            INSERT INTO custom_playbooks (
+                id, user_id, name, description, version, definition, triggers,
+                is_template, is_locked, is_builtin, category, tags, required_connectors
+            ) VALUES (
+                $1::uuid, NULL, $2, $3, $4, $5::jsonb, '[]'::jsonb,
+                true, true, true, $6, '{}', '{}'
+            ) ON CONFLICT (id) DO NOTHING
+            """,
+            DEVOPS_ADVISOR_PLAYBOOK_ID,
+            "DevOps Advisor Playbook",
+            "Two-step read-only analysis: gather Azure DevOps context, then provide actionable recommendations",
+            "1.0",
+            _DEVOPS_ADVISOR_PLAYBOOK_DEFINITION,
+            "devops",
+            rls_context=ctx,
+        )
+    except Exception as e:
+        logger.warning("Could not ensure DevOps Advisor playbook row: %s", e)
+        return False
+    row = await fetch_one(
+        "SELECT 1 FROM custom_playbooks WHERE id = $1::uuid",
+        DEVOPS_ADVISOR_PLAYBOOK_ID,
+        rls_context=ctx,
+    )
+    return bool(row)
+
+
+async def seed_devops_advisor_profiles(user_id: Optional[str] = None) -> None:
+    """
+    Ensure every user has the built-in DevOps Advisor profile (handle devops-advisor).
+    Idempotent. Only inserts for users that don't already have it.
+    """
+    from services.database_manager.database_helpers import execute
+
+    ctx = _rls(None, "admin") if user_id is None else _rls(user_id)
+    try:
+        if not await _ensure_devops_advisor_playbook_row():
+            logger.warning(
+                "Skipping DevOps Advisor profile seed: playbook %s not available",
+                DEVOPS_ADVISOR_PLAYBOOK_ID,
+            )
+            return
+        if user_id:
+            await execute(
+                """
+                INSERT INTO agent_profiles (
+                    user_id, name, handle, description, is_active, is_locked, is_builtin,
+                    default_playbook_id, chat_history_enabled, chat_history_lookback,
+                    persona_mode, include_user_facts, include_datetime_context, include_user_context
+                )
+                SELECT u.user_id, $1, $2::varchar, $3, $4, $5, $6, $7::uuid, $8, $9, $10, $11, $12, $13
+                FROM users u
+                WHERE u.user_id = $14
+                AND NOT EXISTS (
+                    SELECT 1 FROM agent_profiles p
+                    WHERE p.user_id = u.user_id AND p.handle = $2::varchar
+                )
+                """,
+                "DevOps Advisor",
+                "devops-advisor",
+                "Read-only Azure DevOps analysis: sprint health, workload balance, pipeline status, and actionable recommendations",
+                True,
+                True,
+                True,
+                DEVOPS_ADVISOR_PLAYBOOK_ID,
+                True,
+                10,
+                "default",
+                True,
+                True,
+                True,
+                user_id,
+                rls_context=ctx,
+            )
+            logger.info("Seeded DevOps Advisor profile for user %s", user_id)
+        else:
+            await execute(
+                """
+                INSERT INTO agent_profiles (
+                    user_id, name, handle, description, is_active, is_locked, is_builtin,
+                    default_playbook_id, chat_history_enabled, chat_history_lookback,
+                    persona_mode, include_user_facts, include_datetime_context, include_user_context
+                )
+                SELECT u.user_id, $1, $2::varchar, $3, $4, $5, $6, $7::uuid, $8, $9, $10, $11, $12, $13
+                FROM users u
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM agent_profiles p
+                    WHERE p.user_id = u.user_id AND p.handle = $2::varchar
+                )
+                """,
+                "DevOps Advisor",
+                "devops-advisor",
+                "Read-only Azure DevOps analysis: sprint health, workload balance, pipeline status, and actionable recommendations",
+                True,
+                True,
+                True,
+                DEVOPS_ADVISOR_PLAYBOOK_ID,
+                True,
+                10,
+                "default",
+                True,
+                True,
+                True,
+                rls_context=ctx,
+            )
+            logger.info("Seeded DevOps Advisor profiles for users missing devops-advisor")
+    except Exception as e:
+        if "is_builtin" in str(e) and ("does not exist" in str(e) or "column" in str(e).lower()):
+            logger.debug("DevOps Advisor profile seed skipped: %s", e)
+        else:
+            logger.warning("DevOps Advisor profile seed failed: %s", e)
+
+
 async def seed_default_agent_profiles(user_id: Optional[str] = None) -> None:
     """
     Ensure every user has the built-in default agent profile (Bastion Assistant).
@@ -1056,7 +1593,15 @@ async def update_profile(user_id: str, profile_id: str, data: Dict[str, Any]) ->
             )
             if existing:
                 raise ValueError("Handle already in use for this user")
-    jsonb_fields = ("knowledge_config", "journal_config", "team_config", "watch_config", "include_facts_categories", "data_workspace_config")
+    jsonb_fields = (
+        "knowledge_config",
+        "journal_config",
+        "team_config",
+        "watch_config",
+        "include_facts_categories",
+        "data_workspace_config",
+        "allowed_connections",
+    )
     set_clauses = []
     args = []
     idx = 1
@@ -1084,7 +1629,11 @@ async def update_profile(user_id: str, profile_id: str, data: Dict[str, Any]) ->
         await execute(update_sql, *args, rls_context=ctx)
     except Exception as e:
         err_msg = str(e)
-        if ("include_user_facts" in err_msg or "include_facts_categories" in err_msg) and "does not exist" in err_msg:
+        if (
+            "include_user_facts" in err_msg
+            or "include_facts_categories" in err_msg
+            or "use_themed_memory" in err_msg
+        ) and "does not exist" in err_msg:
             logger.warning("Agent profiles missing fact columns, adding them and retrying: %s", e)
             await _ensure_agent_profiles_fact_columns()
             await execute(update_sql, *args, rls_context=ctx)
@@ -1179,14 +1728,20 @@ async def reset_builtin_profile_defaults(user_id: str, profile_id: str) -> Dict[
 
 
 async def list_profiles(user_id: str) -> List[Dict[str, Any]]:
-    """List agent profiles for the user."""
+    """List agent profiles owned by or shared with the user."""
     from services.database_manager.database_helpers import fetch_all
 
     rows = await fetch_all(
         """
         SELECT p.*, e.status AS last_execution_status,
                b.monthly_limit_usd, b.current_period_start, b.current_period_spend_usd,
-               b.warning_threshold_pct, b.enforce_hard_limit
+               b.warning_threshold_pct, b.enforce_hard_limit,
+               CASE
+                   WHEN p.user_id = $1 THEN 'owned'
+                   ELSE 'shared'
+               END AS ownership,
+               u_owner.username AS owner_username,
+               u_owner.display_name AS owner_display_name
         FROM agent_profiles p
         LEFT JOIN LATERAL (
             SELECT status FROM agent_execution_log
@@ -1195,8 +1750,15 @@ async def list_profiles(user_id: str) -> List[Dict[str, Any]]:
             LIMIT 1
         ) e ON true
         LEFT JOIN agent_budgets b ON b.agent_profile_id = p.id
+        LEFT JOIN users u_owner ON u_owner.user_id = p.user_id
         WHERE p.user_id = $1
-        ORDER BY LOWER(COALESCE(NULLIF(TRIM(p.name), ''), p.handle, '')) ASC
+           OR EXISTS (
+               SELECT 1 FROM agent_artifact_shares _sh
+               WHERE _sh.artifact_type = 'agent_profile'
+                 AND _sh.artifact_id = p.id
+                 AND _sh.shared_with_user_id = $1
+           )
+        ORDER BY ownership ASC, LOWER(COALESCE(NULLIF(TRIM(p.name), ''), p.handle, '')) ASC
         """,
         user_id,
         rls_context=_rls(user_id),
@@ -1443,11 +2005,31 @@ async def set_profile_budget(
 
 
 async def list_playbooks(user_id: str) -> List[Dict[str, Any]]:
-    """List playbooks owned by the user or templates."""
+    """List playbooks owned by, shared with, or template for the user."""
     from services.database_manager.database_helpers import fetch_all
 
     rows = await fetch_all(
-        "SELECT * FROM custom_playbooks WHERE user_id = $1 OR is_template = true ORDER BY LOWER(name) ASC NULLS LAST",
+        """
+        SELECT pb.*,
+               CASE
+                   WHEN pb.user_id = $1 THEN 'owned'
+                   WHEN pb.is_template = true THEN 'template'
+                   ELSE 'shared'
+               END AS ownership,
+               u_owner.username AS owner_username,
+               u_owner.display_name AS owner_display_name
+        FROM custom_playbooks pb
+        LEFT JOIN users u_owner ON u_owner.user_id = pb.user_id
+        WHERE pb.user_id = $1
+           OR pb.is_template = true
+           OR EXISTS (
+               SELECT 1 FROM agent_artifact_shares _sh
+               WHERE _sh.artifact_type = 'playbook'
+                 AND _sh.artifact_id = pb.id
+                 AND _sh.shared_with_user_id = $1
+           )
+        ORDER BY ownership ASC, LOWER(pb.name) ASC NULLS LAST
+        """,
         user_id,
     )
     return [_row_to_playbook(r) for r in rows]

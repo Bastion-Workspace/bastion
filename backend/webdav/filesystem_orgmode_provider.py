@@ -91,7 +91,7 @@ class OrgModeFolderCollection(DAVCollection):
         """Return list of org filenames in this category"""
         conn = None
         try:
-            logger.info(f"📂 Listing files for category: '{self.category}', user_id: '{self.user_id}'")
+            logger.debug(f"📂 Listing files for category: '{self.category}', user_id: '{self.user_id}'")
             
             # Synchronous database connection
             conn = psycopg2.connect(
@@ -117,9 +117,9 @@ class OrgModeFolderCollection(DAVCollection):
             rows = cur.fetchall()
             cur.close()
             
-            logger.info(f"📂 Found {len(rows)} org files in category '{self.category}'")
+            logger.debug(f"📂 Found {len(rows)} org files in category '{self.category}'")
             for row in rows:
-                logger.info(f"   - {row[0]} (category: {row[1]})")
+                logger.debug(f"   - {row[0]} (category: {row[1]})")
             
             return [row[0] for row in rows]
                 
@@ -212,7 +212,7 @@ class OrgModeRootCollection(DAVCollection):
         """Return list of category folders"""
         conn = None
         try:
-            logger.info(f"📂 ROOT: Listing categories for user_id: '{self.user_id}'")
+            logger.debug(f"📂 ROOT: Listing categories for user_id: '{self.user_id}'")
             
             conn = psycopg2.connect(
                 host=self.db_config['host'],
@@ -237,13 +237,13 @@ class OrgModeRootCollection(DAVCollection):
             rows = cur.fetchall()
             cur.close()
             
-            logger.info(f"📂 ROOT: Found {len(rows)} categories")
+            logger.debug(f"📂 ROOT: Found {len(rows)} categories")
             for row in rows:
-                logger.info(f"   - Category: {row[0]}")
+                logger.debug(f"   - Category: {row[0]}")
             
             if not rows:
                 # Return at least uncategorized folder
-                logger.info(f"📂 ROOT: No categories found, returning default 'uncategorized'")
+                logger.debug(f"📂 ROOT: No categories found, returning default 'uncategorized'")
                 return ['uncategorized']
             
             return [row[0] for row in rows]
@@ -289,21 +289,21 @@ class FilesystemOrgModeDAVProvider(DAVProvider):
         """
         Return DAVResource for the given path.
         """
-        logger.info(f"📂 get_resource_inst called with path: '{path}'")
-        logger.info(f"📂 user_id from environ: {environ.get('webdav.auth.user_id', 'NOT SET')}")
+        logger.debug(f"📂 get_resource_inst called with path: '{path}'")
+        logger.debug(f"📂 user_id from environ: {environ.get('webdav.auth.user_id', 'NOT SET')}")
         
         # Strip /orgmode prefix if present (from nginx routing)
         if path.startswith('/orgmode'):
             path = path[8:]  # Remove '/orgmode'
-            logger.info(f"📂 Stripped /orgmode prefix, new path: '{path}'")
+            logger.debug(f"📂 Stripped /orgmode prefix, new path: '{path}'")
         
         # Normalize path
         path = path.rstrip('/')
-        logger.info(f"📂 Normalized path: '{path}'")
+        logger.debug(f"📂 Normalized path: '{path}'")
         
         # Root collection
         if path == '' or path == '/':
-            logger.info(f"📂 Returning root collection for path: '{path}'")
+            logger.debug(f"📂 Returning root collection for path: '{path}'")
             return OrgModeRootCollection('/', environ, self.db_config, self.uploads_dir)
         
         # Split path into parts

@@ -56,7 +56,11 @@ class ProbeApiEndpointParams(BaseModel):
 class ProbeApiEndpointOutputs(BaseModel):
     status_code: int = Field(description="HTTP status code")
     response_headers: Dict[str, str] = Field(description="Response headers")
-    response_body: str = Field(description="Response body")
+    response_body: str = Field(description="Response body (raw text)")
+    response_json: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Parsed JSON object when body is a JSON object and content-type suggests JSON",
+    )
     content_type: str = Field(description="Content-Type header value")
     formatted: str = Field(description="Human-readable summary for LLM/chat")
 
@@ -436,6 +440,42 @@ def _analyze_response_paths(
     return results
 
 
+MAX_PROBE_FORMATTED_BODY = 30000
+
+
+def _build_probe_formatted(
+    status_code: int,
+    method: str,
+    url: str,
+    content_type: str,
+    body: str,
+    parsed_json: Optional[Any],
+) -> str:
+    """Build LLM-visible summary including truncated response body or pretty-printed JSON."""
+    parts = [
+        f"HTTP {status_code} {method.upper()} {url}",
+        f"Content-Type: {content_type or '(none)'}",
+        f"Body length: {len(body)} chars",
+    ]
+    if parsed_json is not None:
+        try:
+            pretty = json.dumps(parsed_json, indent=2, default=str)
+        except (TypeError, ValueError):
+            pretty = str(parsed_json)
+        full_len = len(pretty)
+        if full_len > MAX_PROBE_FORMATTED_BODY:
+            pretty = pretty[:MAX_PROBE_FORMATTED_BODY] + f"\n... [truncated, {full_len} total chars]"
+        parts.append(f"Response (JSON):\n{pretty}")
+    elif body:
+        display = body[:MAX_PROBE_FORMATTED_BODY]
+        if len(body) > MAX_PROBE_FORMATTED_BODY:
+            display += f"\n... [truncated, {len(body)} total chars]"
+        parts.append(f"Response:\n{display}")
+    else:
+        parts.append("Response: (empty body)")
+    return "\n".join(parts)
+
+
 async def probe_api_endpoint_tool(
     url: str,
     method: str = "GET",
@@ -444,7 +484,7 @@ async def probe_api_endpoint_tool(
     params_json: Optional[str] = None,
     user_id: str = "system",
 ) -> Dict[str, Any]:
-    """Perform a raw HTTP request to a URL. Returns status, headers, and body (truncated)."""
+    """Perform a raw HTTP request to a URL. Returns status, headers, body, optional parsed JSON, and formatted text for the LLM."""
     try:
         client = await get_backend_tool_client()
         result = await client.probe_api_endpoint(
@@ -460,6 +500,7 @@ async def probe_api_endpoint_tool(
                 "status_code": 0,
                 "response_headers": {},
                 "response_body": "",
+                "response_json": None,
                 "content_type": "",
                 "formatted": result.get("error", "Probe failed"),
             }
@@ -469,18 +510,43 @@ async def probe_api_endpoint_tool(
                 headers = json.loads(result["response_headers_json"])
             except json.JSONDecodeError:
                 pass
-        body = result.get("response_body", "")
-        formatted = f"Status: {result.get('status_code')}. Content-Type: {result.get('content_type', '')}. Body length: {len(body)} chars."
+        body = result.get("response_body", "") or ""
+        content_type = result.get("content_type", "") or ""
+        parsed_any: Optional[Any] = None
+        if "json" in content_type.lower() and body.strip():
+            try:
+                parsed_any = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        response_json: Optional[Dict[str, Any]] = (
+            parsed_any if isinstance(parsed_any, dict) else None
+        )
+        formatted = _build_probe_formatted(
+            result.get("status_code", 0),
+            method,
+            url,
+            content_type,
+            body,
+            parsed_any,
+        )
         return {
             "status_code": result.get("status_code", 0),
             "response_headers": headers,
             "response_body": body,
-            "content_type": result.get("content_type", ""),
+            "response_json": response_json,
+            "content_type": content_type,
             "formatted": formatted,
         }
     except Exception as e:
         logger.exception("probe_api_endpoint_tool: %s", e)
-        return {"status_code": 0, "response_headers": {}, "response_body": "", "content_type": "", "formatted": str(e)}
+        return {
+            "status_code": 0,
+            "response_headers": {},
+            "response_body": "",
+            "response_json": None,
+            "content_type": "",
+            "formatted": str(e),
+        }
 
 
 async def test_connector_endpoint_tool(

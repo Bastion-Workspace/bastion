@@ -31,14 +31,24 @@ description: Separation of concerns and modular architecture guidelines
 
 Break up monolithic files when they get too large.
 
-### The 500-Line Rule
+### The 700-Line Rule
 
-**No file shall exceed 500 lines - period!** When approaching this limit:
+**No file shall exceed 700 lines - period!** When approaching this limit:
 
 1. **Identify distinct responsibilities** within the file
 2. **Extract related functions** into separate modules  
 3. **Create clear, descriptive filenames** for new modules
 4. **Maintain clean import relationships**
+
+### Opportunistic splits (touch-triggered maintenance)
+
+Large files rarely shrink on their own. **When you already have a file open for another change** (bug fix, feature, API tweak), treat that as the right time to improve structure **if the file is at or above ~560 lines** or otherwise clearly approaching the hard cap.
+
+- **Prefer** moving a **cohesive** chunk you are already touching (helpers, a handler group, a subcomponent, types/constants) into a focused sibling module in the **same** change set when the move is localized and low-risk.
+- **Stay adjacent to the task:** do not expand scope into unrelated refactors, renames across the tree, or “while I’m here” cleanups outside the hot path.
+- **If a safe extraction is not obvious** without a large redesign, ship the functional change and leave file shape for a dedicated pass—do not block the primary outcome on a risky split.
+
+This keeps the **700-line hard limit** enforceable through steady progress instead of crisis refactors.
 
 ### Modular Architecture Principles
 
@@ -49,7 +59,7 @@ Break up monolithic files when they get too large.
 
 #### Example Splits for Common Scenarios
 
-**Large Service File (> 400 lines):**
+**Large Service File (> 560 lines):**
 ```
 // Instead of one huge chat_service.py
 chat_service.py          -> Core chat orchestration
@@ -58,7 +68,7 @@ chat_response_builder.py -> Response formatting
 chat_validation.py       -> Input validation
 ```
 
-**Oversized Component (> 400 lines):**
+**Oversized Component (> 560 lines):**
 ```
 // Instead of one massive DocumentsPage.js
 DocumentsPage.js         -> Main page component
@@ -85,7 +95,7 @@ DocumentActions.js       -> Action buttons and modals
 ### When to Split Files
 
 **Immediate split triggers:**
-- File approaches 450+ lines
+- File approaches 630+ lines
 - Multiple distinct concerns in one file
 - Functions that could be reused elsewhere
 - Complex logic that needs isolation for testing
@@ -107,7 +117,7 @@ DocumentActions.js       -> Action buttons and modals
 
 Before adding new functionality to an existing file:
 
-1. **Count the lines** - are we near 500?
+1. **Count the lines** - are we near 700? If you are **already editing** the file and it is **~560+ lines**, plan an opportunistic split when practical (see above).
 2. **Assess responsibility** - does this belong here?
 3. **Consider reusability** - could this be useful elsewhere?
 4. **Plan the split** - what would the new module structure look like?

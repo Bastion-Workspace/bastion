@@ -20,35 +20,32 @@ def _heartbeat_enabled(config: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
+def heartbeat_requires_open_goals(config: Optional[Dict[str, Any]]) -> bool:
+    """When True (default), autonomous heartbeats only enqueue if there is an open goal under 100% progress."""
+    if not config or not isinstance(config, dict):
+        return True
+    v = config.get("require_open_goals")
+    if v is False:
+        return False
+    if isinstance(v, str) and v.strip().lower() in ("false", "0", "no"):
+        return False
+    return True
+
+
 def _compute_next_beat_at(heartbeat_config: Optional[Dict[str, Any]], from_time: Optional[datetime] = None) -> Optional[datetime]:
-    """Compute next beat time from heartbeat_config (interval_seconds or interval minutes, or cron)."""
-    if not heartbeat_config or not isinstance(heartbeat_config, dict):
-        return None
-    now = from_time or datetime.now(timezone.utc)
-    interval_sec = heartbeat_config.get("interval_seconds")
-    if interval_sec is None and "interval" in heartbeat_config:
-        interval_sec = int(heartbeat_config.get("interval", 0)) * 60
-    if interval_sec and int(interval_sec) > 0:
-        from datetime import timedelta
-        return now + timedelta(seconds=int(interval_sec))
-    cron = heartbeat_config.get("cron_expression")
-    if cron:
-        try:
-            from croniter import croniter
-            it = croniter(cron, now)
-            return it.get_next(datetime)
-        except Exception:
-            pass
-    return None
+    """Compute next beat UTC from heartbeat_config (schedule_type + interval or timezone-aware cron)."""
+    from services.line_heartbeat_schedule import compute_next_beat_at
+
+    return compute_next_beat_at(heartbeat_config, from_time)
 
 
 async def _fetch_teams_due_heartbeat() -> List[Dict[str, Any]]:
-    """Teams with heartbeat enabled, next_beat_at due, and at least one goal still under 100% progress.
+    """Teams with heartbeat enabled, next_beat_at due, and (by default) at least one open goal under 100%.
 
-    Scheduling stops when every non-completed goal either is cancelled/completed or has progress_pct >= 100
-    (so we do not keep spending tokens after all tracked goals are finished). There is no extra automatic
-    "wrap-up" heartbeat after the last goal hits 100%; use the line dashboard **Run Heartbeat** once if you
-    want a final CEO summary after completion.
+    If heartbeat_config.require_open_goals is false, lines are eligible even with no open goals (briefing mode).
+
+    When require_open_goals is true (default), scheduling stops when every tracked goal is done/cancelled
+    or at 100% progress; use **Run Heartbeat** manually for a final wrap-up if needed.
     """
     from services.database_manager.database_helpers import fetch_all
 
@@ -58,12 +55,16 @@ async def _fetch_teams_due_heartbeat() -> List[Dict[str, Any]]:
         FROM agent_lines t
         WHERE t.status = 'active'
           AND (t.heartbeat_config->>'enabled')::text IN ('true', '1')
-          AND (t.next_beat_at IS NULL OR t.next_beat_at <= NOW())
-          AND EXISTS (
-            SELECT 1 FROM agent_line_goals g
-            WHERE g.line_id = t.id
-              AND g.status IN ('active', 'blocked')
-              AND COALESCE(g.progress_pct, 0) < 100
+          AND t.next_beat_at IS NOT NULL
+          AND t.next_beat_at <= NOW()
+          AND (
+            lower(coalesce(trim(t.heartbeat_config->>'require_open_goals'), 'true')) IN ('false', '0', 'no')
+            OR EXISTS (
+              SELECT 1 FROM agent_line_goals g
+              WHERE g.line_id = t.id
+                AND g.status IN ('active', 'blocked')
+                AND COALESCE(g.progress_pct, 0) < 100
+            )
           )
         ORDER BY t.next_beat_at ASC NULLS FIRST
         """

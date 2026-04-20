@@ -303,45 +303,41 @@ class FaceEncodingService:
 
     async def delete_identity(self, identity_name: str) -> int:
         """
-        Delete all face encodings for an identity
-        
+        Delete all face encodings for an identity (via Vector Service).
+
         Returns:
             Number of encodings deleted
         """
         try:
             if not self._initialized:
                 await self.initialize()
-            
-            # Get all points for this identity
-            results = self.client.scroll(
+
+            filters = [
+                {
+                    "field": "identity_name",
+                    "value": identity_name,
+                    "operator": "equals",
+                }
+            ]
+            result = await self.vector_service_client.delete_vectors(
                 collection_name=self.COLLECTION_NAME,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="identity_name",
-                            match=MatchValue(value=identity_name)
-                        )
-                    ]
-                ),
-                limit=100
+                filters=filters,
             )
-            
-            if not results or not results[0]:
+            if not result.get("success"):
+                err = result.get("error", "Unknown error")
+                logger.error("Failed to delete face encodings for identity %s: %s", identity_name, err)
                 return 0
-            
-            point_ids = [point.id for point in results[0]]
-            
-            # Delete all points
-            self.client.delete(
-                collection_name=self.COLLECTION_NAME,
-                points_selector=point_ids
-            )
-            
-            logger.info(f"✅ Deleted {len(point_ids)} face encodings for '{identity_name}'")
-            return len(point_ids)
-            
+            deleted = int(result.get("points_deleted", 0) or 0)
+            if deleted > 0:
+                logger.info(
+                    "Deleted %s face encoding(s) for identity '%s'",
+                    deleted,
+                    identity_name,
+                )
+            return deleted
+
         except Exception as e:
-            logger.error(f"❌ Failed to delete identity: {e}")
+            logger.error("Failed to delete identity %s: %s", identity_name, e)
             raise
     
     async def clear_all_encodings(self) -> int:

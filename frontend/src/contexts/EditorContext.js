@@ -21,6 +21,8 @@ export const EditorProvider = ({ children }) => {
     canonicalPath: null,
     documentId: null,
     folderId: null,
+    isEncrypted: false,
+    encryptionSessionActive: false,
   });
 
   // **ROOSEVELT'S NAVIGATION CLEANUP**: Clear editor state when leaving documents page
@@ -43,6 +45,8 @@ export const EditorProvider = ({ children }) => {
         canonicalPath: null,
         documentId: null,
         folderId: null,
+        isEncrypted: false,
+        encryptionSessionActive: false,
       });
     }
   }, [location.pathname, editorState.isEditable]);

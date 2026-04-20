@@ -1,8 +1,7 @@
 """
-Logging configuration for Bastion Workspace
-Roosevelt's "Structured Logging" System - Dual format for AI analysis and human debugging
+Logging configuration for Bastion Workspace.
 
-**BULLY!** Efficient logging that serves both AI intelligence and human understanding!
+Structured logs for analysis plus human-readable context where configured.
 """
 
 import logging
@@ -13,14 +12,12 @@ import structlog
 from config import settings
 
 
-# === ROOSEVELT'S STRUCTURED LOGGING SYSTEM ===
+# --- Structured logging helpers ---
 
 def log_structured(component: str, action: str, status: str, **kwargs) -> str:
     """
-    Create structured log message with dual format
-    
-    **BULLY!** AI-optimized structure + human-readable context!
-    
+    Create a structured log line with a machine-parsable prefix and description.
+
     Format: COMPONENT:ACTION:STATUS:key=value:key=value | Human description
     """
     # Build structured part
@@ -272,7 +269,6 @@ def setup_logging():
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("openai._base_client").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("qdrant_client").setLevel(logging.WARNING)
     logging.getLogger("grpc._cython.cygrpc").setLevel(logging.WARNING)
     
     logger = logging.getLogger(__name__)

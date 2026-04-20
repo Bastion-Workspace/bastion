@@ -18,26 +18,34 @@ MCP_SESSION_TIMEOUT_SEC = 60.0
 
 T = TypeVar("T")
 
-try:
-    from mcp import ClientSession
-    from mcp.client.stdio import StdioServerParameters, stdio_client
-    from mcp.client.sse import sse_client
+ClientSession: Any = None
+stdio_client: Any = None
+StdioServerParameters: Any = None
+sse_client: Any = None
+streamablehttp_client: Any = None
+_MCP_CORE = False
+_HAS_STREAMABLE = False
 
+try:
+    from mcp import ClientSession as _ClientSession
+    from mcp.client.stdio import StdioServerParameters as _StdioServerParameters, stdio_client as _stdio_client
+    from mcp.client.sse import sse_client as _sse_client
+
+    ClientSession = _ClientSession
+    stdio_client = _stdio_client
+    StdioServerParameters = _StdioServerParameters
+    sse_client = _sse_client
     _MCP_CORE = True
 except ImportError:
-    ClientSession = None  # type: ignore
-    stdio_client = None  # type: ignore
-    StdioServerParameters = None  # type: ignore
-    sse_client = None  # type: ignore
-    _MCP_CORE = False
+    pass
 
 try:
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamablehttp_client as _streamablehttp_client
 
+    streamablehttp_client = _streamablehttp_client
     _HAS_STREAMABLE = True
 except ImportError:
-    streamablehttp_client = None  # type: ignore
-    _HAS_STREAMABLE = False
+    pass
 
 
 def _row_headers(row: Dict[str, Any]) -> Dict[str, str]:

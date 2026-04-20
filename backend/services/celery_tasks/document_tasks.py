@@ -3,14 +3,11 @@ Document Celery Tasks
 Background reprocessing after document content save so the save response returns immediately.
 """
 
-import asyncio
 import logging
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from services.celery_app import celery_app
 from services.celery_tasks.async_runner import run_async
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -19,53 +16,33 @@ async def _async_reprocess_document_after_save(doc_id: str, user_id: str) -> Dic
     """
     Resolve document file path and run full reprocess (re-embed + entity extraction).
     Called from Celery after content has been written to disk by update_document_content.
+
+    Always reads user_id, team_id, and collection_type from the DB row so that
+    Qdrant collection routing is correct regardless of what user_id was in the task args.
     """
     from services.service_container import get_service_container
 
     container = await get_service_container()
     document_service = container.document_service
-    folder_service = container.folder_service
 
     doc_info = await document_service.get_document(doc_id)
     if not doc_info:
         logger.warning(f"Document not found for reprocess: {doc_id}")
         return {"success": False, "error": "Document not found", "document_id": doc_id}
 
-    file_path = None
+    # The task caller's user_id is only used as a fallback when the row has no owner.
+    path_user_id = getattr(doc_info, "user_id", None) or user_id
+
+    from clients.document_service_client import DocumentServiceClient
+
+    client = DocumentServiceClient()
     try:
-        folder_path = await folder_service.get_document_file_path(
-            filename=doc_info.filename,
-            folder_id=getattr(doc_info, "folder_id", None),
-            user_id=user_id,
-            collection_type="user",
+        await client.initialize(required=True)
+        await client.reprocess_via_document_service(
+            doc_id, path_user_id, force_reprocess=True
         )
-        if folder_path and Path(folder_path).exists():
-            file_path = Path(folder_path)
-        else:
-            filename_with_id = f"{doc_id}_{doc_info.filename}"
-            folder_path = await folder_service.get_document_file_path(
-                filename=filename_with_id,
-                folder_id=getattr(doc_info, "folder_id", None),
-                user_id=user_id,
-                collection_type="user",
-            )
-            if folder_path and Path(folder_path).exists():
-                file_path = Path(folder_path)
-    except Exception as e:
-        logger.warning(f"Failed to resolve path with folder service: {e}")
-
-    if not file_path or not file_path.exists():
-        upload_dir = Path(settings.UPLOAD_DIR)
-        for potential_file in upload_dir.glob(f"{doc_id}_*"):
-            file_path = potential_file
-            break
-
-    if not file_path or not file_path.exists():
-        logger.warning(f"Original file not found for reprocess: {doc_id}")
-        return {"success": False, "error": "File not found on disk", "document_id": doc_id}
-
-    doc_type = document_service._detect_document_type(doc_info.filename)
-    await document_service._process_document_async(doc_id, file_path, doc_type, user_id)
+    finally:
+        await client.close()
     return {"success": True, "document_id": doc_id}
 
 
@@ -88,6 +65,50 @@ def reprocess_document_after_save_task(self, doc_id: str, user_id: str) -> Dict[
             "document_id": doc_id,
             "message": "Background re-indexing failed",
         }
+
+
+@celery_app.task(bind=True, name="services.celery_tasks.document_tasks.bulk_reindex_batch")
+def bulk_reindex_batch_task(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Celery task: process a batch of documents for bulk re-embedding.
+
+    Each item in batch is a dict with keys: document_id, user_id, team_id, collection_type.
+    These values come directly from document_metadata rows so collection routing is always
+    authoritative. Processes documents sequentially within the batch and reports PROGRESS
+    state after each document so Flower/callers can monitor throughput.
+
+    Routed to the dedicated 'reindex' queue to keep bulk operations isolated from
+    user-facing agent and chat tasks on the 'default' queue.
+    """
+    total = len(batch)
+    results: Dict[str, Any] = {"success": 0, "failed": 0, "skipped": 0, "errors": []}
+
+    for i, doc in enumerate(batch):
+        self.update_state(
+            state="PROGRESS",
+            meta={"current": i, "total": total, "success": results["success"], "failed": results["failed"]},
+        )
+        doc_id = doc.get("document_id", "")
+        if not doc_id:
+            results["skipped"] += 1
+            continue
+        try:
+            result = run_async(_async_reprocess_document_after_save(doc_id, doc.get("user_id", "")))
+            if result.get("success"):
+                results["success"] += 1
+            else:
+                results["failed"] += 1
+                results["errors"].append({"document_id": doc_id, "error": result.get("error", "unknown")})
+        except Exception as e:
+            logger.error(f"Bulk reindex failed for document {doc_id}: {e}")
+            results["failed"] += 1
+            results["errors"].append({"document_id": doc_id, "error": str(e)})
+
+    logger.info(
+        "Bulk reindex batch complete: %d success, %d failed, %d skipped out of %d",
+        results["success"], results["failed"], results["skipped"], total,
+    )
+    return results
 
 
 async def _async_backfill_document_chunks(limit: int = 5000, batch_size: int = 50, delay: float = 0.3) -> Dict[str, Any]:

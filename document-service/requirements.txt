@@ -1,5 +1,61 @@
-grpcio==1.60.0
-grpcio-tools==1.60.0
-urllib3>=2.0
-requests>=2.28.0
+# Runtime dependencies for the standalone document-service image only.
+# (Do not mirror the full backend stack here.)
+
+# gRPC (codegen: grpcio-tools in requirements-build.txt for Docker build only)
+grpcio==1.80.0
+# Required for generated *_pb2.py; align with grpcio-tools 1.80
+protobuf>=6.31.1,<7
+
+# setuptools>=82 removed pkg_resources; textstat and other deps still import it at runtime
+setuptools>=70,<82
+
+# Settings and shared models
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-dotenv==1.0.1
+
+# UploadFile used by the vendored pipeline (Starlette only — no FastAPI/ASGI stack)
+starlette==0.41.3
+
+# PostgreSQL (asyncpg for main path; psycopg2 for sync helpers in file watcher)
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+
+# Status relay to backend WebSockets
+redis==6.4.0
+
+# Per-document encryption (vendored file_encryption_service)
+argon2-cffi>=23.1.0
+cryptography>=42.0.0
+
+# Knowledge graph writes
+neo4j==5.15.0
+
+# File reads during upload / processing
+aiofiles==24.1.0
+
+# Document formats and extraction
+PyPDF2==3.0.1
+pdfplumber==0.11.4
+python-docx==1.1.2
+python-pptx>=1.0.0
+ebooklib==0.18
+beautifulsoup4==4.12.3
+ocrmypdf==17.2.0
+
+# Text / readability / NER
+langdetect==1.0.9
+textstat==0.7.4
 spacy>=3.7.0,<4
+
+# OCR pipeline and thumbnails
+Pillow==11.0.0
+
+# Upload directory watcher
+watchdog==4.0.0
+
+# Frontmatter parsing in link_extraction_service
+PyYAML>=6.0
+
+# URL/binary fetch paths in document_service_v2
+httpx==0.28.1

@@ -11,16 +11,12 @@ from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect, Depends, Request, Form
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 import uvicorn
-import fitz  # PyMuPDF for PDF text layer extraction
-import PyPDF2
-import pdfplumber
-from pydantic import BaseModel
 
 import asyncpg
 
@@ -63,7 +59,6 @@ from models.conversation_models import (
     MessageResponse, ConversationListResponse, MessageListResponse,
     ReorderConversationsRequest, UpdateConversationRequest
 )
-from utils.logging_config import setup_logging
 from utils.websocket_manager import WebSocketManager
 from utils.auth_middleware import get_current_user, get_current_user_optional, require_admin
 from services.user_settings_kv_service import get_user_setting
@@ -76,8 +71,8 @@ from services.model_source_resolver import (
 )
 from services.admin_provider_registry import admin_provider_registry
 
-# Setup logging
 from utils.logging_config import setup_logging
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -87,6 +82,10 @@ migration_service = None
 chat_service = None
 
 knowledge_graph_service = None
+_neo4j_maint_task = None
+_neo4j_maint_stop = None
+_vector_maint_task = None
+_vector_maint_stop = None
 collection_analysis_service = None
 enhanced_pdf_segmentation_service = None
 category_service = None
@@ -103,7 +102,6 @@ from api.learning_api import router as learning_router
 
 # Import FileManager service
 from services.file_manager import get_file_manager
-from services.file_manager.models.file_placement_models import FolderStructureRequest
 
 async def _ensure_agent_profiles_context_columns() -> None:
     """Ensure agent_profiles has context columns and model metadata (migrations 060/061/065/066, 081)."""
@@ -215,6 +213,7 @@ async def lifespan(app: FastAPI):
     
     global document_service, migration_service, chat_service
     global knowledge_graph_service, collection_analysis_service, enhanced_pdf_segmentation_service
+    global _neo4j_maint_task, _neo4j_maint_stop, _vector_maint_task, _vector_maint_stop
     global category_service, conversation_service, embedding_manager
     global websocket_manager
     global folder_service
@@ -232,12 +231,42 @@ async def lifespan(app: FastAPI):
         
         service_container.config = optimization_config
         await service_container.initialize()
-        
+
+        if settings.IMAGE_VISION_REQUIRED and not settings.IMAGE_VISION_ENABLED:
+            raise RuntimeError(
+                "IMAGE_VISION_REQUIRED=true cannot be used with IMAGE_VISION_ENABLED=false"
+            )
+        if settings.IMAGE_VISION_REQUIRED:
+            from clients.image_vision_client import get_image_vision_client
+
+            _vision_client = await get_image_vision_client()
+            await _vision_client.initialize(required=True)
+
+        if settings.VECTOR_EMBEDDING_REQUIRED and not settings.VECTOR_EMBEDDING_ENABLED:
+            raise RuntimeError(
+                "VECTOR_EMBEDDING_REQUIRED=true cannot be used with VECTOR_EMBEDDING_ENABLED=false"
+            )
+        if settings.VECTOR_EMBEDDING_REQUIRED:
+            from clients.vector_service_client import get_vector_service_client
+
+            _vector_client = await get_vector_service_client(required=False)
+            await _vector_client.initialize(required=True)
+
         # Get service references from container
         document_service = service_container.document_service
         chat_service = service_container.chat_service
 
         knowledge_graph_service = service_container.knowledge_graph_service
+        from services.neo4j_maintenance import spawn_neo4j_maintenance_task
+
+        _neo4j_maint_task, _neo4j_maint_stop = spawn_neo4j_maintenance_task(
+            knowledge_graph_service
+        )
+        from services.vector_maintenance import spawn_vector_maintenance_task
+
+        _vector_maint_task, _vector_maint_stop = spawn_vector_maintenance_task(
+            service_container.embedding_manager
+        )
         collection_analysis_service = service_container.collection_analysis_service
         enhanced_pdf_segmentation_service = service_container.enhanced_pdf_service
         category_service = service_container.category_service
@@ -276,12 +305,54 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.debug("Agent Factory skills seed skipped or failed (table may not exist yet): %s", e)
 
+        async def _reembed_user_custom_skill_vectors():
+            try:
+                from services.database_manager.database_helpers import fetch_all
+                from services.skill_vector_service import sync_all_skills
+
+                rows = await fetch_all(
+                    """
+                    SELECT DISTINCT user_id FROM agent_skills
+                    WHERE COALESCE(is_builtin, false) = false
+                      AND user_id IS NOT NULL
+                      AND LENGTH(TRIM(user_id::text)) > 0
+                    """
+                )
+                total = 0
+                for row in rows:
+                    uid = row.get("user_id")
+                    if not uid:
+                        continue
+                    try:
+                        n = await sync_all_skills(user_id=str(uid), upsert_only=True)
+                        total += n
+                    except Exception as inner:
+                        logger.warning(
+                            "User skill vector sync failed for user %s (non-fatal): %s",
+                            uid,
+                            inner,
+                        )
+                if total > 0:
+                    logger.info(
+                        "User-defined skills vector sync after collection migration: %d embeddings",
+                        total,
+                    )
+            except Exception as e:
+                logger.warning("User-defined skills vector re-sync failed (non-fatal): %s", e)
+
         async def _sync_builtin_skill_vectors():
             await asyncio.sleep(3)
             try:
-                from services.skill_vector_service import sync_all_skills
+                from services.skill_vector_service import ensure_skills_collection, sync_all_skills
+
+                ok, migrated = await ensure_skills_collection()
+                if not ok:
+                    logger.warning("Built-in skills vector sync skipped (collection unavailable)")
+                    return
                 count = await sync_all_skills(user_id=None, upsert_only=True)
                 logger.info("Built-in skills vector sync: embedded %d skills", count)
+                if migrated:
+                    await _reembed_user_custom_skill_vectors()
             except Exception as e:
                 logger.warning("Built-in skills vector sync failed (non-fatal): %s", e)
 
@@ -298,15 +369,87 @@ async def lifespan(app: FastAPI):
 
         asyncio.create_task(_sync_help_docs())
 
+        async def _check_dimension_migration():
+            """Auto-recreate document collections and queue re-embed when EMBEDDING_DIMENSIONS changes."""
+            await asyncio.sleep(8)
+            try:
+                import json as _json
+                from pathlib import Path as _Path
+                from services.document_vector_audit_service import recreate_document_collections_and_queue
+
+                marker_path = _Path(settings.UPLOAD_DIR) / ".embedding_dimensions_marker"
+                current_dims = settings.EMBEDDING_DIMENSIONS
+
+                previous_dims = None
+                if marker_path.exists():
+                    try:
+                        data = _json.loads(marker_path.read_text(encoding="utf-8"))
+                        previous_dims = data.get("dimensions")
+                    except Exception:
+                        pass
+
+                if previous_dims == current_dims:
+                    return
+
+                if previous_dims is None:
+                    marker_path.parent.mkdir(parents=True, exist_ok=True)
+                    marker_path.write_text(
+                        _json.dumps({"dimensions": current_dims}), encoding="utf-8"
+                    )
+                    logger.info("Embedding dimensions marker initialized: %d", current_dims)
+                    return
+
+                logger.warning(
+                    "EMBEDDING_DIMENSIONS changed: %d -> %d. Queuing document re-embed.",
+                    previous_dims,
+                    current_dims,
+                )
+                result = await recreate_document_collections_and_queue(
+                    scope="all",
+                    user_id=None,
+                    team_id=None,
+                    dry_run=False,
+                    queue_reembed=True,
+                    throttle_seconds=0.2,
+                    max_concurrent=5,
+                    include_all_qdrant_embedding_collections=True,
+                )
+                if result.get("success"):
+                    marker_path.write_text(
+                        _json.dumps({"dimensions": current_dims}), encoding="utf-8"
+                    )
+                    logger.info(
+                        "Dimension migration: recreated %d collections, queued %d documents",
+                        len(result.get("collections_recreated", [])),
+                        result.get("queued_for_reembed", 0),
+                    )
+                    q_seen = result.get("qdrant_embedding_collections_discovered") or []
+                    if q_seen:
+                        logger.info(
+                            "Dimension migration: Qdrant listed %d text-embedding collection(s)",
+                            len(q_seen),
+                        )
+                else:
+                    logger.error(
+                        "Dimension migration failed (will retry on next restart): %s",
+                        result.get("errors"),
+                    )
+            except Exception as e:
+                logger.warning("Dimension migration check failed (non-fatal): %s", e)
+
+        asyncio.create_task(_check_dimension_migration())
+
         # Seed default built-in agent profile for all users (idempotent)
         try:
             from services.agent_factory_service import (
                 seed_default_agent_profiles,
+                seed_devops_advisor_profiles,
                 seed_rss_manager_profiles,
             )
             await seed_default_agent_profiles()
             await seed_rss_manager_profiles()
-            logger.info("Default and RSS Manager agent profiles seeded")
+            await seed_devops_advisor_profiles()
+            logger.info("Default, RSS Manager, and DevOps Advisor agent profiles seeded")
         except Exception as e:
             logger.debug("Default agent profile seed skipped or failed: %s", e)
 
@@ -331,7 +474,7 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Folder Service initialization failed: {e}")
             folder_service = None
         
-        # ROOSEVELT'S MESSAGING CAVALRY - Initialize messaging service
+        # Messaging WebSocket - Initialize messaging service
         try:
             from services.messaging.messaging_service import messaging_service
             await messaging_service.initialize(service_container.db_pool)
@@ -415,7 +558,17 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_refresh_oauth_tokens_on_startup())
 
         # gRPC Tool Service moved to dedicated tools-service container
-        
+
+        from services.document_status_redis_subscriber import (
+            document_status_redis_subscriber,
+        )
+
+        document_status_redis_subscriber.start()
+        logger.info(
+            "Document status Redis subscriber started (channel=%s)",
+            settings.DOCUMENT_STATUS_REDIS_CHANNEL,
+        )
+
     except Exception as e:
         logger.error(f"❌ Failed to initialize services: {e}")
         raise
@@ -427,6 +580,24 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("🔄 Shutting down Plato Knowledge Base...")
+
+    from services.neo4j_maintenance import cancel_neo4j_maintenance_task
+
+    await cancel_neo4j_maintenance_task(_neo4j_maint_task, _neo4j_maint_stop)
+    _neo4j_maint_task = None
+    _neo4j_maint_stop = None
+
+    from services.vector_maintenance import cancel_vector_maintenance_task
+
+    await cancel_vector_maintenance_task(_vector_maint_task, _vector_maint_stop)
+    _vector_maint_task = None
+    _vector_maint_stop = None
+
+    from services.document_status_redis_subscriber import (
+        document_status_redis_subscriber,
+    )
+
+    await document_status_redis_subscriber.stop()
     
     # Stop File System Watcher
     try:
@@ -526,15 +697,23 @@ pdf_images_path = Path("processed/pdf_images")
 pdf_images_path.mkdir(parents=True, exist_ok=True)
 app.mount("/api/files", StaticFiles(directory=str(pdf_images_path)), name="pdf_images")
 
-# Mount static files for serving RSS article images
-images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
+# Web sources: single root static mount.
+# All runtime content (generated images, crawled images/docs, bulk scrape) is under
+# WEB_SOURCES_ROOT on the backend volume.  Comics are regular library images in
+# UPLOAD_DIR/Global/Comics/ served by /api/images/; web_sources/comics/ is not used.
+ws_root = Path(settings.WEB_SOURCES_ROOT)
+ws_root.mkdir(parents=True, exist_ok=True)
+images_path = ws_root / "images"
 images_path.mkdir(parents=True, exist_ok=True)
-app.mount("/static/images", StaticFiles(directory=str(images_path)), name="images")
+app.mount("/api/web-sources", StaticFiles(directory=str(ws_root)), name="web_sources")
 
-# Mount static files for serving Global Comics
-comics_path = Path(f"{settings.UPLOAD_DIR}/Global/Comics")
-comics_path.mkdir(parents=True, exist_ok=True)
-app.mount("/api/comics", StaticFiles(directory=str(comics_path)), name="comics")
+
+@app.get("/static/images/{path:path}")
+async def _redirect_legacy_static_images(path: str):
+    """301 to unified web_sources static mount (preserves old /static/images/... URLs)."""
+    suffix = path.strip("/")
+    target = f"/api/web-sources/images/{suffix}" if suffix else "/api/web-sources/images/"
+    return RedirectResponse(target, status_code=301)
 
 
 @app.get("/api/images/{filename:path}")
@@ -574,7 +753,8 @@ async def serve_image(
         has_access = False
         image_file_path = None
         doc_info = None
-        
+        library_stream_doc_id: Optional[str] = None
+
         # Search for documents with this filename using RLS context
         # Use user context so RLS allows access to global documents
         rls_context = {'user_id': current_user.user_id, 'user_role': 'user'}
@@ -612,13 +792,30 @@ async def serve_image(
                                 user_id=user_id,
                                 collection_type=collection_type
                             )
-                            
-                            if file_path and file_path.exists():
-                                image_file_path = file_path
-                                logger.info(f"✅ Resolved file path: {image_file_path}")
-                                break
+
+                            uploads_base = Path(settings.UPLOAD_DIR).resolve()
+                            if file_path:
+                                try:
+                                    fp_resolved = file_path.resolve()
+                                except Exception:
+                                    fp_resolved = file_path
+                                if str(fp_resolved).startswith(str(uploads_base)):
+                                    library_stream_doc_id = doc_id
+                                    image_file_path = file_path
+                                    logger.info(
+                                        "✅ Library image for doc %s — streaming from document-service",
+                                        doc_id,
+                                    )
+                                    break
+                                if file_path.exists():
+                                    image_file_path = file_path
+                                    logger.info(f"✅ Resolved file path: {image_file_path}")
+                                    break
+                                logger.warning(
+                                    "⚠️ File path resolved but not on backend disk: %s", file_path
+                                )
                             else:
-                                logger.warning(f"⚠️ File path resolved but doesn't exist: {file_path}")
+                                logger.warning("⚠️ Could not resolve file path for document %s", doc_id)
                                 # Continue checking other documents
                     except HTTPException:
                         # User doesn't have access to this document, continue checking others
@@ -670,23 +867,70 @@ async def serve_image(
         if not has_access:
             logger.warning(f"❌ Access denied: User {current_user.username} does not have access to image {safe_filename}")
             raise HTTPException(status_code=403, detail="Access denied")
-        
+
+        if library_stream_doc_id:
+            from clients.document_service_client import get_document_service_client
+
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+
+            media_type, _ = mimetypes.guess_type(safe_filename)
+            if not media_type:
+                ext = Path(safe_filename).suffix.lower()
+                media_type_map = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".gif": "image/gif",
+                    ".webp": "image/webp",
+                    ".bmp": "image/bmp",
+                    ".svg": "image/svg+xml",
+                }
+                media_type = media_type_map.get(ext, "application/octet-stream")
+
+            async def _library_image_bytes():
+                async for ch in dsc.download_document_stream(
+                    library_stream_doc_id,
+                    current_user.user_id,
+                    role=getattr(current_user, "role", "") or "",
+                ):
+                    if ch.data:
+                        yield ch.data
+
+            logger.info(
+                "✅ Streaming library image %s (doc %s) content-type: %s",
+                safe_filename,
+                library_stream_doc_id,
+                media_type,
+            )
+            return StreamingResponse(
+                _library_image_bytes(),
+                media_type=media_type,
+                headers={"Content-Disposition": f'inline; filename="{safe_filename}"'},
+            )
+
         if not image_file_path:
             logger.error(f"❌ File path not resolved for image: {safe_filename}")
             raise HTTPException(status_code=404, detail="Image not found")
-        
-        # SECURITY: Verify resolved path is within uploads directory
+
+        # SECURITY: Verify resolved path is under document library or web_sources images
         try:
             uploads_base = Path(settings.UPLOAD_DIR).resolve()
+            web_sources_images = (Path(settings.WEB_SOURCES_ROOT) / "images").resolve()
             image_file_path_resolved = image_file_path.resolve()
-            
-            if not str(image_file_path_resolved).startswith(str(uploads_base)):
+            resolved_str = str(image_file_path_resolved)
+            if not (
+                resolved_str.startswith(str(uploads_base))
+                or resolved_str.startswith(str(web_sources_images))
+            ):
                 logger.error(f"Path traversal attempt detected: {image_file_path_resolved}")
                 raise HTTPException(status_code=403, detail="Access denied")
+        except HTTPException:
+            raise
         except Exception as e:
             logger.error(f"Path validation error: {e}")
             raise HTTPException(status_code=403, detail="Access denied")
-        
+
         # Determine media type from file extension
         media_type, _ = mimetypes.guess_type(str(image_file_path))
         if not media_type:
@@ -702,10 +946,10 @@ async def serve_image(
                 '.svg': 'image/svg+xml',
             }
             media_type = media_type_map.get(ext, 'application/octet-stream')
-        
+
         logger.info(f"✅ Serving image {safe_filename} with content-type: {media_type}")
-        
-        # Serve file with proper content-type
+
+        # Serve file with proper content-type (local web_sources volume only; library uses DS stream above)
         return FileResponse(
             path=str(image_file_path),
             filename=safe_filename,
@@ -744,8 +988,14 @@ logger.debug("✅ Learning API routes registered")
 
 # Include admin API routes
 from api.admin_api import router as admin_router
+from api.admin_vector_audit_api import router as admin_vector_audit_router
 app.include_router(admin_router)
+app.include_router(admin_vector_audit_router)
 logger.debug("✅ Admin API routes registered")
+
+from api.federation_api import router as federation_router
+app.include_router(federation_router)
+logger.debug("✅ Federation API routes registered")
 
 # Include resilient embedding API routes
 from api.resilient_embedding_api import router as resilient_embedding_router
@@ -757,9 +1007,20 @@ app.include_router(settings_router)
 
 from api.dashboard_api import router as dashboard_router
 app.include_router(dashboard_router)
+from api.scratchpad_api import router as scratchpad_router
+app.include_router(scratchpad_router)
+from api.saved_artifact_api import router as saved_artifact_router, public_router as saved_artifact_public_router
+app.include_router(saved_artifact_router)
+app.include_router(saved_artifact_public_router)
+from api.document_pins_api import router as document_pins_router
+app.include_router(document_pins_router)
 logger.debug("Home dashboard API routes registered")
 from api.device_proxy_api import router as device_proxy_router
 app.include_router(device_proxy_router)
+
+# Code workspaces (local proxy-backed)
+from api.code_workspace_api import router as code_workspace_router
+app.include_router(code_workspace_router)
 
 # User LLM providers (per-user API keys and models)
 from api.user_llm_provider_api import router as user_llm_provider_router
@@ -783,7 +1044,7 @@ from api.export_api import router as export_router
 app.include_router(export_router)
 logger.debug("✅ Export API routes registered")
 
-# ROOSEVELT'S ORG SEARCH API
+# Org search API router
 from api.org_search_api import router as org_search_router
 app.include_router(org_search_router)
 logger.debug("✅ Org Search API routes registered")
@@ -885,6 +1146,12 @@ app.include_router(document_router)
 # Document version history (list, content, diff, rollback)
 from api.document_version_api import router as document_version_router
 app.include_router(document_version_router)
+from api.document_sharing_api import router as document_sharing_router
+app.include_router(document_sharing_router)
+from api.collab_api import router as collab_router
+app.include_router(collab_router)
+from api.document_encryption_api import router as document_encryption_router
+app.include_router(document_encryption_router)
 logger.debug("✅ Document API routes registered")
 
 # Include Graph API routes (link-graph for file relation cloud)
@@ -960,6 +1227,17 @@ logger.debug("✅ Category API routes registered")
 from api.rss_api import router as rss_router
 app.include_router(rss_router)
 
+from api.ebooks_api import router as ebooks_router
+app.include_router(ebooks_router)
+
+# Include Oregon Trail game API
+try:
+    from api.oregon_trail_api import router as oregon_trail_router
+    app.include_router(oregon_trail_router)
+    logger.debug("Oregon Trail API routes registered")
+except Exception as e:
+    logger.warning(f"Oregon Trail API routes skipped: {e}")
+
 logger.debug("✅ RSS API routes registered")
 
 if settings.GREADER_API_ENABLED:
@@ -967,15 +1245,6 @@ if settings.GREADER_API_ENABLED:
 
     app.include_router(greader_router, prefix="/api/greader")
     logger.debug("✅ GReader API routes registered")
-
-
-# Include News API routes
-try:
-    from api.news_api import router as news_router
-    app.include_router(news_router)
-    logger.debug("✅ News API routes registered")
-except Exception as e:
-    logger.warning(f"⚠️ Failed to register News API routes: {e}")
 
 # Include FileManager API routes
 from api.file_manager_api import router as file_manager_router
@@ -987,7 +1256,7 @@ from api.auth_api import router as auth_router
 app.include_router(auth_router)
 logger.debug("✅ Authentication API routes registered")
 
-# ROOSEVELT'S MESSAGING CAVALRY API
+# Messaging WebSocket API
 from api.messaging_api import router as messaging_router
 app.include_router(messaging_router)
 logger.debug("Messaging API routes registered")
@@ -1044,6 +1313,10 @@ logger.debug("✅ Help API routes registered")
 from api.music_api import router as music_router
 app.include_router(music_router)
 logger.debug("✅ Music API routes registered")
+
+from api.emby_api import router as emby_router
+app.include_router(emby_router)
+logger.debug("Emby API routes registered")
 
 # External connections (OAuth / email)
 from api.external_connections_api import router as external_connections_router
@@ -1165,7 +1438,7 @@ async def websocket_test(websocket: WebSocket):
         logger.error(f"❌ Test WebSocket error: {e}")
         try:
             await websocket.close(code=4000, reason="Test failed")
-        except:
+        except Exception:
             pass
 
 
@@ -1440,7 +1713,7 @@ async def websocket_conversations(websocket: WebSocket):
         logger.error(f"❌ Conversation WebSocket connection failed: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
-        except:
+        except Exception:
             pass
 
 
@@ -1506,7 +1779,7 @@ async def websocket_folders(websocket: WebSocket):
         logger.error(f"❌ Folder WebSocket connection failed: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
-        except:
+        except Exception:
             pass
 
 
@@ -1570,14 +1843,14 @@ async def websocket_job_progress(websocket: WebSocket, job_id: str):
         logger.error(f"❌ Job progress WebSocket connection failed for job {job_id}: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
-        except:
+        except Exception:
             pass
 
 
 @app.websocket("/api/ws/agent-status/{conversation_id}")
 async def websocket_agent_status(websocket: WebSocket, conversation_id: str):
     """
-    ROOSEVELT'S AGENT STATUS CHANNEL: WebSocket endpoint for real-time agent tool execution status
+    WebSocket endpoint for real-time agent tool execution status
     
     This is the OUT-OF-BAND channel for LLM status updates that appear/disappear as the agent works.
     """
@@ -1646,7 +1919,7 @@ async def websocket_agent_status(websocket: WebSocket, conversation_id: str):
         logger.error(f"❌ Agent Status WebSocket connection failed for conversation {conversation_id}: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
-        except:
+        except Exception:
             pass
 
 

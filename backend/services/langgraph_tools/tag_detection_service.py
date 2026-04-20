@@ -1,5 +1,5 @@
 """
-Tag Detection Service - Roosevelt's Smart Tag Matching
+Tag detection for org and document queries
 
 Detects tag/category references in queries and fuzzy matches to actual tags
 """
@@ -16,7 +16,7 @@ class TagDetectionService:
     """
     Smart tag detection and fuzzy matching for research queries
     
-    **ROOSEVELT'S SMART FILTERING DOCTRINE**: Help users find their organized documents!
+    Prefer known tags when matching user queries to folders
     """
     
     # Common phrases that indicate tag/category filtering intent
@@ -39,7 +39,7 @@ class TagDetectionService:
         """
         Extract potential tag references from query text
         
-        **ROOSEVELT TAG-FIRST APPROACH**: Check if known tags appear in the query!
+        Detect known tags appearing verbatim in the query
         Much more reliable than regex pattern matching.
         
         Returns list of phrases that might be tag names
@@ -174,7 +174,7 @@ class TagDetectionService:
             "should_filter": False
         }
         
-        # **ROOSEVELT TAG-FIRST**: Pass available tags to detection for direct matching
+        # Pass available tags into detection for direct matching
         detected_phrases = self.detect_tag_references(query, available_tags, available_categories)
         
         if not detected_phrases:
@@ -188,7 +188,7 @@ class TagDetectionService:
         overall_confidence = 0.0
         
         for phrase in detected_phrases:
-            # **ROOSEVELT OPTIMIZATION**: If phrase is already a known tag (from direct detection), use it directly
+            # If phrase matches a known tag, use it directly
             if phrase in available_tags:
                 if phrase not in matched_tags:
                     matched_tags.append(phrase)

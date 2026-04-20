@@ -1,6 +1,6 @@
 # User-Designable Dashboard (Concept)
 
-**Status:** Concept — not implemented as a unified product. This note captures intent, distinguishes existing uses of the word “dashboard,” and lists primitive/widget ideas grounded in current Bastion capabilities.
+**Status:** Phases 1–3 (Home layout, multi-dashboard, grid + org/folder/pins widgets + document pins API) are implemented; broader vision (Data Workspace widgets, maps, music, etc.) remains future work.
 
 ## Vision
 
@@ -84,13 +84,16 @@ No current document defines a **layout builder**, **widget catalog**, or **per-u
 
 **Home** area (nav label **Home**; distinct from **Operations** → `/agent-dashboard`). Per-widget layout schema below.
 
-**Layout schema** (`HomeDashboardLayout`, `schema_version` = `1`): `widgets` is an ordered array of `{ id, type, config }` with discriminated `type`:
+**Layout schema** (`HomeDashboardLayout`, `schema_version` = `1`): optional `layout_mode`: `stack` (default) or `grid`. `widgets` is an ordered array of `{ id, type, config, grid? }` with discriminated `type`. When `layout_mode` is `grid`, each widget may include `grid: { x, y, w, h }` (12-column layout for react-grid-layout).
 
 | `type` | `config` |
 |--------|----------|
 | `nav_links` | `{ items: [{ label, path? \| href? }] }` — exactly one of `path` (in-app, leading `/`) or `href` (`http`/`https`). |
 | `markdown_card` | `{ title?, body }` — body max 50k chars; rendered as Markdown in the UI. |
 | `rss_headlines` | `{ feed_id?, limit }` — optional feed; if omitted, client aggregates recent articles from up to four feeds. |
+| `org_agenda` | `{ days_ahead, include_scheduled, include_deadlines, include_appointments }` — uses `GET /api/org/agenda`. |
+| `folder_shortcuts` | `{ items: [{ folder_id, label? }] }` — opens `/documents?folder=…`. |
+| `pinned_documents` | `{ limit, show_preview }` — lists user pins from `GET /api/document-pins`. |
 
 **Legacy layout-only API (still supported):** reads/writes the **default** dashboard’s layout only.
 
@@ -115,8 +118,15 @@ No current document defines a **layout builder**, **widget catalog**, or **per-u
 
 **Frontend:** Routes `/home` (redirects to default dashboard id) and `/home/:dashboardId`. Dashboard picker, **⋯** menu (new / rename / set default / delete), and layout editing per Phase 1. Implementation: [`frontend/src/components/HomeDashboardPage.js`](../../frontend/src/components/HomeDashboardPage.js), [`frontend/src/components/homeDashboard/HomeDashboardChrome.js`](../../frontend/src/components/homeDashboard/HomeDashboardChrome.js).
 
-**Not yet implemented:** Data Workspace table/chart widgets, free-form grid layout (Grafana-style editor: `layout_mode` / per-widget `grid` in JSON — Phase 3+), map/music primitives (see vision above).
+## Phase 3 (implemented)
+
+- **Grid layout:** `layout_mode` `stack` \| `grid`; per-widget optional `grid` (`x`, `y`, `w`, `h`); frontend uses `react-grid-layout` in edit mode; toggle **Stack** / **Grid** in the edit toolbar.
+- **Widgets:** `org_agenda`, `folder_shortcuts`, `pinned_documents` (see table above).
+- **Document pins:** Table `user_document_pins` (migration `115_user_document_pins.sql`); API `GET/POST /api/document-pins`, `DELETE /api/document-pins/{pin_id}`, `PUT /api/document-pins/reorder` (`{ pin_ids }`). Pins are per-user; documents must be owned by the user.
+- **Documents deep links:** `/documents?folder={folder_id}` and `/documents?document={document_id}&doc_title=…` for opening from Home widgets.
+
+**Not yet implemented:** Data Workspace table/chart widgets, map/music primitives, richer pin UX from the document viewer (see vision above).
 
 ## Document history
 
-- Introduced as concept note; Phase 1 MVP; Phase 2 multi-dashboard storage (relational `user_home_dashboards`, KV migration); Grafana-style grid editor deferred to Phase 3+.
+- Introduced as concept note; Phase 1 MVP; Phase 2 multi-dashboard storage; Phase 3 grid layout + org/folder/pins widgets + document pins API.

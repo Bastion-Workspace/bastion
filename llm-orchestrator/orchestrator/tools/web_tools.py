@@ -4,6 +4,7 @@ Web Tools - Web search and crawling via backend gRPC
 
 import logging
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -120,6 +121,17 @@ class CrawlWebContentOutputs(BaseModel):
     formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
+_UNCRAWLABLE_EXTENSIONS = frozenset({
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".zip", ".tar", ".gz", ".rar", ".7z",
+})
+
+
+def _is_uncrawlable_url(u: str) -> bool:
+    path = urlparse(u).path.lower().split("?")[0]
+    return any(path.endswith(ext) for ext in _UNCRAWLABLE_EXTENSIONS)
+
+
 async def crawl_web_content_tool(
     url: str = None,
     urls: List[str] = None,
@@ -136,12 +148,38 @@ async def crawl_web_content_tool(
     """
     try:
         url_list = urls if urls else ([url] if url else [])
-        logger.info(f"Crawling {len(url_list)} URLs (paginate={paginate}, max_pages={max_pages})")
+
+        skipped = [u for u in url_list if _is_uncrawlable_url(u)]
+        crawlable = [u for u in url_list if not _is_uncrawlable_url(u)]
+
+        if skipped:
+            logger.info(
+                "Skipping %d uncrawlable URL(s) (PDF/binary): %s",
+                len(skipped),
+                ", ".join(skipped[:5]),
+            )
+
+        if not crawlable:
+            skip_lines = [f"- {u}" for u in skipped]
+            return {
+                "results": [],
+                "count": 0,
+                "formatted": (
+                    "Cannot crawl these URLs (binary/PDF files are not supported by the web crawler):\n"
+                    + "\n".join(skip_lines)
+                    + "\nTry an HTML documentation page instead."
+                ),
+            }
+
+        crawl_url = crawlable[0] if len(crawlable) == 1 else None
+        crawl_urls = crawlable if len(crawlable) > 1 else None
+
+        logger.info(f"Crawling {len(crawlable)} URLs (paginate={paginate}, max_pages={max_pages})")
 
         client = await get_backend_tool_client()
         results = await client.crawl_web_content(
-            url=url,
-            urls=urls,
+            url=crawl_url,
+            urls=crawl_urls,
             paginate=paginate,
             max_pages=max_pages,
             pagination_param=pagination_param,
@@ -169,6 +207,14 @@ async def crawl_web_content_tool(
             images = result.get("images", [])
             if images:
                 formatted_parts.append(f"   Images: {len(images)} URL(s)")
+
+        if skipped:
+            formatted_parts.append(
+                f"\n(Skipped {len(skipped)} binary/PDF URL(s) that cannot be crawled: "
+                + ", ".join(skipped[:3])
+                + ("..." if len(skipped) > 3 else "")
+                + ")"
+            )
 
         formatted = "\n".join(formatted_parts)
         return {"results": results, "count": len(results), "formatted": formatted}

@@ -112,28 +112,45 @@ class SlackProvider(BaseMessagingProvider):
         sender_name = sender_name or user_id
 
         images: List[Dict[str, Any]] = []
+        audio_part: Optional[Dict[str, Any]] = None
         for f in event.get("files") or []:
             mime = (f.get("mimetype") or "").split(";")[0].strip()
-            if not mime.startswith("image/"):
-                continue
             url = f.get("url_private_download")
             if not url:
                 continue
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client_http:
-                    resp = await client_http.get(
-                        url,
-                        headers={"Authorization": f"Bearer {self._bot_token}"},
-                    )
-                    resp.raise_for_status()
-                    data_b64 = base64.b64encode(resp.content).decode("utf-8")
-                images.append({"data": data_b64, "mime": mime or "image/png"})
-            except Exception as e:
-                logger.warning("Failed to download Slack file: %s", e)
+            if mime.startswith("image/"):
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client_http:
+                        resp = await client_http.get(
+                            url,
+                            headers={"Authorization": f"Bearer {self._bot_token}"},
+                        )
+                        resp.raise_for_status()
+                        data_b64 = base64.b64encode(resp.content).decode("utf-8")
+                    images.append({"data": data_b64, "mime": mime or "image/png"})
+                except Exception as e:
+                    logger.warning("Failed to download Slack file: %s", e)
+            elif mime.startswith("audio/") and audio_part is None:
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client_http:
+                        resp = await client_http.get(
+                            url,
+                            headers={"Authorization": f"Bearer {self._bot_token}"},
+                        )
+                        resp.raise_for_status()
+                        raw = resp.content
+                    fn = (f.get("name") or f.get("title") or "").strip() or "audio.bin"
+                    audio_part = {
+                        "data": base64.b64encode(raw).decode("utf-8"),
+                        "mime": mime or "application/octet-stream",
+                        "filename": fn,
+                    }
+                except Exception as e:
+                    logger.warning("Failed to download Slack audio file: %s", e)
 
-        if not text and not images:
+        if not text and not images and not audio_part:
             return
-        if not text:
+        if not text and images and not audio_part:
             text = "[Image]"
 
         chat_title = event.get("channel") or channel_id
@@ -149,6 +166,7 @@ class SlackProvider(BaseMessagingProvider):
             chat_title=chat_title,
             chat_username=None,
             chat_type=None,
+            audio=audio_part,
         )
         try:
             await self._message_callback(inbound)

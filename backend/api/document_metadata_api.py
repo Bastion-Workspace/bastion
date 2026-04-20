@@ -16,7 +16,6 @@ from models.api_models import AuthenticatedUserResponse
 from services.service_container import get_service_container
 from services.settings_service import settings_service
 from utils.auth_middleware import get_current_user
-from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +123,10 @@ async def get_document_metadata(
     doc_path = Path(file_path_str)
     metadata_path = doc_path.parent / f"{doc_path.stem}.metadata.json"
 
-    if not metadata_path.exists():
+    from services import ds_upload_library_fs as dsf
+
+    uid = current_user.user_id
+    if not await dsf.exists(uid, metadata_path):
         return {
             "exists": False,
             "metadata": {
@@ -142,8 +144,8 @@ async def get_document_metadata(
         }
 
     try:
-        with open(metadata_path, "r", encoding="utf-8") as f:
-            metadata = json.load(f)
+        raw = await dsf.read_text(uid, metadata_path)
+        metadata = json.loads(raw)
     except Exception as e:
         logger.error(f"Failed to read doc metadata: {e}")
         raise HTTPException(status_code=500, detail="Failed to read metadata file")
@@ -184,8 +186,11 @@ async def create_or_update_document_metadata(
     )
     doc_path = Path(file_path_str)
 
-    if not doc_path.exists():
-        raise HTTPException(status_code=404, detail="Document file not found on disk")
+    from services import ds_upload_library_fs as dsf
+
+    uid = current_user.user_id
+    if not await dsf.exists(uid, doc_path):
+        raise HTTPException(status_code=404, detail="Document file not found in library")
 
     metadata_path = doc_path.parent / f"{doc_path.stem}.metadata.json"
     metadata_json = {
@@ -204,8 +209,11 @@ async def create_or_update_document_metadata(
         metadata_json["llm_metadata"] = raw_body["llm_metadata"]
 
     try:
-        with open(metadata_path, "w", encoding="utf-8") as f:
-            json.dump(metadata_json, f, indent=2, ensure_ascii=False)
+        await dsf.write_text(
+            uid,
+            metadata_path,
+            json.dumps(metadata_json, indent=2, ensure_ascii=False),
+        )
     except Exception as e:
         logger.error(f"Failed to write doc metadata: {e}")
         raise HTTPException(status_code=500, detail="Failed to write metadata file")
@@ -249,11 +257,16 @@ async def delete_document_metadata(
     doc_path = Path(file_path_str)
     metadata_path = doc_path.parent / f"{doc_path.stem}.metadata.json"
 
-    if not metadata_path.exists():
+    from services import ds_upload_library_fs as dsf
+
+    uid = current_user.user_id
+    if not await dsf.exists(uid, metadata_path):
         raise HTTPException(status_code=404, detail="Metadata file not found")
 
     try:
-        metadata_path.unlink()
+        await dsf.delete_file(uid, metadata_path)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Metadata file not found")
     except Exception as e:
         logger.error(f"Failed to delete doc metadata: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete metadata file")
@@ -296,7 +309,10 @@ async def generate_document_summary(
         collection_type=collection_type,
     )
     file_path = Path(file_path_str)
-    if not file_path.exists():
+    from services import ds_upload_library_fs as dsf
+
+    uid = current_user.user_id
+    if not await dsf.exists(uid, file_path):
         raise HTTPException(status_code=404, detail="Document file not found")
 
     extension = file_path.suffix.lower()
@@ -304,7 +320,7 @@ async def generate_document_summary(
         ".pdf": "pdf", ".txt": "txt", ".md": "md", ".docx": "docx", ".doc": "docx",
         ".pptx": "pptx", ".ppt": "pptx",
         ".epub": "epub", ".html": "html", ".htm": "html", ".eml": "eml",
-        ".zip": "zip", ".srt": "srt",
+        ".zip": "zip", ".srt": "srt", ".vtt": "vtt",
     }
     doc_type = doc_type_map.get(extension)
     if not doc_type or doc_type == "image":
@@ -332,8 +348,13 @@ async def generate_document_summary(
     except Exception as e:
         logger.warning(f"Document processor failed for {filename}, falling back to raw read: {e}")
         try:
-            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                content = f.read(max_chars * 2)
+            from clients.document_service_client import get_document_service_client
+
+            dsc = get_document_service_client()
+            await dsc.initialize(required=True)
+            raw = await dsc.get_document_content_grpc(document_id, uid)
+            text = (raw.content if raw and getattr(raw, "content", None) else "") or ""
+            content = text[: max_chars * 2]
             if len(content) > max_chars:
                 content = content[:max_chars] + "\n\n[... truncated ...]"
         except Exception as read_err:

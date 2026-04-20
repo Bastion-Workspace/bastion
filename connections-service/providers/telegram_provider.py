@@ -75,12 +75,15 @@ class TelegramProvider(BaseMessagingProvider):
             .post_init(self._post_init)
             .build()
         )
-        application.add_handler(
-            MessageHandler(
-                filters.TEXT | filters.PHOTO | filters.Document.IMAGE,
-                self._handle_message,
-            )
+        inbound_media = (
+            filters.TEXT
+            | filters.PHOTO
+            | filters.Document.IMAGE
+            | filters.VOICE
+            | filters.AUDIO
+            | filters.Document.Category("audio/")
         )
+        application.add_handler(MessageHandler(inbound_media, self._handle_message))
         self._application = application
         self._running = True
         await application.initialize()
@@ -91,6 +94,14 @@ class TelegramProvider(BaseMessagingProvider):
     async def _post_init(self, application: Any) -> None:
         pass
 
+    async def _download_telegram_file(self, context: Any, file_id: str) -> bytes:
+        file = await context.bot.get_file(file_id)
+        url = f"https://api.telegram.org/file/bot{self._bot_token}/{file.file_path}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            return resp.content
+
     async def _handle_message(self, update: Any, context: Any) -> None:
         if not update.message or not self._message_callback:
             return
@@ -100,7 +111,9 @@ class TelegramProvider(BaseMessagingProvider):
         sender_id = str(sender.id) if sender else ""
         sender_name = (sender.first_name or "") + (" " + (sender.last_name or "")).strip() if sender else "Unknown"
         text = (message.text or "").strip()
+        caption = (message.caption or "").strip()
         images: List[Dict[str, Any]] = []
+        audio_part: Optional[Dict[str, Any]] = None
 
         if message.photo:
             photo = message.photo[-1]
@@ -126,9 +139,55 @@ class TelegramProvider(BaseMessagingProvider):
             except Exception as e:
                 logger.warning("Failed to download Telegram document image: %s", e)
 
-        if not text and not images:
+        try:
+            if message.voice:
+                raw = await self._download_telegram_file(context, message.voice.file_id)
+                mime = (message.voice.mime_type or "audio/ogg").strip() or "audio/ogg"
+                ext = "ogg"
+                if "/" in mime:
+                    ext = mime.split("/")[-1].split(";")[0].strip() or "ogg"
+                audio_part = {
+                    "data": base64.b64encode(raw).decode("utf-8"),
+                    "mime": mime,
+                    "filename": f"voice.{ext}",
+                }
+                if caption:
+                    audio_part["prompt"] = caption
+                    text = caption if not text else f"{text}\n{caption}"
+            elif message.audio:
+                raw = await self._download_telegram_file(context, message.audio.file_id)
+                af = message.audio
+                mime = (af.mime_type or "audio/mpeg").strip() or "audio/mpeg"
+                fn = (af.file_name or "").strip() or "audio.bin"
+                audio_part = {
+                    "data": base64.b64encode(raw).decode("utf-8"),
+                    "mime": mime,
+                    "filename": fn,
+                }
+                if caption:
+                    audio_part["prompt"] = caption
+                    text = caption if not text else f"{text}\n{caption}"
+            elif message.document and message.document.mime_type and message.document.mime_type.startswith(
+                "audio/"
+            ):
+                raw = await self._download_telegram_file(context, message.document.file_id)
+                df = message.document
+                mime = (df.mime_type or "application/octet-stream").strip()
+                fn = (df.file_name or "").strip() or "audio.bin"
+                audio_part = {
+                    "data": base64.b64encode(raw).decode("utf-8"),
+                    "mime": mime,
+                    "filename": fn,
+                }
+                if caption:
+                    audio_part["prompt"] = caption
+                    text = caption if not text else f"{text}\n{caption}"
+        except Exception as e:
+            logger.warning("Failed to download Telegram audio/voice: %s", e)
+
+        if not text and not images and not audio_part:
             return
-        if not text:
+        if not text and images and not audio_part:
             text = "[Image]"
 
         chat = message.chat
@@ -150,6 +209,7 @@ class TelegramProvider(BaseMessagingProvider):
             chat_title=chat_title or None,
             chat_username=("@" + chat_username) if chat_username else None,
             chat_type=str(chat_type) if chat_type else None,
+            audio=audio_part,
         )
         try:
             await self._message_callback(inbound)

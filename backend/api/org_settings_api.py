@@ -31,7 +31,7 @@ async def get_org_settings(
     """
     Get org-mode settings for the current user
     
-    **BULLY!** Retrieve your org-mode configuration!
+    Retrieve the current user's org-mode configuration.
     
     Returns default settings if none exist yet.
     """
@@ -60,7 +60,7 @@ async def update_org_settings(
     """
     Update org-mode settings for the current user
     
-    **BULLY!** Save your org-mode configuration!
+    Save org-mode configuration for the current user.
     
     Only provided fields will be updated. Omitted fields remain unchanged.
     """
@@ -91,7 +91,7 @@ async def reset_org_settings(
     """
     Reset org-mode settings to defaults
     
-    **BULLY!** Start fresh with default configuration!
+    Reset org-mode configuration to defaults.
     """
     try:
         logger.info("Resetting org settings for user %s", current_user.username)
@@ -120,7 +120,7 @@ async def get_todo_states(
     """
     Get all TODO states for the current user
     
-    **BULLY!** Retrieve your TODO state configuration!
+    Return TODO keyword/state definitions for the current user.
     
     Returns:
         {
@@ -150,7 +150,7 @@ async def get_tags(
     """
     Get all predefined tags for the current user
     
-    **BULLY!** Retrieve your tag definitions!
+    Return org tag definitions for the current user.
     """
     try:
         service = await get_org_settings_service()
@@ -180,39 +180,36 @@ async def get_journal_locations(
         row = await fetch_one("SELECT username FROM users WHERE user_id = $1", current_user.user_id)
         username = row['username'] if row else current_user.user_id
         
-        # Build user directory path
+        # Build user directory path (logical; bytes live on document-service)
         upload_dir = Path(settings.UPLOAD_DIR)
         user_dir = upload_dir / "Users" / username
-        
-        def build_directory_tree(path: Path, relative_path: str = "") -> List[Dict[str, Any]]:
-            """Recursively build directory tree"""
-            directories = []
-            
-            if not path.exists() or not path.is_dir():
+
+        from services import ds_upload_library_fs as dsf
+
+        async def build_directory_tree(path: Path, relative_path: str = "") -> List[Dict[str, Any]]:
+            """Recursively build directory tree via document-service listing."""
+            directories: List[Dict[str, Any]] = []
+            if not await dsf.is_dir(current_user.user_id, path):
                 return directories
-            
             try:
-                # Get all subdirectories
-                for item in sorted(path.iterdir()):
-                    if item.is_dir() and not item.name.startswith('.'):
-                        # Build relative path
-                        item_relative = f"{relative_path}/{item.name}" if relative_path else item.name
-                        
-                        # Recursively get children
-                        children = build_directory_tree(item, item_relative)
-                        
-                        directories.append({
-                            "name": item.name,
-                            "path": item_relative,
-                            "children": children
-                        })
+                for name in sorted(await dsf.list_dir_names(current_user.user_id, path)):
+                    if name.startswith("."):
+                        continue
+                    item = path / name
+                    if not await dsf.is_dir(current_user.user_id, item):
+                        continue
+                    item_relative = f"{relative_path}/{name}" if relative_path else name
+                    children = await build_directory_tree(item, item_relative)
+                    directories.append(
+                        {"name": name, "path": item_relative, "children": children}
+                    )
             except PermissionError:
-                logger.warning(f"Permission denied accessing {path}")
-            
+                logger.warning("Permission denied accessing %s", path)
+
             return directories
-        
+
         # Build tree starting from user directory
-        tree = build_directory_tree(user_dir)
+        tree = await build_directory_tree(user_dir)
         
         # Also include root option (empty path)
         result = {

@@ -29,10 +29,11 @@ description: Project structure and development guidelines for maintainable codeb
 
 ## File Size and Organization Standards
 
-Keep files lean and focused - no file shall exceed 500 lines.
+Keep files lean and focused - no file shall exceed 700 lines.
 
-- Maximum file size: **500 lines** 
+- Maximum file size: **700 lines** 
 - When a file approaches this limit, split functionality into separate modules
+- **Touch-triggered maintenance:** if you are **already modifying** a file for another reason and it is **~560+ lines** (or clearly nearing the cap), **prefer** extracting a cohesive unit you are working near into a sibling module in the same change set when the extraction is localized and low-risk. Do not balloon scope into unrelated refactors.
 - Maintain clear separation of concerns - each file should have a single, well-defined responsibility
 - New functions and capabilities must be placed in additional files rather than expanding existing ones
 
@@ -62,7 +63,7 @@ All development and deployment uses Docker Compose exclusively.
 ## File Creation Guidelines
 
 When creating new functionality:
-1. **Assess current file size** - if near 500 lines, create new file
+1. **Assess current file size** - if near 700 lines, create new file; if **editing** an existing file that is **~560+ lines**, consider the same split-first habit before adding more bulk
 2. **Single responsibility** - one concern per file  
 3. **Clear naming** - file names should indicate purpose
 4. **Proper imports** - maintain clean dependency structure

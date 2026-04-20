@@ -39,7 +39,7 @@ Implementation status as of February 2026 (aligned with "Agent Factory & Tool Ty
 - **Runtime:** Custom Agent Runner (`custom_agent_runner.py`) with dynamic LangGraph workflow, HITL approval gate, pipeline executor (`pipeline_executor.py`) for tool/llm_task/approval steps, typed `{step_name.field}` resolution and coercion. Output router for document, data_workspace, notification, knowledge_graph, chat.
 - **Database:** `agent_profiles`, `agent_data_sources`, `agent_schedules`, `agent_execution_log`, `agent_discoveries`, `agent_plugin_configs`, `custom_playbooks`, `data_source_connectors` — in use. Execution log stores metadata (e.g. steps_completed, steps_total); discoveries persisted when `metadata.discoveries` is present in `LogAgentExecution`.
 - **APIs:** Full Agent Factory CRUD (profiles, playbooks, data sources, schedules, executions). Execution detail: `GET /api/agent-factory/profiles/{profile_id}/executions/{execution_id}`. Internal: `POST /api/agent-factory/internal/notify-schedule-paused` for schedule-paused WebSocket notification. Import/export: `GET/POST .../profiles/.../export`, `.../import`, same for playbooks.
-- **Tool I/O:** Action I/O Registry (`action_io_registry.py`), shared type models (`tool_type_models.py`), ~74 tools with Pydantic output models and `register_action()` (7 complete [x], 58 registered [r]; 16 internal/skipped). Pipeline executor and frontend type wiring use registry for compatible upstream/downstream fields. See `dev-notes/TOOL_IO_CONTRACT_MIGRATION.md`.
+- **Tool I/O:** Action I/O Registry (`action_io_registry.py`), shared type models (`tool_type_models.py`), tools with Pydantic output models and `register_action()`. Pipeline executor and frontend type wiring use the registry for compatible upstream/downstream fields. See `.cursor/rules/tool-io-contracts.mdc` and [AGENT_FACTORY_TOOLS.md](./AGENT_FACTORY_TOOLS.md).
 - **Plugins:** Plugin base, loader, integrations; per-profile credentials in `agent_plugin_configs`; pipeline executor injects credentials for `category.startswith("plugin:")` actions; gRPC `GetPlugins`; frontend plugin config UI in DataSourcesSection.
 - **Scheduling:** Celery beat + `execute_scheduled_agent`; circuit breaker and concurrency control; on auto-pause, Celery calls backend internal endpoint to send WebSocket `agent_factory.schedule_paused` to user.
 
@@ -82,13 +82,13 @@ User sends query with agent_profile_id
          ▼
 ┌─────────────────────────┐
 │  Unified Dispatch         │  Detects agent_profile_id in metadata
-│  (unified_dispatch.py)   │  Routes to CustomAgentEngine
+│  (unified_dispatch.py)   │  Routes to CustomAgentRunner
 └───────────┬─────────────┘
             │
             ▼
 ┌─────────────────────────┐
-│  Custom Agent Engine      │  New engine type alongside
-│  (custom_agent_engine.py)│  research, automation, editor, conversational
+│  Custom Agent Runner      │  Executes Agent Factory profiles/playbooks
+│  (custom_agent_runner.py)│  (single orchestrator execution path)
 └───────────┬─────────────┘
             │
             ▼
@@ -3832,81 +3832,22 @@ class ConnectorCircuitBreaker:
 
 ---
 
-## 11. Integration Points
+## 11. Integration points (current tree)
 
-### Existing Files That Change
+The tables that previously listed “files to create” and early subgraph/skill paths are **obsolete**: many paths were never added or were removed during consolidation to **Agent Factory + `CustomAgentRunner`**.
 
-| File | Change | Reason |
-|---|---|---|
-| `llm-orchestrator/orchestrator/engines/unified_dispatch.py` | Add `CUSTOM_AGENT` engine type, route when `agent_profile_id` present | Entry point for custom agents |
-| `llm-orchestrator/orchestrator/tools/__init__.py` | Export dynamic tool registration functions | Dynamic tools need registration |
-| `llm-orchestrator/orchestrator/tools/tool_pack_registry.py` | Add dynamic tool pack loading from DB | Connector-generated tools |
-| `llm-orchestrator/orchestrator/skills/skill_registry.py` | Add dynamic skill loading from DB | User-defined playbooks |
-| `llm-orchestrator/orchestrator/utils/tool_vector_store.py` | Support vectorizing dynamic tools | Semantic discovery of connector tools |
-| `backend/api/async_orchestrator_api.py` | Pass `agent_profile_id` to orchestrator | Frontend → backend → orchestrator |
-| `backend/services/knowledge_graph_service.py` | Add typed relationship storage, entity resolution hooks | Graph enrichment |
-| `frontend/src/services/apiService.js` | Add Agent Factory API methods | Frontend data access |
-| `frontend/src/App.js` | Add Agent Factory route/navigation | UI navigation |
-| `docker-compose.yml` | No change (all runs in existing containers) | — |
-| `protos/tool_service.proto` | Add connector execution RPC methods | gRPC tool execution |
+**Authoritative live locations** (verify in-repo before linking docs):
 
-### New Files to Create
-
-| File | Purpose |
+| Area | Path |
 |---|---|
-| **Backend** | |
-| `backend/api/agent_factory_api.py` | REST endpoints for profiles, connectors, playbooks, schedules |
-| `backend/services/agent_factory_service.py` | Business logic for Agent Factory operations |
-| `backend/services/entity_resolution_service.py` | Entity resolution pipeline |
-| `backend/services/connector_runtime_service.py` | Execute connectors (REST, scraper, etc.) |
-| `backend/services/output_router_service.py` | Route results to destinations |
-| `backend/sql/migrations/XXX_agent_factory.sql` | Database schema migration |
-| **LLM Orchestrator** | |
-| `llm-orchestrator/orchestrator/engines/custom_agent_engine.py` | Custom agent execution engine |
-| `llm-orchestrator/orchestrator/engines/pipeline_executor.py` | Deterministic step executor (no LLM) |
-| `llm-orchestrator/orchestrator/engines/approval_gate_handler.py` | Approval gate handler (interactive + background) |
-| `llm-orchestrator/orchestrator/agents/custom_agent_runner.py` | LangGraph agent for executing profiles |
-| `llm-orchestrator/orchestrator/agents/assembly_agent.py` | AI assistant for building agents |
-| `llm-orchestrator/orchestrator/tools/connector_tools.py` | Dynamic tool generation from connectors |
-| `llm-orchestrator/orchestrator/subgraphs/playbook_execution_subgraph.py` | Hybrid playbook step execution |
-| `llm-orchestrator/orchestrator/subgraphs/knowledge_enrichment_subgraph.py` | Post-query graph enrichment |
-| `llm-orchestrator/orchestrator/utils/connector_parser.py` | Parse and validate connector YAML |
-| `llm-orchestrator/orchestrator/utils/playbook_parser.py` | Parse and validate playbook YAML |
-| `llm-orchestrator/orchestrator/utils/action_io_registry.py` | Central registry of action I/O contracts |
-| `llm-orchestrator/orchestrator/utils/step_link_validator.py` | Validate step wiring (type checks, reference resolution) |
-| `llm-orchestrator/orchestrator/tools/journal_tools.py` | `write_journal_entry` and `query_journal` tools |
-| `llm-orchestrator/orchestrator/tools/team_tools.py` | `search_team_files`, `read_team_file`, `search_team_posts`, `write_team_post`, `summarize_team_thread` |
-| `llm-orchestrator/orchestrator/tools/monitor_tools.py` | `detect_new_files`, `detect_folder_changes`, `detect_new_data`, `detect_new_team_posts`, `detect_new_entities`, watermark tools |
-| `llm-orchestrator/orchestrator/utils/mention_parser.py` | Parse @handle from chat messages, resolve to agent_profile_id |
-| `llm-orchestrator/orchestrator/tools/agent_communication_tools.py` | `send_to_agent`, `start_agent_conversation`, `halt_agent_conversation` |
-| `llm-orchestrator/orchestrator/engines/agent_conversation_engine.py` | Multi-turn agent-to-agent conversation manager with turn-taking, max_turns, and observation relay |
-| `llm-orchestrator/orchestrator/utils/schema_version_manager.py` | Schema version lifecycle: create, diff, check references, cleanup unused |
-| `llm-orchestrator/orchestrator/utils/rate_limit_manager.py` | Shared rate limiting across agents using same connector instance |
-| `llm-orchestrator/orchestrator/tools/notification_tools.py` | `send_notification`, `send_channel_message`, `broadcast_to_team` |
-| `llm-orchestrator/orchestrator/tools/task_management_tools.py` | `update_todo`, `complete_todo`, `search_todos` (wrapping org-mode) |
-| `llm-orchestrator/orchestrator/tools/file_operation_tools.py` | `delete_file`, `move_file`, `copy_file` (new granular file ops) |
-| `llm-orchestrator/orchestrator/plugins/base_plugin.py` | Base class for external integration plugins |
-| `llm-orchestrator/orchestrator/plugins/plugin_loader.py` | Plugin discovery, loading, and registry integration |
-| `llm-orchestrator/orchestrator/plugins/integrations/trello_plugin.py` | Trello integration tools |
-| `llm-orchestrator/orchestrator/plugins/integrations/notion_plugin.py` | Notion integration tools |
-| `llm-orchestrator/orchestrator/plugins/integrations/slack_plugin.py` | Slack integration tools (extends connections-service) |
-| `llm-orchestrator/orchestrator/plugins/integrations/caldav_plugin.py` | CalDAV calendar integration tools |
-| **Frontend** | |
-| `frontend/src/components/agent_factory/AgentFactoryPage.js` | Main Agent Factory UI |
-| `frontend/src/components/agent_factory/AgentProfileEditor.js` | Profile create/edit form |
-| `frontend/src/components/agent_factory/ConnectorBrowser.js` | Browse and configure connectors |
-| `frontend/src/components/agent_factory/WorkflowComposer.js` | Visual step wiring and I/O linking UI |
-| `frontend/src/components/agent_factory/PlaybookEditor.js` | Create/edit playbooks |
-| `frontend/src/components/agent_factory/OutputConfigEditor.js` | Configure output destinations |
-| `frontend/src/components/agent_factory/TestPanel.js` | Interactive agent testing |
-| `frontend/src/components/agent_factory/ExecutionHistory.js` | Execution log viewer |
-| `frontend/src/components/agent_factory/EntityReviewQueue.js` | HITL entity resolution UI |
-| `frontend/src/components/agent_factory/ApprovalQueue.js` | Workflow approval gate UI (notifications + inline) |
-| `frontend/src/components/agent_factory/AgentJournal.js` | Agent work journal viewer |
-| `frontend/src/components/agent_factory/TeamShareManager.js` | Team sharing configuration UI |
-| `frontend/src/components/chat/AgentMentionAutocomplete.js` | @mention autocomplete dropdown in chat input |
-| `frontend/src/components/sidebar/MyAgentsPanel.js` | Chat sidebar panel listing user's and team-shared agents |
-| `frontend/src/services/agentFactoryService.js` | API service for Agent Factory |
+| Orchestrator entry / routing | `llm-orchestrator/orchestrator/engines/unified_dispatch.py` |
+| Profile execution | `llm-orchestrator/orchestrator/agents/custom_agent_runner.py` |
+| Step execution | `llm-orchestrator/orchestrator/engines/pipeline_executor.py` |
+| Playbook graph | `llm-orchestrator/orchestrator/engines/playbook_graph_builder.py` |
+| Action I/O | `llm-orchestrator/orchestrator/utils/action_io_registry.py`, `tool_type_models.py` |
+| Tool packs | `llm-orchestrator/orchestrator/tools/tool_pack_registry.py`, `llm-orchestrator/orchestrator/tools/__init__.py` |
+| Backend Agent Factory API | `backend/api/agent_factory_api.py`, `backend/services/agent_factory_service.py` |
+| Tool catalog doc | [AGENT_FACTORY_TOOLS.md](./AGENT_FACTORY_TOOLS.md) |
 
 ---
 

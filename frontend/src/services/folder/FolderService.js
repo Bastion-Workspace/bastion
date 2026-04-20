@@ -1,5 +1,8 @@
 import ApiServiceBase from '../base/ApiServiceBase';
 
+/** Must match `FolderContentsBatchRequest.folder_ids` max_length in backend/models/api_models.py */
+const FOLDER_CONTENTS_BATCH_MAX_IDS = 100;
+
 class FolderService extends ApiServiceBase {
   // ===== FOLDER MANAGEMENT METHODS =====
 
@@ -14,6 +17,46 @@ class FolderService extends ApiServiceBase {
     if (offset != null && offset > 0) params.set('offset', String(offset));
     const qs = params.toString();
     return this.get(`/api/folders/${folderId}/contents${qs ? `?${qs}` : ''}`);
+  }
+
+  /**
+   * Load multiple folders (one or more HTTP requests, chunked to API limit).
+   * Returns { contents: { [folderId]: ... }, errors: { ... } } merged across chunks.
+   */
+  getFolderContentsBatch = async (folderIds, limit = 250, offset = 0, maxConcurrent = null) => {
+    const raw = Array.isArray(folderIds) ? folderIds : [];
+    const seen = new Set();
+    const ids = [];
+    for (const x of raw) {
+      if (typeof x !== 'string') continue;
+      const s = x.trim();
+      if (!s || seen.has(s)) continue;
+      seen.add(s);
+      ids.push(s);
+    }
+    if (ids.length === 0) {
+      return { contents: {}, errors: {} };
+    }
+    const merged = { contents: {}, errors: {} };
+    for (let i = 0; i < ids.length; i += FOLDER_CONTENTS_BATCH_MAX_IDS) {
+      const chunk = ids.slice(i, i + FOLDER_CONTENTS_BATCH_MAX_IDS);
+      const body = {
+        folder_ids: chunk,
+        limit,
+        offset,
+      };
+      if (maxConcurrent != null && maxConcurrent > 0) {
+        body.max_concurrent = maxConcurrent;
+      }
+      const part = await this.post('/api/folders/contents/batch', body);
+      if (part?.contents && typeof part.contents === 'object') {
+        Object.assign(merged.contents, part.contents);
+      }
+      if (part?.errors && typeof part.errors === 'object') {
+        Object.assign(merged.errors, part.errors);
+      }
+    }
+    return merged;
   }
 
   createFolder = async (folderData) => {

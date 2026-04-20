@@ -141,8 +141,14 @@ class RSSFeedHealth(BaseModel):
     feed_id: str = Field(..., description="Feed ID")
     is_healthy: bool = Field(..., description="Whether the feed is responding properly")
     last_successful_poll: Optional[datetime] = Field(None, description="Last successful poll timestamp")
-    consecutive_failures: int = Field(default=0, description="Number of consecutive polling failures")
-    average_response_time: Optional[float] = Field(None, description="Average response time in seconds")
+    consecutive_failures: int = Field(
+        default=0,
+        description="Reserved for consecutive polling failures (not populated from storage yet; always 0)",
+    )
+    average_response_time: Optional[float] = Field(
+        default=None,
+        description="Reserved for average poll latency in seconds (not collected yet)",
+    )
     articles_per_day: Optional[float] = Field(None, description="Average articles per day")
     last_article_date: Optional[datetime] = Field(None, description="Date of most recent article")
 

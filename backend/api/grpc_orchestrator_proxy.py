@@ -6,6 +6,7 @@ Phase 5: Integration endpoint for new microservices architecture
 import logging
 import asyncio
 import json
+import uuid
 from typing import AsyncIterator, Dict, Any, Optional
 from datetime import datetime
 
@@ -65,6 +66,7 @@ class OrchesterRequest(BaseModel):
     agent_profile_id: str = None  # Agent Factory: route to custom agent when set
     is_branch_resend: bool = False  # User row already created by branch API
     branch_message_id: str = None  # That user message_id
+    code_workspace_id: str = None  # Code Space UUID for agent rules / device context
 
 
 async def stream_from_grpc_orchestrator(
@@ -78,6 +80,7 @@ async def stream_from_grpc_orchestrator(
     state: Dict[str, Any] = None,
     is_branch_resend: bool = False,
     branch_message_id: str = None,
+    client_run_id: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """
     Stream responses from gRPC orchestrator microservice
@@ -148,9 +151,18 @@ async def stream_from_grpc_orchestrator(
                 agent_type=agent_type,
                 routing_reason=routing_reason,
             )
-            
-            logger.info(f"Forwarding to gRPC orchestrator: {query[:100]}")
-            
+
+            request_persona_ai_name = (grpc_request.persona.ai_name or "").strip()
+
+            run_id = (client_run_id or grpc_request.metadata.get("client_run_id") or "").strip() or str(
+                uuid.uuid4()
+            )
+            if not grpc_request.metadata.get("client_run_id"):
+                grpc_request.metadata["client_run_id"] = run_id
+            yield format_sse_message({"type": "run_started", "run_id": run_id})
+
+            logger.info("Forwarding to gRPC orchestrator run_id=%s query=%s...", run_id, query[:80])
+
             # Agent Factory custom agent runs: skip persistence only when there is no conversation
             # (e.g. scheduled/headless run). When the user is chatting with a custom agent in the UI,
             # we have a conversation_id and must persist so conversation history (and tool_call_summary
@@ -190,112 +202,182 @@ async def stream_from_grpc_orchestrator(
                     logger.warning("Failed to save user message: %s", save_error)
                     # Continue even if message save fails
             
-            # Stream chunks from gRPC service
+            # Stream chunks from gRPC service (poll Redis so Stop cancels without relying on fetch alone)
+            from services.stream_run_cancel import is_stream_cancel_requested
+
             chunk_count = 0
             agent_name_used = None
             accumulated_response = ""
             metadata_received = {}
-            
-            async for chunk in stub.StreamChat(grpc_request):
-                chunk_count += 1
-                
-                # Track agent name from chunks (use the most specific one, not "orchestrator" or "system")
-                if chunk.agent_name and chunk.agent_name not in ["orchestrator", "system"]:
-                    agent_name_used = chunk.agent_name
-                
-                # Capture all metadata from chunks for persistence
-                if chunk.metadata:
-                    metadata_received.update(dict(chunk.metadata))
-                
-                # Accumulate content chunks for saving as last_response
-                if chunk.type == "content" and chunk.message:
-                    accumulated_response += chunk.message
-                
-                # Convert gRPC chunk to SSE format using centralized JSON formatter
-                if chunk.type == "status":
-                    status_sse = {
-                        'type': 'status',
-                        'content': chunk.message,
-                        'agent': chunk.agent_name,
-                        'timestamp': chunk.timestamp
-                    }
-                    if chunk.metadata and chunk.metadata.get("agent_display_name"):
-                        status_sse['agent_display_name'] = chunk.metadata["agent_display_name"]
-                    yield format_sse_message(status_sse)
-                
-                elif chunk.type == "content":
-                    content_sse = {
-                        'type': 'content',
-                        'content': chunk.message,
-                        'agent': chunk.agent_name
-                    }
-                    if chunk.metadata and chunk.metadata.get("agent_display_name"):
-                        content_sse['agent_display_name'] = chunk.metadata["agent_display_name"]
-                    yield format_sse_message(content_sse)
-                
-                elif chunk.type == "permission_request":
-                    try:
-                        payload = json.loads(chunk.message) if chunk.message else {}
-                    except (json.JSONDecodeError, TypeError):
-                        payload = {"prompt": chunk.message or "Approve to continue?"}
-                    sse_msg = {
-                        'type': 'permission_request',
-                        'requires_approval': True,
-                        'step_name': payload.get('step_name', ''),
-                        'prompt': payload.get('prompt', 'Approve to continue?'),
-                        'content': chunk.message,
-                    }
-                    if payload.get('pending_auth'):
-                        sse_msg['pending_auth'] = payload['pending_auth']
-                    yield format_sse_message(sse_msg)
+            user_cancelled = False
+            queue: asyncio.Queue = asyncio.Queue(maxsize=128)
 
-                elif chunk.type == "complete":
-                    yield format_sse_message({
-                        'type': 'complete',
-                        'content': chunk.message,
-                        'agent': chunk.agent_name,
-                        'metadata': dict(chunk.metadata) if chunk.metadata else {}
-                    })
-                
-                elif chunk.type == "error":
-                    yield format_sse_message({
-                        'type': 'error',
-                        'content': chunk.message,
-                        'message': chunk.message,
-                        'agent': chunk.agent_name
-                    })
-                
-                elif chunk.type == "title":
-                    # Forward title chunks immediately so frontend can update UI right away
-                    title_updated = True
-                    yield format_sse_message({
-                        'type': 'title',
-                        'message': chunk.message,
-                        'timestamp': chunk.timestamp,
-                        'agent': chunk.agent_name
-                    })
-                    logger.info(f"🔤 Forwarded title chunk to frontend: {chunk.message}")
-                
-                elif chunk.type == "notification":
-                    # Forward notification chunks for spontaneous alerts and status messages
-                    notification_metadata = dict(chunk.metadata) if chunk.metadata else {}
-                    browser_notify = notification_metadata.get('browser_notify', 'false').lower() == 'true'
-                    yield format_sse_message({
-                        'type': 'notification',
-                        'message': chunk.message,
-                        'severity': notification_metadata.get('severity', 'info'),  # info, success, warning, error
-                        'temporary': notification_metadata.get('temporary', 'false').lower() == 'true',
-                        'timestamp': chunk.timestamp,
-                        'agent': chunk.agent_name,
-                        'browser_notify': browser_notify,  # Allow agents to explicitly request browser notifications
-                        'metadata': notification_metadata  # Forward full metadata for extensibility
-                    })
-                    logger.info(f"📢 Forwarded notification chunk to frontend: {chunk.message} (severity: {notification_metadata.get('severity', 'info')})")
-                
-                # Flush immediately
-                await asyncio.sleep(0)
-            
-            logger.info(f"Received {chunk_count} chunks from gRPC orchestrator")
+            async def _grpc_pump():
+                try:
+                    async for chunk in stub.StreamChat(grpc_request):
+                        await queue.put(("c", chunk))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    await queue.put(("e", exc))
+                finally:
+                    await queue.put(("x", None))
+
+            pump_task = asyncio.create_task(_grpc_pump())
+            pump_exc = None
+            try:
+                while True:
+                    try:
+                        kind, payload = await asyncio.wait_for(queue.get(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        if await is_stream_cancel_requested(run_id):
+                            user_cancelled = True
+                            pump_task.cancel()
+                            try:
+                                await pump_task
+                            except asyncio.CancelledError:
+                                pass
+                            yield format_sse_message(
+                                {"type": "cancelled", "message": "Stopped by user", "run_id": run_id}
+                            )
+                            break
+                        continue
+                    if kind == "x":
+                        break
+                    if kind == "e":
+                        pump_exc = payload
+                        break
+                    chunk = payload
+                    chunk_count += 1
+
+                    if chunk.agent_name and chunk.agent_name not in ["orchestrator", "system"]:
+                        agent_name_used = chunk.agent_name
+
+                    if chunk.metadata:
+                        metadata_received.update(dict(chunk.metadata))
+
+                    if chunk.type == "content" and chunk.message:
+                        accumulated_response += chunk.message
+
+                    if chunk.type == "status":
+                        status_sse = {
+                            "type": "status",
+                            "content": chunk.message,
+                            "agent": chunk.agent_name,
+                            "timestamp": chunk.timestamp,
+                        }
+                        if chunk.metadata and chunk.metadata.get("agent_display_name"):
+                            status_sse["agent_display_name"] = chunk.metadata["agent_display_name"]
+                        pan = (chunk.metadata or {}).get("persona_ai_name") if chunk.metadata else None
+                        pan = (pan or "").strip() or None
+                        if not pan and request_persona_ai_name:
+                            pan = request_persona_ai_name
+                        if pan:
+                            status_sse["persona_ai_name"] = pan
+                        yield format_sse_message(status_sse)
+
+                    elif chunk.type == "content":
+                        content_sse = {
+                            "type": "content",
+                            "content": chunk.message,
+                            "agent": chunk.agent_name,
+                        }
+                        if chunk.metadata and chunk.metadata.get("agent_display_name"):
+                            content_sse["agent_display_name"] = chunk.metadata["agent_display_name"]
+                        pan_c = (chunk.metadata or {}).get("persona_ai_name") if chunk.metadata else None
+                        pan_c = (pan_c or "").strip() or None
+                        if not pan_c and request_persona_ai_name:
+                            pan_c = request_persona_ai_name
+                        if pan_c:
+                            content_sse["persona_ai_name"] = pan_c
+                        yield format_sse_message(content_sse)
+
+                    elif chunk.type == "permission_request":
+                        try:
+                            payload = json.loads(chunk.message) if chunk.message else {}
+                        except (json.JSONDecodeError, TypeError):
+                            payload = {"prompt": chunk.message or "Approve to continue?"}
+                        sse_msg = {
+                            "type": "permission_request",
+                            "requires_approval": True,
+                            "step_name": payload.get("step_name", ""),
+                            "prompt": payload.get("prompt", "Approve to continue?"),
+                            "content": chunk.message,
+                        }
+                        if payload.get("pending_auth"):
+                            sse_msg["pending_auth"] = payload["pending_auth"]
+                        yield format_sse_message(sse_msg)
+
+                    elif chunk.type == "complete":
+                        yield format_sse_message(
+                            {
+                                "type": "complete",
+                                "content": chunk.message,
+                                "agent": chunk.agent_name,
+                                "metadata": dict(chunk.metadata) if chunk.metadata else {},
+                            }
+                        )
+
+                    elif chunk.type == "error":
+                        yield format_sse_message(
+                            {
+                                "type": "error",
+                                "content": chunk.message,
+                                "message": chunk.message,
+                                "agent": chunk.agent_name,
+                            }
+                        )
+
+                    elif chunk.type == "title":
+                        title_updated = True
+                        yield format_sse_message(
+                            {
+                                "type": "title",
+                                "message": chunk.message,
+                                "timestamp": chunk.timestamp,
+                                "agent": chunk.agent_name,
+                            }
+                        )
+                        logger.info("Forwarded title chunk to frontend: %s", chunk.message)
+
+                    elif chunk.type == "notification":
+                        notification_metadata = dict(chunk.metadata) if chunk.metadata else {}
+                        browser_notify = notification_metadata.get("browser_notify", "false").lower() == "true"
+                        yield format_sse_message(
+                            {
+                                "type": "notification",
+                                "message": chunk.message,
+                                "severity": notification_metadata.get("severity", "info"),
+                                "temporary": notification_metadata.get("temporary", "false").lower() == "true",
+                                "timestamp": chunk.timestamp,
+                                "agent": chunk.agent_name,
+                                "browser_notify": browser_notify,
+                                "metadata": notification_metadata,
+                            }
+                        )
+                        logger.info(
+                            "Forwarded notification chunk: %s",
+                            chunk.message,
+                        )
+
+                    await asyncio.sleep(0)
+            finally:
+                if not pump_task.done():
+                    pump_task.cancel()
+                    try:
+                        await pump_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+            if pump_exc is not None:
+                raise pump_exc
+
+            logger.info(
+                "gRPC stream finished run_id=%s chunks=%s user_cancelled=%s",
+                run_id,
+                chunk_count,
+                user_cancelled,
+            )
             
             # Save assistant response to conversation AFTER streaming completes
             if accumulated_response and not skip_persistence:
@@ -321,6 +403,8 @@ async def stream_from_grpc_orchestrator(
                         "chunk_count": chunk_count,
                         **safe_meta,
                     }
+                    if user_cancelled:
+                        metadata["stream_cancelled"] = True
 
                     message_branch_id = None
                     if is_branch_resend and branch_message_id and str(branch_message_id).strip():
@@ -339,7 +423,49 @@ async def stream_from_grpc_orchestrator(
                         message_branch_id=message_branch_id,
                     )
                     logger.info(f"✅ Saved assistant response to conversation {conversation_id} (agent: {agent_name_used or 'unknown'})")
-                    
+
+                    title_for_notify = None
+                    try:
+                        conv_row = await conversation_service.get_conversation(conversation_id, user_id)
+                        if conv_row:
+                            title_for_notify = conv_row.get("title")
+                    except Exception:
+                        pass
+                    from services.chat_completion_notifier import (
+                        notify_chat_reply_ready,
+                        resolve_display_agent_name,
+                    )
+
+                    display_agent = await resolve_display_agent_name(
+                        user_id, metadata_received, agent_name_used
+                    )
+                    await notify_chat_reply_ready(
+                        user_id,
+                        conversation_id,
+                        response_text=accumulated_response,
+                        agent_name=display_agent,
+                        conversation_title=title_for_notify,
+                    )
+
+                    # Record skill execution metrics (fire-and-forget)
+                    _raw_skill_events = metadata_received.get("skill_execution_events")
+                    if _raw_skill_events:
+                        try:
+                            import json as _json
+                            _events = _json.loads(_raw_skill_events) if isinstance(_raw_skill_events, str) else _raw_skill_events
+                            if isinstance(_events, list) and _events:
+                                from services.agent_skills_service import record_skill_execution_events
+                                _profile_id = metadata_received.get("agent_profile_id")
+                                _inserted = await record_skill_execution_events(
+                                    events=_events,
+                                    user_id=user_id,
+                                    agent_profile_id=_profile_id,
+                                )
+                                if _inserted:
+                                    logger.info("Recorded %d skill execution event(s)", _inserted)
+                        except Exception as _skill_evt_err:
+                            logger.debug("Skill execution event recording skipped: %s", _skill_evt_err)
+
                     # Save agent routing metadata to backend DB (source of truth)
                     if agent_name_used:
                         try:
@@ -352,6 +478,32 @@ async def stream_from_grpc_orchestrator(
                                     clear_agent_profile_id=True,
                                 )
                                 logger.info("Saved agent metadata for line dispatch session (no sticky CEO profile)")
+
+                                # Persist @team chat as a durable directive in the team timeline and
+                                # optionally wake an idle team by enqueuing an ad-hoc heartbeat.
+                                try:
+                                    _line_id = metadata_received.get("line_id") or metadata_received.get("team_id")
+                                    _ceo_id = metadata_received.get("agent_profile_id") or metadata_received.get(
+                                        "ceo_profile_id"
+                                    )
+                                    if _line_id and (query or "").strip():
+                                        from services.celery_tasks.chat_directive_task import (
+                                            post_chat_directive_to_timeline,
+                                        )
+
+                                        post_chat_directive_to_timeline.apply_async(
+                                            kwargs={
+                                                "line_id": str(_line_id),
+                                                "user_id": user_id,
+                                                "user_message": query,
+                                                "leader_response": (accumulated_response or "")[:2000],
+                                                "conversation_id": conversation_id or "",
+                                                "ceo_profile_id": str(_ceo_id or ""),
+                                            },
+                                            countdown=2,
+                                        )
+                                except Exception as directive_err:
+                                    logger.debug("Line dispatch directive injection skipped: %s", directive_err)
                             else:
                                 agent_profile_id_saved = metadata_received.get("agent_profile_id")
                                 await conversation_service.update_agent_metadata(
@@ -459,10 +611,14 @@ async def stream_orchestrator_grpc(
             "locked_agent": request.locked_agent,
             "base_checkpoint_id": request.base_checkpoint_id,
             "agent_profile_id": request.agent_profile_id,
+            "code_workspace_id": request.code_workspace_id,
         }
 
         # Remove None values
         request_context = {k: v for k, v in request_context.items() if v is not None}
+
+        stream_run_id = str(uuid.uuid4())
+        request_context["client_run_id"] = stream_run_id
 
         # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
         # State is automatically retrieved by the gRPC service
@@ -480,12 +636,14 @@ async def stream_orchestrator_grpc(
                 state=conversation_state,
                 is_branch_resend=bool(getattr(request, "is_branch_resend", False)),
                 branch_message_id=getattr(request, "branch_message_id", None),
+                client_run_id=stream_run_id,
             ),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
+                "X-Accel-Buffering": "no",
+                "X-Run-Id": stream_run_id,
             }
         )
     

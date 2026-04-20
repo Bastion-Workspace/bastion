@@ -20,6 +20,10 @@ At the top of the document view you get a **toolbar** with actions that depend o
 
 Other toolbar items may include metadata, folder info, and type-specific actions (e.g. org refile, archive, tag dialogs for Org files).
 
+### Encrypted documents
+
+For **encrypted** Markdown, text, or Org files, the toolbar shows **Encrypted (unlocked)** while you have an active session, plus **Lock** (end session) and a **help** icon that opens the **Document encryption** topic. Encrypted files do not use real-time collaboration; saving requires a valid unlock session. See **Document encryption** in Help for sessions, multiple tabs, and search behavior.
+
 ---
 
 ## AI edit proposals
@@ -31,6 +35,19 @@ Agents can suggest **edits** to the open document (e.g. from the writing or fict
 - **Reject** — Dismiss the proposal. The document is unchanged and the proposal is removed (and persisted as rejected when supported).
 
 Proposals can come from the current conversation (streaming) or from pending proposals loaded when you open the document. You can have multiple proposals; accept or reject each one. Applied edits create a new **version** in version history.
+
+---
+
+## Collaborative editing
+
+Shared Markdown documents can run in **collaborative mode** when your instance enables it:
+
+- Multiple users with write access can edit the same `.md` document at the same time.
+- Presence is shown in the editor while collaborators are connected.
+- Changes sync live across participants.
+- If you had unsaved local edits from a previous session, the editor can prompt you to apply them to the collaborative document.
+
+For documents not in collaborative mode, edit access uses a document lock model (one writer at a time). If someone else holds the lock, you can still view but not edit until the lock is released.
 
 ---
 
@@ -79,6 +96,7 @@ Export options may vary by file type (e.g. PDF/EPUB for Markdown; raw download f
 ## Summary
 
 - The **toolbar** gives you edit mode, version history, read aloud, and export/download.
+- **Collaborative editing** is available for eligible shared Markdown docs; otherwise editing uses a lock.
 - **AI edit proposals** let you **Apply** or **Reject** agent-suggested edits; applied edits create versions.
 - **Version history** lists versions; you can **View**, **Diff with current**, and **Rollback**.
 - **Read aloud** and **Export** (PDF, EPUB, download) are in the toolbar. Different file types (PDF, DOCX, EML, audio, images) open in the appropriate viewer.

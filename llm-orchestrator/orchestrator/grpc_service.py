@@ -13,12 +13,18 @@ import grpc
 from protos import orchestrator_pb2, orchestrator_pb2_grpc
 from langchain_core.messages import HumanMessage, AIMessage
 
-try:
-    from config.settings import settings
-except ImportError:
-    settings = None
-
 logger = logging.getLogger(__name__)
+
+
+def _merge_request_persona_ai_name(
+    merged_metadata: Dict[str, Any], request_metadata: Dict[str, Any]
+) -> None:
+    """If the route did not attach persona_ai_name, use the request-level persona (user default)."""
+    p = request_metadata.get("persona") or {}
+    if isinstance(p, dict):
+        pan = (p.get("ai_name") or "").strip()
+        if pan:
+            merged_metadata.setdefault("persona_ai_name", pan)
 
 
 # In-memory cache for conversation-level metadata (primary_agent_selected)
@@ -223,6 +229,17 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             shared_memory["editor_preference"] = "prefer"
             logger.debug(f"📝 EDITOR PREFERENCE: Defaulting to 'prefer' (not provided in request)")
 
+        # Extract active chat artifact context (artifact drawer)
+        if request.HasField("active_artifact"):
+            aa = request.active_artifact
+            if aa.code:
+                shared_memory["active_artifact"] = {
+                    "artifact_type": aa.artifact_type,
+                    "title": aa.title,
+                    "code": aa.code,
+                    "language": aa.language,
+                }
+
         # Extract active data workspace context
         if request.HasField("active_data_workspace"):
             dw = request.active_data_workspace
@@ -382,20 +399,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             }
         
         return context
-    
-    def _is_first_user_message(self, conversation_history) -> bool:
-        """
-        Check if this is the first user message in the conversation
-        
-        Args:
-            conversation_history: List of conversation messages from request
-            
-        Returns:
-            True if this is the first user message, False otherwise
-        """
-        # Count user messages in history (current message is not in history yet)
-        user_message_count = sum(1 for msg in conversation_history if msg.role == "user")
-        return user_message_count == 0
 
     async def _generate_and_yield_title(
         self,
@@ -438,123 +441,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         except Exception as e:
             logger.warning("Title generation failed: %s", e)
             return None
-    
-    def _extract_response_text(self, result: Any) -> str:
-        """
-        Extract response text from agent result
-        
-        Handles different response formats from different agents.
-        Works with both dict and string results.
-        
-        Args:
-            result: Agent result (dict, string, or other)
-            
-        Returns:
-            Response text string
-        """
-        # If result is not a dict, convert to string
-        if not isinstance(result, dict):
-            return str(result)
-        
-        # Try response field first (for agents like dictionary that structure response in response.message)
-        response = result.get("response", "")
-        if isinstance(response, dict):
-            # Check for message field first (dictionary agent format)
-            if "message" in response:
-                return response.get("message", "")
-            # Fallback to response field (other agents)
-            if "response" in response:
-                return response.get("response", "")
-        if isinstance(response, str):
-            return response
-        
-        # Try messages (for agents that use messages as primary response)
-        agent_messages = result.get("messages", [])
-        if agent_messages:
-            last_message = agent_messages[-1]
-            if hasattr(last_message, 'content'):
-                return last_message.content
-            return str(last_message)
-        
-        # Fallback
-        return "Response generated"
-    
-    def _is_standard_format(self, result: Any) -> bool:
-        """
-        Check if result is in standard AgentResponse format
-        
-        Args:
-            result: Agent result to check
-            
-        Returns:
-            True if result matches standard format, False otherwise
-        """
-        if not isinstance(result, dict):
-            return False
-        
-        # Check for required fields
-        required_fields = ["response", "task_status", "agent_type", "timestamp"]
-        return all(field in result for field in required_fields)
-    
-    def _extract_response_unified(self, result: Any, agent_type: str = "unknown") -> Dict[str, Any]:
-        """
-        Unified response extraction supporting both old and new formats
-        
-        This method normalizes agent responses into a standard structure.
-        It first checks if the result is already in standard format, then
-        falls back to legacy extraction patterns.
-        
-        Args:
-            result: Agent result (dict, string, or other)
-            agent_type: Agent identifier (for fallback when not in result)
-            
-        Returns:
-            Normalized response dictionary with standard fields
-        """
-        from orchestrator.models.agent_response_contract import AgentResponse
-        
-        # If result is already in standard format, use it directly
-        if self._is_standard_format(result):
-            return result
-        
-        # Try to create AgentResponse from legacy format
-        if isinstance(result, dict):
-            try:
-                # Use the from_legacy_format helper
-                standard_response = AgentResponse.from_legacy_format(result, agent_type)
-                return standard_response.dict(exclude_none=True)
-            except Exception as e:
-                logger.warning(f"Failed to normalize response to standard format: {e}")
-        
-        # Fallback: Manual extraction for edge cases
-        response_text = self._extract_response_text(result)
-        
-        # Extract task_status
-        task_status = result.get("task_status", "complete") if isinstance(result, dict) else "complete"
-        
-        # Extract agent_type
-        extracted_agent_type = (
-            result.get("agent_type") or
-            result.get("agent_results", {}).get("agent_type") if isinstance(result, dict) else
-            agent_type
-        )
-        
-        # Extract timestamp
-        from datetime import datetime
-        timestamp = (
-            result.get("timestamp") or
-            datetime.now().isoformat()
-        )
-        
-        # Extract optional fields (editor_operations/manuscript_edit removed - DB proposal path only)
-        return {
-            "response": response_text,
-            "task_status": task_status,
-            "agent_type": extracted_agent_type,
-            "timestamp": timestamp,
-            # Preserve any other fields from original result
-            **(result if isinstance(result, dict) else {})
-        }
     
     async def _load_checkpoint_shared_memory(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1028,6 +914,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
                     )
                     merged_metadata["duration_ms"] = str(duration_ms)
+                    _merge_request_persona_ai_name(merged_metadata, metadata)
                     yield orchestrator_pb2.ChatChunk(
                         type=pending_complete_chunk.type,
                         message=pending_complete_chunk.message,
@@ -1100,6 +987,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
                     )
                     merged_metadata["duration_ms"] = str(duration_ms)
+                    _merge_request_persona_ai_name(merged_metadata, metadata)
                     yield orchestrator_pb2.ChatChunk(
                         type=pending_complete_chunk.type,
                         message=pending_complete_chunk.message,
@@ -1213,6 +1101,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                             )
                             merged_metadata["duration_ms"] = str(duration_ms)
                             merged_metadata["skills_used"] = json.dumps([current_discovered_route.name])
+                            _merge_request_persona_ai_name(merged_metadata, metadata)
                             yield orchestrator_pb2.ChatChunk(
                                 type=pending_complete_chunk.type,
                                 message=pending_complete_chunk.message,

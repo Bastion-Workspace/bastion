@@ -383,7 +383,7 @@ Ingestion date: {metadata['ingestion_date']}
         try:
             parsed = urlparse(url)
             return bool(parsed.scheme and parsed.netloc)
-        except:
+        except Exception:
             return False
     
     def get_tool_definition(self) -> Dict[str, Any]:

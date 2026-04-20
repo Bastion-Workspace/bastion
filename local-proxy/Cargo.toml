@@ -29,6 +29,8 @@ async-trait = "0.1"
 arboard = "3"
 sysinfo = "0.32"
 open = "5"
+regex = "1"
+git2 = "0.19"
 
 [target.'cfg(not(windows))'.dependencies]
 notify-rust = "4"

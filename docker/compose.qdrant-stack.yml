@@ -1,0 +1,17 @@
+# Optional single-node Qdrant for development. Merge with docker-compose.example.yml.
+# See docker/README.md
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.14.1
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - bastion_qdrant_storage:/qdrant/storage
+    networks:
+      - default
+    restart: unless-stopped
+
+volumes:
+  bastion_qdrant_storage:
+    driver: local

@@ -1,15 +1,17 @@
 """
-External tool packs: email, calendar (per-connection), and MCP servers (dynamic).
+External tool packs: email, calendar, GitHub (per-connection OAuth), and MCP servers (dynamic).
 
 Playbook steps use tool_packs entries with optional `connections` and/or pack names like mcp:<id>.
 """
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+
+from orchestrator.engines.provider_capability_registry import get_all_capability_keys
 
 @dataclass(frozen=True)
 class ExternalPackType:
-    """Metadata for a static external pack (email, calendar)."""
+    """Metadata for a static external pack (email, calendar, github)."""
 
     name: str
     description: str
@@ -34,6 +36,20 @@ EXTERNAL_PACK_TYPES: Dict[str, ExternalPackType] = {
         connection_source="external_connections",
         connection_filter={"connection_type": "calendar"},
     ),
+    "github": ExternalPackType(
+        name="github",
+        description="GitHub REST tools scoped to OAuth connections",
+        requires_connection=True,
+        connection_source="external_connections",
+        connection_filter={"connection_type": "code_platform", "provider": "github"},
+    ),
+    "gitea": ExternalPackType(
+        name="gitea",
+        description="Gitea REST tools scoped to PAT connections",
+        requires_connection=True,
+        connection_source="external_connections",
+        connection_filter={"connection_type": "code_platform", "provider": "gitea"},
+    ),
 }
 
 
@@ -41,7 +57,7 @@ def split_pack_entries(
     pack_entries: List[Any],
 ) -> Tuple[List[Union[str, Dict[str, Any]]], List[Union[str, Dict[str, Any]]]]:
     """
-    Split tool_packs into builtin-only entries vs external (email/calendar with connections, mcp:*).
+    Split tool_packs into builtin-only entries vs external (email/calendar/contacts/M365 packs/github/gitea with connections, mcp:*).
     """
     builtin: List[Union[str, Dict[str, Any]]] = []
     external: List[Union[str, Dict[str, Any]]] = []
@@ -61,7 +77,7 @@ def split_pack_entries(
                 conns = []
             if p_s.startswith("mcp:"):
                 external.append(entry)
-            elif p_s in ("email", "calendar") and conns:
+            elif p_s in _EXTERNAL_CAPABILITY_PACK_KEYS and conns:
                 external.append(entry)
             else:
                 builtin.append(entry)
@@ -70,13 +86,41 @@ def split_pack_entries(
     return builtin, external
 
 
+_EXTERNAL_CAPABILITY_PACK_KEYS: frozenset = get_all_capability_keys()
+
+
+def _allowed_connection_ids_for_external_pack(
+    pack_s: str,
+    allowed_cmap: Optional[Dict[str, List[Dict[str, Any]]]],
+) -> Optional[Set[int]]:
+    """
+    When allowed_cmap is set, return connection/server ids permitted for this pack.
+    None means do not filter (backward compatible).
+    """
+    if allowed_cmap is None:
+        return None
+    if pack_s in _EXTERNAL_CAPABILITY_PACK_KEYS:
+        return {
+            int(e["id"])
+            for e in (allowed_cmap.get(pack_s) or [])
+            if isinstance(e, dict) and e.get("id") is not None
+        }
+    if pack_s.startswith("mcp:"):
+        mcp_entries = allowed_cmap.get("mcp")
+        if not mcp_entries:
+            return None
+        return {int(e["id"]) for e in mcp_entries if isinstance(e, dict) and e.get("id") is not None}
+    return set()
+
+
 async def resolve_external_pack_tools(
     pack_entries: List[Union[str, Dict[str, Any]]],
     user_id: str,
+    allowed_cmap: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> List[str]:
     """
     Expand external pack entries to concrete tool name strings:
-    email:<cid>:<registry_tool>, calendar:<cid>:<registry_tool>, mcp:<sid>:<tool_name>.
+    email:/calendar:/contacts:/todo:/files:/onenote:/planner:<cid>:<registry_tool>, github:/gitea:…, mcp:<sid>:<tool_name>.
     """
     from orchestrator.backend_tool_client import get_backend_tool_client
     from orchestrator.tools.tool_pack_registry import TOOL_PACKS, _tool_name_to_registry_name
@@ -98,6 +142,9 @@ async def resolve_external_pack_tools(
                 try:
                     sid = int(rest)
                 except ValueError:
+                    continue
+                mcp_allowed = _allowed_connection_ids_for_external_pack("mcp:", allowed_cmap)
+                if mcp_allowed is not None and sid not in mcp_allowed:
                     continue
                 names = await client.get_mcp_server_tool_names(user_id, sid)
                 for tn in names:
@@ -125,12 +172,15 @@ async def resolve_external_pack_tools(
                 sid = int(pack_s.split(":", 1)[1])
             except (IndexError, ValueError):
                 continue
+            mcp_allowed = _allowed_connection_ids_for_external_pack("mcp:", allowed_cmap)
+            if mcp_allowed is not None and sid not in mcp_allowed:
+                continue
             names = await client.get_mcp_server_tool_names(user_id, sid)
             for tn in names:
                 add(f"mcp:{sid}:{tn}")
             continue
 
-        if pack_s in ("email", "calendar") and conns_int:
+        if pack_s in _EXTERNAL_CAPABILITY_PACK_KEYS and conns_int:
             pdef = TOOL_PACKS.get(pack_s)
             if not pdef:
                 continue
@@ -139,7 +189,10 @@ async def resolve_external_pack_tools(
             else:
                 tools_to_add = pdef.tools
             reg_names = [_tool_name_to_registry_name(t) for t in tools_to_add]
+            pack_allowed = _allowed_connection_ids_for_external_pack(pack_s, allowed_cmap)
             for cid in conns_int:
+                if pack_allowed is not None and cid not in pack_allowed:
+                    continue
                 for reg in reg_names:
                     add(f"{pack_s}:{cid}:{reg}")
 

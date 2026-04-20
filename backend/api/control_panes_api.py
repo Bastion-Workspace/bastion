@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from models.api_models import AuthenticatedUserResponse
 from utils.auth_middleware import get_current_user
@@ -27,7 +27,11 @@ class ControlPaneCreate(BaseModel):
     """Request body for creating a control pane."""
     name: str = Field(..., min_length=1, max_length=255)
     icon: str = Field(default="Tune", max_length=100)
-    connector_id: str = Field(..., description="Data source connector UUID")
+    pane_type: str = Field(default="connector", description="connector | artifact")
+    connector_id: Optional[str] = Field(None, description="Data source connector UUID (required for connector panes)")
+    artifact_id: Optional[str] = Field(None, description="Saved artifact UUID (required for artifact panes)")
+    artifact_popover_width: Optional[int] = Field(None, ge=200, le=1200, description="Popover width in px for artifact panes")
+    artifact_popover_height: Optional[int] = Field(None, ge=120, le=1600, description="Popover height in px for artifact panes")
     credentials_encrypted: Optional[Dict[str, Any]] = Field(default_factory=dict)
     connection_id: Optional[int] = Field(None, description="External connection ID for OAuth")
     controls: List[Dict[str, Any]] = Field(default_factory=list)
@@ -49,12 +53,30 @@ class ControlPaneCreate(BaseModel):
                 return {}
         return {}
 
+    @model_validator(mode="after")
+    def _validate_pane_type(self) -> "ControlPaneCreate":
+        pt = (self.pane_type or "connector").strip().lower()
+        if pt not in ("connector", "artifact"):
+            raise ValueError("pane_type must be connector or artifact")
+        object.__setattr__(self, "pane_type", pt)
+        if pt == "artifact":
+            if not self.artifact_id or not str(self.artifact_id).strip():
+                raise ValueError("artifact_id is required for artifact panes")
+        else:
+            if not self.connector_id or not str(self.connector_id).strip():
+                raise ValueError("connector_id is required for connector panes")
+        return self
+
 
 class ControlPaneUpdate(BaseModel):
     """Request body for partial update of a control pane."""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     icon: Optional[str] = Field(None, max_length=100)
+    pane_type: Optional[str] = None
     connector_id: Optional[str] = None
+    artifact_id: Optional[str] = None
+    artifact_popover_width: Optional[int] = Field(None, ge=200, le=1200)
+    artifact_popover_height: Optional[int] = Field(None, ge=120, le=1600)
     credentials_encrypted: Optional[Dict[str, Any]] = None
     connection_id: Optional[int] = None
     controls: Optional[List[Dict[str, Any]]] = None
@@ -113,12 +135,18 @@ def _row_to_pane(row: Optional[Dict[str, Any]], connector_name: Optional[str] = 
             controls = json.loads(controls)
         except json.JSONDecodeError:
             controls = []
+    cid = row.get("connector_id")
+    aid = row.get("artifact_id")
     out = {
         "id": str(row["id"]),
         "user_id": row.get("user_id"),
         "name": row.get("name", ""),
         "icon": row.get("icon", "Tune"),
-        "connector_id": str(row["connector_id"]),
+        "pane_type": row.get("pane_type") or "connector",
+        "connector_id": str(cid) if cid else None,
+        "artifact_id": str(aid) if aid else None,
+        "artifact_popover_width": row.get("artifact_popover_width"),
+        "artifact_popover_height": row.get("artifact_popover_height"),
         "credentials_encrypted": row.get("credentials_encrypted") or {},
         "connection_id": row.get("connection_id"),
         "controls": controls or [],
@@ -145,9 +173,10 @@ async def list_control_panes(
 
     rows = await fetch_all(
         """
-        SELECT p.id, p.user_id, p.name, p.icon, p.connector_id, p.credentials_encrypted,
-               p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval, p.created_at, p.updated_at,
-               c.name AS connector_name
+        SELECT p.id, p.user_id, p.name, p.icon, p.pane_type, p.connector_id, p.artifact_id,
+               p.artifact_popover_width, p.artifact_popover_height,
+               p.credentials_encrypted, p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval,
+               p.created_at, p.updated_at, c.name AS connector_name
         FROM user_control_panes p
         LEFT JOIN data_source_connectors c ON c.id = p.connector_id
         WHERE p.user_id = $1
@@ -229,9 +258,10 @@ async def get_control_pane(
 
     row = await fetch_one(
         """
-        SELECT p.id, p.user_id, p.name, p.icon, p.connector_id, p.credentials_encrypted,
-               p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval, p.created_at, p.updated_at,
-               c.name AS connector_name
+        SELECT p.id, p.user_id, p.name, p.icon, p.pane_type, p.connector_id, p.artifact_id,
+               p.artifact_popover_width, p.artifact_popover_height,
+               p.credentials_encrypted, p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval,
+               p.created_at, p.updated_at, c.name AS connector_name
         FROM user_control_panes p
         LEFT JOIN data_source_connectors c ON c.id = p.connector_id
         WHERE p.id = $1 AND p.user_id = $2
@@ -252,44 +282,77 @@ async def create_control_pane(
     """Create a new control pane."""
     from services.database_manager.database_helpers import fetch_one, fetch_value
 
-    # Ensure connector exists and is owned by user (or is template)
-    conn = await fetch_one(
-        "SELECT id FROM data_source_connectors WHERE id = $1 AND (user_id = $2 OR is_template = true)",
-        body.connector_id,
-        current_user.user_id,
-    )
-    if not conn:
-        raise HTTPException(status_code=404, detail="Connector not found")
-
+    pane_type = body.pane_type or "connector"
     credentials = body.credentials_encrypted or {}
     controls = body.controls or []
     controls_json = json.dumps(controls) if controls else "[]"
     credentials_json = json.dumps(credentials) if credentials else "{}"
 
-    from services.database_manager.database_helpers import fetch_value
-    new_id = await fetch_value(
-        """
-        INSERT INTO user_control_panes
-        (user_id, name, icon, connector_id, credentials_encrypted, connection_id, controls, is_visible, sort_order, refresh_interval)
-        VALUES ($1, $2, $3, $4::uuid, $5::jsonb, $6, $7::jsonb, $8, $9, $10)
-        RETURNING id
-        """,
-        current_user.user_id,
-        body.name,
-        body.icon,
-        body.connector_id,
-        credentials_json,
-        body.connection_id,
-        controls_json,
-        body.is_visible,
-        body.sort_order,
-        body.refresh_interval,
-    )
+    if pane_type == "artifact":
+        art = await fetch_one(
+            "SELECT id FROM saved_artifacts WHERE id = $1::uuid AND user_id = $2",
+            body.artifact_id,
+            current_user.user_id,
+        )
+        if not art:
+            raise HTTPException(status_code=404, detail="Saved artifact not found")
+        aw = body.artifact_popover_width
+        ah = body.artifact_popover_height
+        new_id = await fetch_value(
+            """
+            INSERT INTO user_control_panes
+            (user_id, name, icon, pane_type, connector_id, artifact_id, artifact_popover_width, artifact_popover_height,
+             credentials_encrypted, connection_id, controls, is_visible, sort_order, refresh_interval)
+            VALUES ($1, $2, $3, $4, NULL, $5::uuid, $6, $7, $8::jsonb, NULL, '[]'::jsonb, $9, $10, $11)
+            RETURNING id
+            """,
+            current_user.user_id,
+            body.name,
+            body.icon,
+            pane_type,
+            body.artifact_id,
+            aw,
+            ah,
+            credentials_json,
+            body.is_visible,
+            body.sort_order,
+            body.refresh_interval,
+        )
+    else:
+        conn = await fetch_one(
+            "SELECT id FROM data_source_connectors WHERE id = $1 AND (user_id = $2 OR is_template = true)",
+            body.connector_id,
+            current_user.user_id,
+        )
+        if not conn:
+            raise HTTPException(status_code=404, detail="Connector not found")
+
+        new_id = await fetch_value(
+            """
+            INSERT INTO user_control_panes
+            (user_id, name, icon, pane_type, connector_id, artifact_id, artifact_popover_width, artifact_popover_height,
+             credentials_encrypted, connection_id, controls, is_visible, sort_order, refresh_interval)
+            VALUES ($1, $2, $3, $4, $5::uuid, NULL, NULL, NULL, $6::jsonb, $7, $8::jsonb, $9, $10, $11)
+            RETURNING id
+            """,
+            current_user.user_id,
+            body.name,
+            body.icon,
+            pane_type,
+            body.connector_id,
+            credentials_json,
+            body.connection_id,
+            controls_json,
+            body.is_visible,
+            body.sort_order,
+            body.refresh_interval,
+        )
     row = await fetch_one(
         """
-        SELECT p.id, p.user_id, p.name, p.icon, p.connector_id, p.credentials_encrypted,
-               p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval, p.created_at, p.updated_at,
-               c.name AS connector_name
+        SELECT p.id, p.user_id, p.name, p.icon, p.pane_type, p.connector_id, p.artifact_id,
+               p.artifact_popover_width, p.artifact_popover_height,
+               p.credentials_encrypted, p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval,
+               p.created_at, p.updated_at, c.name AS connector_name
         FROM user_control_panes p
         LEFT JOIN data_source_connectors c ON c.id = p.connector_id
         WHERE p.id = $1
@@ -335,6 +398,15 @@ async def update_control_pane(
         if not conn:
             raise HTTPException(status_code=404, detail="Connector not found")
 
+    if body.artifact_id is not None:
+        art = await fetch_one(
+            "SELECT id FROM saved_artifacts WHERE id = $1::uuid AND user_id = $2",
+            body.artifact_id,
+            current_user.user_id,
+        )
+        if not art:
+            raise HTTPException(status_code=404, detail="Saved artifact not found")
+
     updates = []
     args = []
     idx = 1
@@ -346,9 +418,28 @@ async def update_control_pane(
         updates.append(f"icon = ${idx}")
         args.append(body.icon)
         idx += 1
+    if body.pane_type is not None:
+        pt = body.pane_type.strip().lower()
+        if pt not in ("connector", "artifact"):
+            raise HTTPException(status_code=400, detail="pane_type must be connector or artifact")
+        updates.append(f"pane_type = ${idx}")
+        args.append(pt)
+        idx += 1
     if body.connector_id is not None:
         updates.append(f"connector_id = ${idx}::uuid")
         args.append(body.connector_id)
+        idx += 1
+    if body.artifact_id is not None:
+        updates.append(f"artifact_id = ${idx}::uuid")
+        args.append(body.artifact_id)
+        idx += 1
+    if body.artifact_popover_width is not None:
+        updates.append(f"artifact_popover_width = ${idx}")
+        args.append(body.artifact_popover_width)
+        idx += 1
+    if body.artifact_popover_height is not None:
+        updates.append(f"artifact_popover_height = ${idx}")
+        args.append(body.artifact_popover_height)
         idx += 1
     if body.credentials_encrypted is not None:
         updates.append(f"credentials_encrypted = ${idx}::jsonb")
@@ -378,9 +469,10 @@ async def update_control_pane(
     if not updates:
         row = await fetch_one(
             """
-            SELECT p.id, p.user_id, p.name, p.icon, p.connector_id, p.credentials_encrypted,
-                   p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval, p.created_at, p.updated_at,
-                   c.name AS connector_name
+            SELECT p.id, p.user_id, p.name, p.icon, p.pane_type, p.connector_id, p.artifact_id,
+                   p.artifact_popover_width, p.artifact_popover_height,
+                   p.credentials_encrypted, p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval,
+                   p.created_at, p.updated_at, c.name AS connector_name
             FROM user_control_panes p
             LEFT JOIN data_source_connectors c ON c.id = p.connector_id
             WHERE p.id = $1 AND p.user_id = $2
@@ -407,9 +499,10 @@ async def update_control_pane(
     )
     row = await fetch_one(
         """
-        SELECT p.id, p.user_id, p.name, p.icon, p.connector_id, p.credentials_encrypted,
-               p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval, p.created_at, p.updated_at,
-               c.name AS connector_name
+        SELECT p.id, p.user_id, p.name, p.icon, p.pane_type, p.connector_id, p.artifact_id,
+               p.artifact_popover_width, p.artifact_popover_height,
+               p.credentials_encrypted, p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval,
+               p.created_at, p.updated_at, c.name AS connector_name
         FROM user_control_panes p
         LEFT JOIN data_source_connectors c ON c.id = p.connector_id
         WHERE p.id = $1 AND p.user_id = $2
@@ -502,12 +595,21 @@ async def execute_control_pane(
     from clients.connections_service_client import get_connections_service_client
 
     pane = await fetch_one(
-        "SELECT id, connector_id, credentials_encrypted, connection_id FROM user_control_panes WHERE id = $1 AND user_id = $2",
+        """
+        SELECT id, pane_type, connector_id, credentials_encrypted, connection_id
+        FROM user_control_panes WHERE id = $1 AND user_id = $2
+        """,
         pane_id,
         current_user.user_id,
     )
     if not pane:
         raise HTTPException(status_code=404, detail="Control pane not found")
+
+    if (pane.get("pane_type") or "connector") == "artifact":
+        raise HTTPException(
+            status_code=400,
+            detail="Artifact control panes do not support connector execution",
+        )
 
     connector = await fetch_one(
         "SELECT id, definition, connector_type FROM data_source_connectors WHERE id = $1",

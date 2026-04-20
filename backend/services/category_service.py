@@ -274,8 +274,7 @@ class CategoryService:
             }
             
             if not dry_run:
-                # TODO: Implement actual merging logic
-                result["message"] = "Category merging not yet implemented"
+                result["message"] = "Category merge is not implemented; use dry_run to inspect similar groups only."
             
             return result
             

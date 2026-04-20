@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from typing import List, Optional
 import logging
 import os
+import re
 import uuid
 
 from models.data_workspace_models import (
@@ -26,6 +27,7 @@ from utils.data_workspace_middleware import (
 from services.data_workspace_grpc_client import DataWorkspaceGRPCClient
 from services.data_workspace_sharing_service import get_sharing_service
 from services.team_service import TeamService
+from config import settings
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["data_workspace"])
@@ -338,13 +340,11 @@ async def upload_import_file(
 ):
     """Upload a file for import"""
     try:
-        # Save file to uploads directory
+        # Save file to dedicated staging dir (not the document library)
         file_id = str(uuid.uuid4())
         file_extension = os.path.splitext(file.filename)[1]
-        file_path = f"/app/uploads/data_imports/{file_id}{file_extension}"
-        
-        # Create directory if it doesn't exist
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        os.makedirs(settings.DATA_IMPORT_DIR, exist_ok=True)
+        file_path = os.path.join(settings.DATA_IMPORT_DIR, f"{file_id}{file_extension}")
         
         # Save file
         with open(file_path, "wb") as f:
@@ -400,8 +400,18 @@ async def execute_import(
             table_name=request.table_name,
             file_path=request.file_path,
             user_id=current_user.user_id,
-            field_mapping=request.field_mapping
+            field_mapping=request.field_mapping,
+            type_overrides=request.type_overrides,
         )
+        # Best-effort cleanup of staging file after successful import only
+        if job.get("status") == "completed":
+            staging_root = os.path.realpath(settings.DATA_IMPORT_DIR)
+            try:
+                resolved = os.path.realpath(request.file_path)
+                if resolved == staging_root or resolved.startswith(staging_root + os.sep):
+                    os.remove(request.file_path)
+            except OSError:
+                pass
         return job
     except HTTPException:
         raise
@@ -698,7 +708,7 @@ async def update_table_row(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.patch("/tables/{table_id}/rows/{row_id}/cells")
+@router.patch("/api/data/tables/{table_id}/rows/{row_id}/cells")
 async def update_table_cell(
     table_id: str,
     row_id: str,
@@ -871,13 +881,45 @@ async def list_shared_workspaces(
 
 # Query Endpoints
 def _is_write_statement(sql: str) -> bool:
-    """True if SQL is INSERT, UPDATE, DELETE, or DDL (CREATE/ALTER/DROP)."""
-    t = sql.strip().upper()
-    if t.startswith('INSERT') or t.startswith('UPDATE') or t.startswith('DELETE'):
-        return True
-    if t.startswith('CREATE') or t.startswith('ALTER') or t.startswith('DROP'):
-        return True
-    return False
+    """
+    True if SQL is a write statement.
+
+    Note: This is an authorization helper. It must handle leading comments and CTEs.
+    """
+    if not sql or not sql.strip():
+        return False
+
+    # Strip leading SQL comments (/* ... */ and -- ...).
+    s = sql.lstrip()
+    while True:
+        if s.startswith("/*"):
+            end = s.find("*/")
+            if end == -1:
+                return False
+            s = s[end + 2 :].lstrip()
+            continue
+        if s.startswith("--"):
+            end = s.find("\n")
+            if end == -1:
+                return False
+            s = s[end + 1 :].lstrip()
+            continue
+        break
+
+    words = re.findall(r"[A-Za-z]+", s.upper())
+    if not words:
+        return False
+
+    write_tokens = {"INSERT", "UPDATE", "DELETE", "CREATE", "ALTER", "DROP", "TRUNCATE", "MERGE", "COPY"}
+    first = words[0]
+    if first == "WITH":
+        # Find first actual statement keyword after the CTE prelude.
+        for w in words[1:]:
+            if w in ("SELECT",) | write_tokens:
+                return w in write_tokens
+        return False
+
+    return first in write_tokens
 
 
 @router.post("/api/data/workspaces/{workspace_id}/query/sql", response_model=QueryResultResponse)

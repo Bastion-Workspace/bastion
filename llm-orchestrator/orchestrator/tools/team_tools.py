@@ -132,14 +132,12 @@ async def read_team_posts_tool(
             "formatted": formatted,
         }
     lines = [f"Team: {team_name}. {count} post(s) since last read:"]
-    for i, p in enumerate(posts[:10], 1):
+    for i, p in enumerate(posts, 1):
         author = p.get("author_name", p.get("author_id", "?"))
         content = (p.get("content", "") or "").strip()[:200]
         if len((p.get("content") or "")) > 200:
             content += "..."
         lines.append(f"{i}. [{author}]: {content}")
-    if count > 10:
-        lines.append(f"... and {count - 10} more.")
     formatted = "\n".join(lines)
     return {
         "posts": posts,

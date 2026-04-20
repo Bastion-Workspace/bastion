@@ -183,6 +183,10 @@ async def invoke_agent_tool(
     if conv_id:
         child_metadata["conversation_id"] = conv_id
 
+    acm = meta.get("active_connections_map")
+    if acm:
+        child_metadata["active_connections_map"] = acm
+
     try:
         from orchestrator.agents.custom_agent_runner import CustomAgentRunner
         runner = CustomAgentRunner()

@@ -23,6 +23,8 @@ class InboundMessage:
     chat_title: Optional[str] = None  # Group/channel title or private chat display name
     chat_username: Optional[str] = None  # @username for public chats
     chat_type: Optional[str] = None  # "private", "group", "supergroup", "channel"
+    # Voice/audio for STT: {"data": base64 str, "mime": str, "filename": str}; optional "prompt" for Whisper hint
+    audio: Optional[Dict[str, Any]] = None
 
 
 @dataclass

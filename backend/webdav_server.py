@@ -23,7 +23,7 @@ from webdav.orgmode_provider import OrgModeDAVProvider
 from webdav.config import create_webdav_config, get_logging_config
 from webdav.webdav_settings import settings
 
-# **ROOSEVELT'S LOGGING COUP D'ÉTAT!**
+# WebDAV debug logging
 # Forcefully configure logging at startup to ensure WsgiDAV's verbose XML
 # logging is enabled. This overrides any default logging.
 logging.config.dictConfig(get_logging_config(verbose_level=3))
@@ -87,7 +87,7 @@ def create_wsgi_app():
         filesystem_provider=filesystem_provider,
         host=settings.WEBDAV_HOST if hasattr(settings, 'WEBDAV_HOST') else "0.0.0.0",
         port=settings.WEBDAV_PORT if hasattr(settings, 'WEBDAV_PORT') else 8001,
-        verbose=4,  # **BULLY!** Level 4 is needed for DEBUG and XML body logging!
+        verbose=4,  # Verbose enough for DEBUG and XML body logging
     )
     
     # Store database config so PlatoAuthController can create sync connections
@@ -142,7 +142,7 @@ def run_server(app, host="0.0.0.0", port=8001):
         wsgi_app=app,
         numthreads=10,
         server_name="Plato-WebDAV",
-        # **ROOSEVELT'S RFC 4918 COMPLIANCE FIX:** Keep-alive is the default in Cheroot 10.
+        # Keep-alive default in Cheroot 10+
         # No explicit parameter is needed. The `connection: close` from 1Writer
         # was a red herring; the real issue was the href generation.
     )

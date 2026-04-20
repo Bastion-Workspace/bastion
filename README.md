@@ -4,7 +4,7 @@
 
 *This application is still being heavily developed and tested*
 
-Data may be *lost*, databases may become *outdated* and things generally are not expected to work 100% just now. I'm not even fully confident in the intent classification system to always take you in the right direction, which bother me. Nevertheless, here is Bastion.
+Data may be *lost*, databases may become *outdated* and things generally are not expected to work 100% just now. Nevertheless, here is Bastion.
 
 
 ## Overview
@@ -24,9 +24,8 @@ Think of it as your personal command center - whether you're researching documen
 ## Core Features
 
 ### **LangGraph Agent System**
-- **Specialized Agents**: Research, chat, coding, weather, RSS, entertainment, fiction editing, proofreading, image generation, messaging, and more
-- **Subgraph Architecture**: Modular, reusable subgraphs for complex workflows (context preparation, validation, generation, research, gap analysis, and more)
-- **Intelligent Routing**: Automatic intent classification routes queries to the appropriate agent
+- **Agent Factory**: User-defined playbooks and tool packs; execution runs through the llm-orchestrator (`CustomAgentRunner`) with PostgreSQL checkpointing
+- **Tooling**: Backend Tool Service (gRPC) exposes document, web, messaging, and domain tools to the orchestrator
 - **Human-in-the-Loop (HITL)**: Permission-based workflows for sensitive operations
 - **PostgreSQL State Persistence**: Full conversation history and state management with checkpointing
 - **Structured Outputs**: Type-safe Pydantic models for all agent communications
@@ -309,6 +308,10 @@ OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
 MESSAGING_ENABLED=true
 MESSAGE_ENCRYPTION_AT_REST=false
 UPLOAD_MAX_SIZE=1500MB
+HYBRID_SEARCH_ENABLED=false
+
+# Embeddings (see "Embedding dimensions" below)
+EMBEDDING_DIMENSIONS=3072
 
 # Authentication
 JWT_SECRET_KEY="your-secret-key"
@@ -317,11 +320,21 @@ ADMIN_PASSWORD="your-secure-password-here"
 DEVELOPMENT_BYPASS_AUTH=false
 ```
 
+### Embedding dimensions (`EMBEDDING_DIMENSIONS`)
+
+Use **one** value in `.env` for dense vector size. Docker Compose passes `EMBEDDING_DIMENSIONS` into **backend**, **celery_worker**, **vector-service**, and **tools-service** (tools-service runs early startup skill sync via the same `skill_vector_service` code; without this variable it would keep the default 3072 and skip recreating the `skills` collection when you use a smaller embedding size).
+
+- **`text-embedding-3-*` (OpenAI-compatible)**: The vector service sends the API `dimensions` parameter when the model id contains `text-embedding-3` (e.g. OpenAI or OpenRouter). Use a size the provider allows for that model (see provider docs). Default in compose is **3072**; lower values reduce storage and can speed search with small quality tradeoffs (Matryoshka-style truncation).
+
+- **Ollama, VLLM, or other models**: Output length is fixed by the model. Set `EMBEDDING_DIMENSIONS` to **match that native length**. The service does not truncate arbitrary models to an arbitrary dimension; a mismatch will break Qdrant upserts or search.
+
+- **Changing dimensions** after data exists: On startup the stack detects the change and migrates collections / re-embeds where configured (see `CHANGELOG` for BM25 / embedding migration behavior). Expect re-embedding cost and time.
+
 ### Model Selection
 Configure which models agents use:
 - **Intent Classification**: Uses `FAST_MODEL` (typically Claude Haiku)
 - **Agent Execution**: Uses `DEFAULT_MODEL` (configurable per agent)
-- **Embeddings**: OpenAI text-embedding-3-small (for vectorization)
+- **Embeddings**: Configured on the **vector service** (default `text-embedding-3-large` via `OPENAI_EMBEDDING_MODEL` / provider settings in `docker-compose.yml`), not the chat model dropdown
 
 Models are configurable in the chat sidebar dropdown.
 
@@ -484,87 +497,19 @@ CREATE POLICY policy_name ON table_name
 
 See `backend/sql/01_init.sql` for complete RLS policy definitions.
 
-### Subgraph-Capable Agent Architecture
+### Orchestrator architecture
 
-Bastion's agents use LangGraph subgraphs for modular, reusable workflow components. This enables complex multi-step operations while maintaining clean separation of concerns.
+Chat and automation requests are handled by the **llm-orchestrator** service: LangGraph workflows compiled with a PostgreSQL checkpointer, unified dispatch, and playbook-driven steps. See [docs/AGENT_FACTORY.md](docs/AGENT_FACTORY.md) and [docs/dev-notes/AGENT_FACTORY_ARCHITECTURE.md](docs/dev-notes/AGENT_FACTORY_ARCHITECTURE.md) for current behavior.
 
-#### Available Subgraphs
+## Future plans
 
-**Fiction Editing Subgraphs:**
-- `build_context_preparation_subgraph`: Chapter detection, reference loading, scope analysis
-- `build_validation_subgraph`: Continuity tracking, outline sync, consistency checks
-- `build_generation_subgraph`: Context assembly, prompt building, LLM calls, output validation
-- `build_resolution_subgraph`: Operation resolution with progressive search and validation
-- `build_book_generation_subgraph`: Full automated book generation workflow
-
-**Research & Knowledge Subgraphs:**
-- `build_research_workflow_subgraph`: Complete research pipeline (local + web search, gap analysis, synthesis)
-- `build_web_research_subgraph`: Web search + crawling workflow
-- `build_gap_analysis_subgraph`: Universal gap analysis for any domain
-- `build_fact_verification_subgraph`: Fact verification workflow
-- `build_knowledge_document_subgraph`: Knowledge document creation workflow
-- `build_intelligent_document_retrieval_subgraph`: Smart document retrieval with multiple strategies
-- `build_full_document_analysis_subgraph`: Parallel document analysis with multiple queries
-
-**Utility Subgraphs:**
-- `build_assessment_subgraph`: Assessment and evaluation workflows
-
-#### Subgraph Usage Pattern
-
-Agents integrate subgraphs as nodes in their main workflow:
-
-```python
-def _build_workflow(self, checkpointer) -> StateGraph:
-    workflow = StateGraph(AgentState)
-    
-    # Build subgraphs
-    research_sg = build_research_workflow_subgraph(checkpointer)
-    validation_sg = build_validation_subgraph(checkpointer, ...)
-    
-    # Add subgraphs as nodes
-    workflow.add_node("research", research_sg)
-    workflow.add_node("validate", validation_sg)
-    
-    # Connect in workflow
-    workflow.add_edge("research", "validate")
-    
-    return workflow.compile(checkpointer=checkpointer)
-```
-
-#### Subgraph Benefits
-
-- **Modularity**: Reusable components across multiple agents
-- **State Preservation**: Subgraphs maintain critical state (user_id, metadata, shared_memory)
-- **Checkpointing**: Full state persistence through LangGraph checkpoints
-- **Testability**: Subgraphs can be tested independently
-- **Complexity Management**: Break complex workflows into manageable pieces
-
-#### State Management in Subgraphs
-
-All subgraph nodes preserve critical state keys:
-- `metadata`: User model preferences and configuration
-- `user_id`: Database access context
-- `shared_memory`: Cross-agent and cross-turn context
-- `messages`: Conversation history
-- `query`: Original user request
-
-This ensures subgraphs work correctly with user preferences, RLS permissions, and conversation continuity.
-
-See project documentation in `/docs/` for subgraph development guidelines.
-
-## Future Plans
-
-See `/docs/future_plans/` for detailed roadmaps:
-- Voice conversation mode (speech-to-text, TTS, wake word)
-- Personal Information Manager (calendar, contacts)
-- Enhanced financial analysis agent
-- Network security monitoring
+Roadmap items are tracked in [CHANGELOG.md](CHANGELOG.md) and design notes under [docs/dev-notes/](docs/dev-notes/). Examples: voice conversation mode, richer PIM/calendar integration, and expanded tooling.
 
 ## Contributing
 
 This is a personal knowledge base system. For questions or suggestions:
 1. Review existing documentation in `/docs/`
-3. Consult the agent integration guide for adding new agents
+2. See [docs/AGENT_FACTORY.md](docs/AGENT_FACTORY.md) for how agents and tools are wired today
 
 ## License
 

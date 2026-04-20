@@ -2,7 +2,7 @@
  * Agent line reference files/folders (context injection for playbooks).
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, forwardRef, useImperativeHandle } from 'react';
 import {
   Box,
   Typography,
@@ -39,10 +39,14 @@ function normalizeIncoming(raw) {
   };
 }
 
-export default function LineReferenceSection({ team, onSave, saving }) {
+const LineReferenceSection = forwardRef(function LineReferenceSection({ team }, ref) {
   const [config, setConfig] = useState(defaultConfig);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerMode, setPickerMode] = useState('folder');
+
+  useImperativeHandle(ref, () => ({
+    getConfig: () => config,
+  }), [config]);
 
   useEffect(() => {
     if (team?.reference_config) {
@@ -133,9 +137,9 @@ export default function LineReferenceSection({ team, onSave, saving }) {
   };
 
   return (
-    <Box component="form" onSubmit={(e) => { e.preventDefault(); onSave(config); }}>
+    <Box>
       <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
-        Injected into playbook prompts as {'{line_refs}'} and per-entry {'{line_ref_*}'} variables. Does not restrict tool access.
+        Injected as {'{line_refs}'} in playbooks. Does not restrict tool access.
       </Typography>
       <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap', alignItems: 'center' }}>
         <Button
@@ -240,15 +244,9 @@ export default function LineReferenceSection({ team, onSave, saving }) {
 
       {config.folders.length === 0 && config.documents.length === 0 && (
         <Typography variant="body2" color="text.secondary" sx={{ py: 1 }}>
-          No references yet. Add folders or files from My Documents, Global Documents, or Teams.
+          No references yet. Add folders or files from My Documents, Global Documents, or shared libraries.
         </Typography>
       )}
-
-      <Box sx={{ mt: 2 }}>
-        <Button type="submit" variant="contained" size="small" disabled={saving}>
-          Save references
-        </Button>
-      </Box>
 
       <ReferencePicker
         open={pickerOpen}
@@ -261,4 +259,6 @@ export default function LineReferenceSection({ team, onSave, saving }) {
       />
     </Box>
   );
-}
+});
+
+export default LineReferenceSection;

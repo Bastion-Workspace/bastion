@@ -2,96 +2,97 @@
 Backfill document_chunks table for full-text search.
 
 Reprocesses completed documents so their chunks are stored in PostgreSQL.
+Uses the same eligibility rules and index-freshness columns as document-service
+(idempotent default reprocess). Image sidecar / watcher flows are separate.
+
 Used by scripts/backfill_document_chunks.py and document_tasks.backfill_document_chunks_task.
 """
 
 import asyncio
 import logging
-from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any, Dict, List
 
-from config import settings
+from bastion_indexing.policy import (
+    APP_CHUNK_INDEX_SCHEMA_VERSION,
+    sql_eligible_doc_types_tuple,
+)
 
 logger = logging.getLogger(__name__)
 
 
 async def fetch_documents_to_backfill(limit: int = 5000) -> List[Dict[str, Any]]:
-    """Fetch document_id, user_id, collection_type, filename, folder_id for completed non-exempt documents."""
+    """Fetch rows needing primary chunk index repair or initial chunk persistence."""
     from services.database_manager.database_helpers import fetch_all
 
     rls_context = {"user_id": "", "user_role": "admin"}
+    eligible = list(sql_eligible_doc_types_tuple())
     rows = await fetch_all(
         """
         SELECT document_id, user_id, collection_type, filename, folder_id, doc_type
         FROM document_metadata
         WHERE processing_status = 'completed'
           AND (exempt_from_vectorization IS FALSE OR exempt_from_vectorization IS NULL)
+          AND doc_type = ANY($2::text[])
+          AND NOT (LOWER(doc_type) = 'zip' AND COALESCE(is_zip_container, false))
+          AND (
+            chunk_indexed_at IS NULL
+            OR chunk_indexed_file_hash IS DISTINCT FROM file_hash
+            OR COALESCE(chunk_index_schema_version, 0) < $3
+            OR NOT EXISTS (
+                SELECT 1 FROM document_chunks dc WHERE dc.document_id = document_metadata.document_id
+            )
+          )
         ORDER BY upload_date DESC
         LIMIT $1
         """,
         limit,
+        eligible,
+        APP_CHUNK_INDEX_SCHEMA_VERSION,
         rls_context=rls_context,
     )
     return [dict(r) for r in rows] if rows else []
 
 
-async def backfill_one(doc: Dict[str, Any]) -> bool:
-    """Reprocess one document so its chunks are written to document_chunks."""
-    from services.service_container import get_service_container
+async def reconcile_legacy_chunk_index_rows() -> None:
+    """
+    Optional one-shot: stamp chunk_indexed_* for completed eligible documents that
+    already have document_chunks rows but never received freshness columns (pre-migration).
+    """
+    from services.database_manager.database_helpers import execute
 
-    container = await get_service_container()
-    document_service = container.document_service
-    folder_service = container.folder_service
+    eligible = list(sql_eligible_doc_types_tuple())
+    await execute(
+        """
+        UPDATE document_metadata dm
+        SET chunk_indexed_at = CURRENT_TIMESTAMP,
+            chunk_indexed_file_hash = COALESCE(dm.file_hash, ''),
+            chunk_index_schema_version = $1,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE dm.processing_status = 'completed'
+          AND (dm.exempt_from_vectorization IS FALSE OR dm.exempt_from_vectorization IS NULL)
+          AND dm.doc_type = ANY($2::text[])
+          AND NOT (LOWER(dm.doc_type) = 'zip' AND COALESCE(dm.is_zip_container, false))
+          AND dm.chunk_indexed_at IS NULL
+          AND EXISTS (SELECT 1 FROM document_chunks dc WHERE dc.document_id = dm.document_id)
+        """,
+        APP_CHUNK_INDEX_SCHEMA_VERSION,
+        eligible,
+        rls_context={"user_id": "", "user_role": "admin"},
+    )
+
+
+async def backfill_one(doc: Dict[str, Any]) -> bool:
+    """Reprocess one document so its chunks are written to document_chunks (via document-service)."""
+    from clients.document_service_client import get_document_service_client
 
     doc_id = doc["document_id"]
     user_id = doc.get("user_id") or ""
-    collection_type = doc.get("collection_type") or "user"
-    filename = doc.get("filename") or ""
-    folder_id = doc.get("folder_id")
-    doc_type = doc.get("doc_type") or "txt"
-
-    file_path = None
-    try:
-        folder_path = await folder_service.get_document_file_path(
-            filename=filename,
-            folder_id=folder_id,
-            user_id=user_id,
-            collection_type=collection_type,
-        )
-        if folder_path and Path(folder_path).exists():
-            file_path = Path(folder_path)
-        if not file_path or not file_path.exists():
-            filename_with_id = f"{doc_id}_{filename}"
-            folder_path = await folder_service.get_document_file_path(
-                filename=filename_with_id,
-                folder_id=folder_id,
-                user_id=user_id,
-                collection_type=collection_type,
-            )
-            if folder_path and Path(folder_path).exists():
-                file_path = Path(folder_path)
-    except Exception as e:
-        logger.debug("Folder path resolution failed for %s: %s", doc_id, e)
-
-    if not file_path or not file_path.exists():
-        upload_dir = Path(settings.UPLOAD_DIR)
-        for potential_file in upload_dir.rglob(f"{doc_id}_*"):
-            if potential_file.is_file():
-                file_path = potential_file
-                break
-        if not file_path and filename:
-            for potential_file in upload_dir.rglob(filename):
-                if potential_file.is_file():
-                    file_path = potential_file
-                    break
-
-    if not file_path or not file_path.exists():
-        logger.warning("File not found for document %s", doc_id)
-        return False
 
     try:
-        await document_service._process_document_async(
-            doc_id, file_path, doc_type, user_id or None
+        dsc = get_document_service_client()
+        await dsc.initialize(required=True)
+        await dsc.reprocess_via_document_service(
+            doc_id, user_id or None, force_reprocess=False
         )
         return True
     except Exception as e:

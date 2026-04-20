@@ -137,6 +137,22 @@ class SettingsService extends ApiServiceBase {
     return this.put('/api/settings/user/preferred-name', preferredNameData);
   }
 
+  getUserBbsWallpaper = async () => {
+    return this.get('/api/settings/user/bbs-wallpaper');
+  }
+
+  setUserBbsWallpaper = async (data) => {
+    return this.put('/api/settings/user/bbs-wallpaper', data);
+  }
+
+  getUserUiWallpaper = async () => {
+    return this.get('/api/settings/user/ui-wallpaper');
+  }
+
+  setUserUiWallpaper = async (data) => {
+    return this.put('/api/settings/user/ui-wallpaper', data);
+  }
+
   // User phone number methods
   getUserPhoneNumber = async () => {
     return this.get('/api/settings/user/phone-number');

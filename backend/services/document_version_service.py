@@ -6,7 +6,6 @@ Phase 1: full snapshots in .versions/{document_id}/, metadata in document_versio
 import difflib
 import hashlib
 import logging
-import shutil
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from uuid import UUID
@@ -63,6 +62,8 @@ async def snapshot_before_write(
         doc_info = await document_service.get_document(document_id)
         if not doc_info:
             return None
+        if getattr(doc_info, "is_encrypted", False):
+            return None
         if not _is_editable(doc_info):
             return None
 
@@ -77,10 +78,18 @@ async def snapshot_before_write(
             collection_type=doc_collection_type,
             team_id=team_id,
         )
-        if not file_path or not file_path.exists():
+        if not file_path:
             return None
 
-        current_content = file_path.read_text(encoding="utf-8")
+        from services import ds_upload_library_fs as dsf
+
+        owner_uid = doc_user_id or user_id
+        if not owner_uid:
+            return None
+        if not await dsf.exists(owner_uid, file_path):
+            return None
+
+        current_content = await dsf.read_text(owner_uid, file_path)
         content_hash = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
         file_size = len(current_content.encode("utf-8"))
 
@@ -92,10 +101,9 @@ async def snapshot_before_write(
         version_number = (latest["version_number"] + 1) if latest else 1
         suffix = file_path.suffix or ".md"
         version_dir = file_path.parent / ".versions" / document_id
-        version_dir.mkdir(parents=True, exist_ok=True)
         version_filename = f"v{version_number:03d}_{content_hash[:8]}{suffix}"
         version_path = version_dir / version_filename
-        shutil.copy2(file_path, version_path)
+        await dsf.write_text(owner_uid, version_path, current_content)
 
         upload_root = Path(settings.UPLOAD_DIR).resolve()
         try:
@@ -151,10 +159,24 @@ async def get_version_content(
     if not storage_path:
         return None
     full_path = Path(settings.UPLOAD_DIR).resolve() / storage_path
-    if not full_path.exists():
+    from services import ds_upload_library_fs as dsf
+
+    uid = user_id
+    if not uid:
+        doc_id = version.get("document_id")
+        if doc_id:
+            from services.service_container import get_service_container
+
+            container = await get_service_container()
+            di = await container.document_service.get_document(doc_id)
+            uid = getattr(di, "user_id", None) if di else None
+    if not uid:
+        logger.warning("Version read skipped: no user_id for %s", full_path)
+        return None
+    if not await dsf.exists(uid, full_path):
         logger.warning("Version file missing: %s", full_path)
         return None
-    return full_path.read_text(encoding="utf-8")
+    return await dsf.read_text(uid, full_path)
 
 
 async def diff_versions(
@@ -247,7 +269,12 @@ async def rollback_to_version(
         if not file_path:
             return {"success": False, "error": "Path resolution failed", "message": "Could not resolve document path"}
 
-        file_path.write_text(target_content, encoding="utf-8")
+        from services import ds_upload_library_fs as dsf
+
+        roll_owner = doc_user_id or user_id
+        if not roll_owner:
+            return {"success": False, "error": "No owner", "message": "Cannot write document without owner context"}
+        await dsf.write_text(roll_owner, file_path, target_content)
         await document_service.document_repository.update_file_size(
             document_id, len(target_content.encode("utf-8")), user_id=doc_user_id
         )

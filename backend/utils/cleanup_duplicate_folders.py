@@ -1,6 +1,6 @@
 """
 Cleanup Duplicate Folders Utility
-Roosevelt's Trust-Busting Tool for Folder Deduplication
+Utility to detect and merge duplicate folder rows
 
 This utility finds and merges duplicate folders that were created
 due to race conditions during concurrent file syncing.

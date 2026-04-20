@@ -171,6 +171,19 @@ export function deepCloneSteps(steps) {
 }
 
 /**
+ * Assign new _step_id (UUID) on every step dict in the trees (paste must not collide with existing IDs).
+ * @param {object[]} steps
+ */
+export function assignFreshStepIds(steps) {
+  if (!Array.isArray(steps)) return;
+  for (const step of steps) {
+    walkNestedSteps(step, (s) => {
+      s._step_id = crypto.randomUUID();
+    });
+  }
+}
+
+/**
  * Build remap for clipboard keys that conflict with target tree keys.
  * @param {Set<string>|string[]} clipboardKeys
  * @param {Set<string>} targetKeys
@@ -338,6 +351,7 @@ export function findUnresolvedReferences(node, allowedKeys, path = []) {
  */
 export function preparePasteSteps({ clipboardSteps, targetTopLevelSteps, insertIndex }) {
   const cloned = deepCloneSteps(clipboardSteps);
+  assignFreshStepIds(cloned);
   const targetKeys = collectWireKeysDeep(targetTopLevelSteps || []);
   const clipboardKeys = collectWireKeysDeep(cloned);
   const remap = buildRemapForTargetConflicts([...clipboardKeys], targetKeys);

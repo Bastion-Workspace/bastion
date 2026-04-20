@@ -1,5 +1,5 @@
 """
-Citation Formatting Service - Roosevelt's Citation Reform System
+Citation formatting service
 Ensures consistent numbered citations with proper in-line format and source mapping
 """
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class CitationFormattingService:
     """
-    **BULLY!** Roosevelt's Citation Reform Service!
+    Normalize and format citations for display.
     Converts research findings to use numbered in-line citations (1), (2) format
     """
     
@@ -29,9 +29,9 @@ class CitationFormattingService:
         raw_citations: List[Dict[str, Any]] = None
     ) -> Tuple[str, List[CitationSource]]:
         """
-        **Roosevelt's Master Citation Formatter!**
-        
-        Takes research findings and converts them to numbered citation format.
+        Format research findings with numbered in-line citations and source mapping.
+
+        Converts findings to (1), (2), ... style and builds CitationSource entries.
         
         Args:
             findings: Raw research findings text
@@ -160,7 +160,7 @@ class CitationFormattingService:
                     "excerpt": None,
                     "source_key": url
                 })
-            except:
+            except Exception:
                 continue
         
         return citations

@@ -1,0 +1,4 @@
+httpx>=0.27.0
+html2text>=2024.2.26
+PyYAML>=6.0
+asyncssh>=2.14.0,<3

@@ -4,26 +4,43 @@ Extracted from main.py for better modularity
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from models.api_models import (
-    FolderTreeResponse, FolderContentsResponse, DocumentFolder,
-    FolderCreateRequest, FolderUpdateRequest, FolderMetadataUpdateRequest,
-    AuthenticatedUserResponse
+    FolderTreeResponse,
+    FolderContentsResponse,
+    FolderContentsBatchRequest,
+    FolderContentsBatchResponse,
+    DocumentFolder,
+    FolderCreateRequest,
+    FolderUpdateRequest,
+    FolderMetadataUpdateRequest,
+    AuthenticatedUserResponse,
 )
 from services.service_container import get_service_container
 from services.file_manager import get_file_manager
 from services.file_manager.models.file_placement_models import FolderStructureRequest
 from utils.auth_middleware import get_current_user
 from utils.websocket_manager import get_websocket_manager
+from clients.document_service_client import get_document_service_client
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["folders"])
+
+
+def _folder_contents_not_found_detail(detail: str) -> bool:
+    d = (detail or "").lower()
+    return (
+        "not_found_or_access_denied" in d
+        or "not found" in d
+        or "access denied" in d
+        or "folder not found" in d
+    )
 
 
 # Helper function to get folder service
@@ -40,44 +57,122 @@ async def download_library_zip(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Download the current user's library (My Documents) as a zip file."""
-    folder_service = await _get_folder_service()
-    try:
-        zip_bytes = await folder_service.build_library_zip(current_user.user_id)
-        return Response(
-            content=zip_bytes,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": 'attachment; filename="my-library.zip"',
-            },
-        )
-    except Exception as e:
-        logger.error(f"Failed to build library zip: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    dsc = get_document_service_client()
+    await dsc.initialize(required=True)
+
+    async def _zip_stream():
+        async for ch in dsc.generate_library_zip_stream(current_user.user_id):
+            if ch.data:
+                yield ch.data
+
+    return StreamingResponse(
+        _zip_stream(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="my-library.zip"',
+        },
+    )
 
 
 @router.get("/api/folders/tree", response_model=FolderTreeResponse)
 async def get_folder_tree(
     collection_type: str = "user",
-    shallow: bool = Query(default=True, description="If true, return only top-level folders with empty children for faster load"),
+    shallow: bool = Query(
+        default=True,
+        description="Ignored for tree shape: hierarchy is reconstructed from parent_folder_id. Kept for API compatibility.",
+    ),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Get the complete folder tree for the current user"""
-    folder_service = await _get_folder_service()
+    dsc = get_document_service_client()
+    await dsc.initialize(required=True)
     try:
-        logger.debug(f"📁 Getting folder tree for user: {current_user.user_id}, collection_type: {collection_type}")
-        folders = await folder_service.get_folder_tree(
-            user_id=current_user.user_id,
-            collection_type=collection_type,
-            shallow=shallow
-        )
-        logger.debug(f"📁 Found {len(folders)} folders")
+        resp = await dsc.get_folder_tree_grpc(current_user.user_id)
+        # gRPC returns a flat list with parent_folder_id; rebuild nested children
+        # so the frontend can render virtual roots with correct indentation.
+        folder_map: dict[str, DocumentFolder] = {}
+        for f in resp.folders:
+            folder_map[f.folder_id] = DocumentFolder(
+                folder_id=f.folder_id,
+                name=f.name,
+                parent_folder_id=f.parent_folder_id or None,
+                user_id=current_user.user_id,
+                collection_type=f.collection_type or collection_type,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+                document_count=f.document_count,
+                children=[],
+            )
+
+        roots: list[DocumentFolder] = []
+        for folder in folder_map.values():
+            pid = folder.parent_folder_id
+            if pid and pid in folder_map:
+                folder_map[pid].children.append(folder)
+            else:
+                roots.append(folder)
+
+        for folder in folder_map.values():
+            folder.subfolder_count = len(folder.children or [])
+
         return FolderTreeResponse(
-            folders=folders,
-            total_folders=len(folders)
+            folders=roots, total_folders=len(folder_map)
         )
     except Exception as e:
-        logger.error(f"❌ Failed to get folder tree: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Folder tree via document-service failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/api/folders/contents/batch", response_model=FolderContentsBatchResponse)
+async def get_folder_contents_batch(
+    body: FolderContentsBatchRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Load contents for multiple folders in one request (document-service batch RPC)."""
+    dsc = get_document_service_client()
+    await dsc.initialize(required=True)
+    try:
+        payload: dict = {
+            "folder_ids": body.folder_ids,
+            "user_id": current_user.user_id,
+            "limit": body.limit,
+            "offset": body.offset,
+        }
+        if body.max_concurrent is not None:
+            payload["max_concurrent"] = body.max_concurrent
+        ok, data, err = await dsc.get_folder_contents_batch_json(
+            current_user.user_id, payload, timeout=180.0
+        )
+        if not ok or data is None:
+            logger.warning(
+                "Folder contents batch failed for user %s: %s",
+                current_user.user_id,
+                err,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=err or "document-service batch failed",
+            )
+        raw_contents = data.get("contents") or {}
+        errors = dict(data.get("errors") or {})
+        parsed: dict[str, FolderContentsResponse] = {}
+        for fid, raw in raw_contents.items():
+            try:
+                parsed[fid] = FolderContentsResponse.model_validate(raw)
+            except Exception as parse_exc:
+                logger.warning(
+                    "Batch folder contents validation failed for %s: %s",
+                    fid,
+                    parse_exc,
+                )
+                errors[fid] = "invalid_response_shape"
+        return FolderContentsBatchResponse(contents=parsed, errors=errors)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed folder contents batch: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
 
 @router.get("/api/folders/{folder_id}/contents", response_model=FolderContentsResponse)
 async def get_folder_contents(
@@ -87,21 +182,45 @@ async def get_folder_contents(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Get contents of a specific folder. Paginated for large folders (default limit 250)."""
-    folder_service = await _get_folder_service()
+    dsc = get_document_service_client()
+    await dsc.initialize(required=True)
     try:
-        logger.debug(f"🔍 API: Getting folder contents for {folder_id} (user: {current_user.user_id}, limit: {limit}, offset: {offset})")
-        contents = await folder_service.get_folder_contents(folder_id, current_user.user_id, limit=limit, offset=offset)
-        if not contents:
-            logger.warning(f"⚠️ API: Folder {folder_id} not found or access denied for user {current_user.user_id}")
-            raise HTTPException(status_code=404, detail="Folder not found or access denied")
-        
-        logger.debug(f"✅ API: Returning folder contents for {folder_id}: {contents.total_documents} docs, {contents.total_subfolders} subfolders")
+        logger.debug(
+            "Getting folder contents for %s (user: %s, limit: %s, offset: %s)",
+            folder_id,
+            current_user.user_id,
+            limit,
+            offset,
+        )
+        ok, data, err = await dsc.get_folder_contents_json(
+            current_user.user_id,
+            {"folder_id": folder_id, "limit": limit, "offset": offset},
+        )
+        if not ok or not data:
+            detail = err or "Folder not found or access denied"
+            logger.warning(
+                "Folder contents unavailable for %s user %s: %s",
+                folder_id,
+                current_user.user_id,
+                detail,
+            )
+            raise HTTPException(
+                status_code=404 if _folder_contents_not_found_detail(detail) else 502,
+                detail=detail,
+            )
+        contents = FolderContentsResponse.model_validate(data)
+        logger.debug(
+            "Returning folder contents for %s: %s docs, %s subfolders",
+            folder_id,
+            contents.total_documents,
+            contents.total_subfolders,
+        )
         return contents
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"❌ Failed to get folder contents: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("Failed to get folder contents: %s", e)
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @router.post("/api/folders", response_model=DocumentFolder)
 async def create_folder(
@@ -247,7 +366,7 @@ async def update_folder_metadata(
     """
     Update folder metadata (category, tags, inherit_tags)
     
-    **ROOSEVELT FOLDER TAGGING PHASE 1**: Documents uploaded to this folder will inherit these tags!
+    Documents uploaded to this folder inherit these tags
     """
     try:
         folder_service = await _get_folder_service()
@@ -306,16 +425,42 @@ async def delete_folder(
     recursive: bool = False,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Delete a folder"""
+    """Delete a folder (document-service performs subtree document teardown and disk removal)."""
     try:
         folder_service = await _get_folder_service()
-        # Get folder info before deletion for WebSocket notification
         folder = await folder_service.get_folder(folder_id, current_user.user_id, current_user.role)
-        
-        success = await folder_service.delete_folder(folder_id, current_user.user_id, recursive, current_user.role)
-        if not success:
-            raise HTTPException(status_code=404, detail="Folder not found or access denied")
-        
+
+        dsc = get_document_service_client()
+        try:
+            await dsc.initialize(required=True)
+        except Exception as conn_err:
+            logger.error("Document service unavailable for folder delete: %s", conn_err)
+            raise HTTPException(
+                status_code=502,
+                detail="Document service unavailable; folder delete requires document-service.",
+            ) from conn_err
+
+        ok, _data, err = await dsc.delete_folder_json(
+            current_user.user_id,
+            {
+                "folder_id": folder_id,
+                "user_id": current_user.user_id,
+                "role": current_user.role,
+                "recursive": recursive,
+            },
+            timeout=600.0,
+        )
+        if not ok:
+            msg = err or "Folder not found or access denied"
+            low = msg.lower()
+            if "not empty" in low or "recursive=true" in low:
+                raise HTTPException(status_code=409, detail=msg)
+            if "permission denied" in low or "not have permission" in low:
+                raise HTTPException(status_code=403, detail=msg)
+            if "team root" in low or "delete the team" in low:
+                raise HTTPException(status_code=400, detail=msg)
+            raise HTTPException(status_code=404, detail=msg)
+
         # Send WebSocket notification for folder deletion
         if folder:
             try:

@@ -297,6 +297,9 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
         """Execute import job"""
         try:
             field_mapping = json.loads(request.field_mapping_json) if request.field_mapping_json else None
+            type_overrides = (
+                json.loads(getattr(request, "type_overrides_json")) if getattr(request, "type_overrides_json", "") else None
+            )
             
             # Infer file type from file extension
             from pathlib import Path
@@ -317,7 +320,8 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 file_path=request.file_path,
                 file_type=file_type,
                 user_id=request.user_id if request.user_id else None,
-                field_mapping=field_mapping
+                field_mapping=field_mapping,
+                type_overrides=type_overrides,
             )
             
             # Get job status
@@ -698,6 +702,38 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return data_service_pb2.RowResponse()
+
+    async def ResolveWorkspaceLink(self, request, context):
+        """Resolve a cross-table _bastion_ref to current label and preview."""
+        try:
+            ref_payload = json.loads(request.ref_json) if request.ref_json else None
+            uid = request.user_id if request.user_id else None
+            if not uid:
+                return data_service_pb2.ResolveWorkspaceLinkResponse(
+                    success=False,
+                    error="user_id required",
+                    row_found=False,
+                )
+            result = await self.table_service.resolve_workspace_link(uid, ref_payload)
+            preview = result.get("preview") or {}
+            return data_service_pb2.ResolveWorkspaceLinkResponse(
+                success=bool(result.get("success")),
+                error=result.get("error") or "",
+                label=result.get("label") or "",
+                preview_json=json.dumps(preview),
+                row_found=bool(result.get("row_found")),
+                table_id=result.get("table_id") or "",
+                row_id=result.get("row_id") or "",
+            )
+        except Exception as e:
+            logger.error(f"Failed to resolve workspace link: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return data_service_pb2.ResolveWorkspaceLinkResponse(
+                success=False,
+                error=str(e),
+                row_found=False,
+            )
     
     async def DeleteRow(self, request, context):
         """Delete a row"""

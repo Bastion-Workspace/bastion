@@ -19,8 +19,31 @@ export default function UsageWarningBanner({ resourceLabel, agents = [] }) {
       : `${label} is used by ${count} agents. Changes will affect all of them.`;
 
   return (
-    <Alert severity="warning" sx={{ mb: 2 }}>
-      <Typography variant="body2" component="span">
+    <Alert
+      severity="warning"
+      variant="filled"
+      sx={(theme) => {
+        const bg =
+          theme.palette.mode === 'dark' ? theme.palette.warning.dark : theme.palette.warning.main;
+        const fg = theme.palette.getContrastText(bg);
+        return {
+          mb: 2,
+          bgcolor: bg,
+          color: fg,
+          '& .MuiAlert-icon': {
+            color: fg,
+            opacity: theme.palette.mode === 'dark' ? 0.95 : 0.9,
+          },
+          '& .MuiAlert-message': {
+            color: fg,
+          },
+          '& .MuiTypography-root, & .MuiLink-root': {
+            color: 'inherit',
+          },
+        };
+      }}
+    >
+      <Typography variant="body2" component="span" sx={{ color: 'inherit', fontWeight: 500 }}>
         {text}
       </Typography>
       {agents.length > 0 && (
@@ -32,7 +55,13 @@ export default function UsageWarningBanner({ resourceLabel, agents = [] }) {
                 component="button"
                 variant="body2"
                 onClick={() => navigate(`/agent-factory/agent/${a.id}`)}
-                sx={{ cursor: 'pointer', fontWeight: 600 }}
+                sx={{
+                  cursor: 'pointer',
+                  fontWeight: 600,
+                  color: 'inherit',
+                  textDecorationColor: 'currentcolor',
+                  '&:hover': { textDecoration: 'underline' },
+                }}
               >
                 {a.name || a.handle || `@${a.handle}` || 'Unnamed'}
               </Link>

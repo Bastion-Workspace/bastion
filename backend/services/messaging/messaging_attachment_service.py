@@ -342,6 +342,100 @@ class MessagingAttachmentService:
             logger.error(f"Failed to delete message attachments for {message_id}: {e}")
             return False
 
+    async def get_attachment_row_admin(self, attachment_id: str) -> Optional[Dict[str, Any]]:
+        """Load attachment row with admin RLS (federation token fetch)."""
+        await self._ensure_initialized()
+        async with self.db_pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_role', 'admin', false)"
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT attachment_id, message_id, room_id, filename, file_path,
+                       mime_type, file_size, width, height, is_animated, created_at
+                FROM message_attachments WHERE attachment_id = $1::uuid
+                """,
+                attachment_id,
+            )
+            return dict(row) if row else None
+
+    async def list_attachments_for_message_admin(self, message_id: str) -> List[Dict[str, Any]]:
+        await self._ensure_initialized()
+        async with self.db_pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_role', 'admin', false)"
+            )
+            rows = await conn.fetch(
+                """
+                SELECT attachment_id, message_id, room_id, filename, mime_type, file_size,
+                       width, height, is_animated, created_at
+                FROM message_attachments
+                WHERE message_id = $1::uuid
+                ORDER BY created_at ASC
+                """,
+                message_id,
+            )
+            out = []
+            for r in rows:
+                d = dict(r)
+                if d.get("attachment_id") is not None:
+                    d["attachment_id"] = str(d["attachment_id"])
+                out.append(d)
+            return out
+
+    async def import_from_peer_url(
+        self,
+        room_id: str,
+        message_id: str,
+        filename: str,
+        mime_type: str,
+        source_url: str,
+    ) -> Dict[str, Any]:
+        """Download bytes from peer URL and store as a local message attachment."""
+        import httpx
+
+        await self._ensure_initialized()
+        timeout = float(getattr(settings, "FEDERATION_HTTP_TIMEOUT", 30.0) or 30.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(source_url)
+            r.raise_for_status()
+            content = r.content
+        sanitized = self._sanitize_filename(filename)
+        room_dir = self.storage_base / room_id
+        room_dir.mkdir(parents=True, exist_ok=True)
+        ts = int(uuid.uuid4().time_low)
+        ext = Path(sanitized).suffix
+        unique_filename = f"{message_id}_{ts}{ext}"
+        file_path = room_dir / unique_filename
+        with open(file_path, "wb") as f:
+            f.write(content)
+        fs = file_path.stat().st_size
+        img_meta = self._get_image_metadata(file_path)
+        async with self.db_pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_role', 'admin', false)"
+            )
+            aid = await conn.fetchval(
+                """
+                INSERT INTO message_attachments (
+                    message_id, room_id, filename, file_path,
+                    mime_type, file_size, width, height, is_animated
+                )
+                VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING attachment_id
+                """,
+                message_id,
+                room_id,
+                sanitized,
+                str(file_path),
+                mime_type,
+                fs,
+                img_meta["width"],
+                img_meta["height"],
+                img_meta["is_animated"],
+            )
+        return {"attachment_id": str(aid)}
+
 
 # Global instance
 messaging_attachment_service = MessagingAttachmentService()

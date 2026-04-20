@@ -1,12 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { Routes, Route, useLocation, Navigate, useParams } from 'react-router-dom';
-import { Container, Box, IconButton, Tooltip, SwipeableDrawer } from '@mui/material';
+import { Container, Box, IconButton, Tooltip, SwipeableDrawer, useTheme } from '@mui/material';
 import { ChevronRight } from '@mui/icons-material';
 import { motion } from 'framer-motion';
-import { QueryClient, QueryClientProvider } from 'react-query';
-import NewsPage from './components/NewsPage';
-import NewsDetailPage from './components/NewsDetailPage';
-import { AuthProvider } from './contexts/AuthContext';
+import { QueryClient, QueryClientProvider, useQuery } from 'react-query';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { VoiceAvailabilityProvider } from './contexts/VoiceAvailabilityContext';
 import { CapabilitiesProvider } from './contexts/CapabilitiesContext';
 import { EditorProvider } from './contexts/EditorContext';
@@ -17,7 +15,9 @@ import { NotificationProvider } from './contexts/NotificationContext';
 import { TeamExecutionProvider } from './contexts/TeamExecutionContext';
 import { TeamProvider } from './contexts/TeamContext';
 import { MusicProvider } from './contexts/MediaContext';
+import { VideoProvider } from './contexts/VideoContext';
 import { ControlPaneProvider } from './contexts/ControlPaneContext';
+import { ArtifactInstanceProvider } from './contexts/ArtifactInstanceContext';
 import { ImageLightboxProvider } from './components/common/ImageLightbox';
 import { LearningProvider } from './contexts/LearningContext';
 import LearningQuizOverlay from './components/LearningQuizOverlay';
@@ -29,6 +29,7 @@ import LoginPage from './components/LoginPage';
 import ProtectedRoute from './components/ProtectedRoute';
 import HomeDashboardPage from './components/HomeDashboardPage';
 import DocumentsPage from './components/DocumentsPage';
+import CodeSpacesPage from './components/CodeSpacesPage';
 import ChatPage from './components/ChatPage';
 import SettingsPage from './components/SettingsPage';
 import ControlPanesPage from './components/ControlPanesPage';
@@ -43,6 +44,14 @@ import AgentFactoryPage from './components/AgentFactoryPage';
 import AgentDashboardPage from './components/AgentDashboardPage';
 import GamesPage from './components/games/GamesPage';
 import PDFTextLayerEditor from './components/PDFTextLayerEditor';
+import PublicArtifactPage from './components/PublicArtifactPage';
+import AppWallpaperLayer from './components/AppWallpaperLayer';
+import apiService from './services/apiService';
+import { UI_WALLPAPER_QUERY_KEY } from './config/uiWallpaperBuiltins';
+import {
+  isUiWallpaperConfigActive,
+  mainWorkspaceWallpaperTintBg,
+} from './theme/wallpaperPaneSx';
 
 function LegacyAgentLineRedirect() {
   const { lineId } = useParams();
@@ -61,11 +70,40 @@ const queryClient = new QueryClient({
 
 // Main content component that uses the chat sidebar context
 const MainContent = () => {
+  const theme = useTheme();
+  const { isAuthenticated, loading: authLoading } = useAuth();
+  const { data: uiWallpaperData } = useQuery(
+    [UI_WALLPAPER_QUERY_KEY],
+    () => apiService.settings.getUserUiWallpaper(),
+    { enabled: isAuthenticated && !authLoading, staleTime: 60_000 }
+  );
+  const mainWorkspaceTint = mainWorkspaceWallpaperTintBg(
+    theme,
+    isUiWallpaperConfigActive(uiWallpaperData?.config)
+  );
+
   const location = useLocation();
   const isDocumentsRoute = location.pathname.startsWith('/documents');
+  const isCodeSpacesRoute = location.pathname.startsWith('/code-spaces');
   const isMediaRoute = location.pathname.startsWith('/media') || location.pathname.startsWith('/music');
   const isAgentFactoryRoute = location.pathname.startsWith('/agent-factory');
-  const isFullWidthRoute = isDocumentsRoute || isMediaRoute || isAgentFactoryRoute;
+  const isFullWidthRoute = isDocumentsRoute || isCodeSpacesRoute || isMediaRoute || isAgentFactoryRoute;
+  /** Home has no doc sidebar / tab chrome; same full-bleed shell as full-width routes so wallpaper tint reaches edges and scrolls with content. */
+  const isHomeRoute =
+    location.pathname === '/home' || location.pathname.startsWith('/home/');
+  /** Teams list + team detail: no doc chrome; tint to edges and full scroll like Home. */
+  const isTeamsRoute =
+    location.pathname === '/teams' || location.pathname.startsWith('/teams/');
+  /** Settings: full-column tint to nav and status bar (inner page supplies horizontal padding). */
+  const isSettingsRoute = location.pathname.startsWith('/settings');
+  /** Control Panes: same full-column tint as Settings. */
+  const isControlPanesRoute = location.pathname.startsWith('/control-panes');
+  const isMainWorkspaceFullBleed =
+    isFullWidthRoute ||
+    isHomeRoute ||
+    isTeamsRoute ||
+    isSettingsRoute ||
+    isControlPanesRoute;
   const { isCollapsed, sidebarWidth, isFullWidth, isResizing, toggleSidebar } = useChatSidebar();
   const isMobile = /Mobi|Android/i.test(navigator.userAgent);
   
@@ -112,6 +150,7 @@ const MainContent = () => {
       display: 'flex', 
       height: { xs: 'calc(var(--appvh, 100vh) - var(--app-nav-height, 59px) - 32px)', md: 'calc(100dvh - var(--app-nav-height, 59px) - 32px)' },
       position: 'relative',
+      zIndex: 1,
       paddingBottom: 'env(safe-area-inset-bottom)',
       width: '100%',
       maxWidth: '100%',
@@ -136,16 +175,16 @@ const MainContent = () => {
         maxWidth: { xs: '100%', md: 'none' }
       }}>
         <Container 
-          maxWidth={isFullWidthRoute ? false : 'xl'} 
-          disableGutters={isFullWidthRoute} 
+          maxWidth={isMainWorkspaceFullBleed ? false : 'xl'} 
+          disableGutters={isMainWorkspaceFullBleed} 
           sx={{ 
-            mt: isFullWidthRoute ? 0 : 4, 
-            mb: isFullWidthRoute ? 0 : 4, 
-            px: isFullWidthRoute ? 0 : undefined,
+            mt: isMainWorkspaceFullBleed ? 0 : 4, 
+            mb: isMainWorkspaceFullBleed ? 0 : 4, 
+            px: isMainWorkspaceFullBleed ? 0 : undefined,
             flex: 1,
-            // Full-width routes: scroll here (single root) — nested overflow:auto inside framer-motion
+            // Full-width + Home: scroll here (single root) — nested overflow:auto inside framer-motion
             // caused native scrollbars to not receive pointer events in some browsers.
-            ...(isFullWidthRoute
+            ...(isMainWorkspaceFullBleed
               ? { overflowY: 'auto', overflowX: 'hidden' }
               : { overflow: 'auto' }),
             // Avoid scrollbar-gutter: stable here — on Chromium/WebKit it can desync native
@@ -153,21 +192,28 @@ const MainContent = () => {
             display: 'flex',
             flexDirection: 'column',
             minHeight: 0,
+            // Tint on the scroll container so it covers full width/height including long scrolls (not clipped to motion.div).
+            ...(mainWorkspaceTint ? { backgroundColor: mainWorkspaceTint } : {}),
           }}
         >
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
-            style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, width: '100%' }}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              flex: 1,
+              minHeight: 0,
+              width: '100%',
+            }}
           >
             <Routes>
               <Route path="/" element={<Navigate to="/documents" replace />} />
               <Route path="/home" element={<HomeDashboardPage />} />
               <Route path="/home/:dashboardId" element={<HomeDashboardPage />} />
               <Route path="/documents" element={<DocumentsPage />} />
-              <Route path="/news" element={<NewsPage />} />
-              <Route path="/news/:newsId" element={<NewsDetailPage />} />
+              <Route path="/code-spaces" element={<CodeSpacesPage />} />
 
               <Route path="/chat" element={<ChatPage />} />
               <Route path="/teams" element={<TeamsPage />} />
@@ -302,24 +348,38 @@ function App() {
           <MessagingProvider>
           <TeamProvider>
           <MusicProvider>
+          <VideoProvider>
           <ControlPaneProvider>
+          <ArtifactInstanceProvider>
           <EditorProvider>
           <ImageLightboxProvider>
           <LearningProvider>
-          <div className="App">
+          <div
+            className="App"
+            style={{
+              position: 'relative',
+              zIndex: 1,
+              minHeight: '100%',
+              backgroundColor: 'transparent',
+            }}
+          >
+            <AppWallpaperLayer />
             <Routes>
               {/* Public route */}
               <Route path="/login" element={<LoginPage />} />
-              
+              <Route path="/shared/artifact/:shareToken" element={<PublicArtifactPage />} />
+
               {/* Protected routes */}
               <Route path="/*" element={
                 <ProtectedRoute>
-                  <Navigation />
-                  <MainContent />
-                  <StatusBar />
-                  <MessagingDrawer />
-                  <ModelConfigurationNotification />
-                  <LearningQuizOverlay />
+                  <>
+                    <Navigation />
+                    <MainContent />
+                    <StatusBar />
+                    <MessagingDrawer />
+                    <ModelConfigurationNotification />
+                    <LearningQuizOverlay />
+                  </>
                 </ProtectedRoute>
               } />
             </Routes>
@@ -327,7 +387,9 @@ function App() {
           </LearningProvider>
           </ImageLightboxProvider>
           </EditorProvider>
+          </ArtifactInstanceProvider>
           </ControlPaneProvider>
+          </VideoProvider>
           </MusicProvider>
           </TeamProvider>
           </MessagingProvider>
