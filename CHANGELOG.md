@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Update: README product overview — platform snapshot, supported formats table, and expanded capability sections for operators and evaluators.
 - Update: GitHub Actions `build-and-push` workflow builds and pushes all first-party Compose images (tools-service, cli-worker, Celery variants, document-service, connections-service, voice-service, image-vision-service, bbs-server, frontend-dev) on version tags.
+- Update: Added `docs/DEPLOYMENT.md` (compose scenarios, env grouping, GHCR, operations) and linked it from `README.md`.
 
 ## [0.70.0] - 2026-04-20
 

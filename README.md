@@ -8,117 +8,112 @@ Data may be *lost*, databases may become *outdated* and things generally are not
 
 
 ## Overview
-A comprehensive personal workspace platform featuring specialized agents for knowledge management, creative writing, data engineering, collaboration, and productivity - all controlled through natural language.
 
+**Bastion** is a self-hosted **AI workspace**: documents, structured data, chat, teams, and automation in one stack—driven by **natural language** and a **LangGraph** orchestrator with **PostgreSQL**-backed state. You run it on **Docker Compose**, wire the model providers you trust (OpenAI, OpenRouter, Anthropic, and local-friendly options where supported), and keep the corpus on **your** disks and databases.
 
-Bastion is a multi-purpose workspace that combines:
-- **Knowledge Management**: RAG-powered document search with vector similarity and knowledge graphs
-- **Creative Tools**: Fiction editing, prose analysis, character development, and content generation
-- **Data Workspaces**: Custom database management with CSV/Excel import and external database connections
-- **Collaboration**: Real-time messaging, presence tracking, and team coordination
-- **Productivity**: Org-mode integration, RSS feeds, task management, and WebDAV sync
-- **Orchestration**: LangGraph-powered multi-agent system with intelligent routing and state persistence
+**Who it is for:** researchers, writers, builders, and small teams who want **RAG**, **graphs**, **Org-mode**, **RSS**, **messaging**, and **custom agents** without gluing half a dozen SaaS products together.
 
-Think of it as your personal command center - whether you're researching documents, writing fiction, managing custom databases, or coordinating with your team, Bastion's specialized agents handle it through simple conversational interfaces.
+---
 
-## Core Features
+## Platform snapshot
 
-### **LangGraph Agent System**
-- **Agent Factory**: User-defined playbooks and tool packs; execution runs through the llm-orchestrator (`CustomAgentRunner`) with PostgreSQL checkpointing
-- **Tooling**: Backend Tool Service (gRPC) exposes document, web, messaging, and domain tools to the orchestrator
-- **Human-in-the-Loop (HITL)**: Permission-based workflows for sensitive operations
-- **PostgreSQL State Persistence**: Full conversation history and state management with checkpointing
-- **Structured Outputs**: Type-safe Pydantic models for all agent communications
+| Area | What you get |
+|------|----------------|
+| **Knowledge library** | Folders, tags, versions, uploads, semantic + keyword search, citations, live processing status |
+| **Agents** | Chat, research, and coding-style flows; **Agent Factory** (playbooks, skills, connectors); **agent lines** (scheduled / heartbeat automations) |
+| **Data** | **Data workspaces** with SQL, imports, external DB links, charts, NL→query |
+| **People** | **User messaging** (direct & group rooms, presence, reactions), **Teams** (roles, invitations, feeds, team chat, shared document trees) |
+| **Productivity** | **Org-mode** files, todos / agenda / refile / archive flows, **RSS**, optional **Google Reader–style** API |
+| **Reading** | **OPDS** catalogs, **EPUB** reader with typography and progress sync |
+| **Media** | **Images** (including searchable sidecar metadata), **image generation**, **audio** ingest & transcription, **video** library handling |
+| **Integrations** | **External connections** (OAuth, messaging providers), **WebDAV** for mobile org sync, optional **Bastion-to-Bastion federation** |
+| **Ops** | Compose-first deployment, optional **BBS** (SSH/telnet) text UI, Celery **Flower**, health endpoints |
 
-### **Document Processing & Management**
-- **Multi-Format Support**: PDF, DOCX, EPUB, TXT, HTML, MD, ORG, EML, SRT, ZIP archives
-- **Hierarchical Organization**: Folder-based document management with drag & drop
-- **Smart Processing**: Quality assessment, intelligent chunking, OCR support
-- **Real-time Updates**: WebSocket notifications for processing status
-- **Metadata Management**: Tags, categories, custom metadata per document
-- **File Tree Sidebar**: Visual folder hierarchy with context menus
+---
 
-### **Advanced Search & Retrieval**
-- **Vector Similarity Search**: Semantic search across all documents via Qdrant
-- **Knowledge Graph**: Entity extraction and relationship mapping via Neo4j
-- **Multi-Source Search**: Documents, videos, entities, web content
-- **Unified Search Tools**: Single interface for all search types
-- **Citation Support**: Answers include source references and relevance scores
+## Supported file & media formats
 
-### **Org-Mode Integration**
-- **Native .org File Support**: Store org-mode files with structure preservation
-- **WebDAV Sync**: Mobile sync via WebDAV server (compatible with beorg, Orgzly)
-- **Org-Inbox Agent**: Natural language capture to org-mode
-- **Non-Vectorized Storage**: Org files kept structured, not embedded
+The library accepts many **document**, **media**, and **archive** types. **Vector chunking** applies to text-heavy pipelines (PDF, EPUB, Office, HTML, subtitles, etc.); images and video follow the image / media pipelines. For the exact enum and indexing eligibility, see `backend/models/api_models.py` (`DocumentType`) and `bastion_indexing/policy.py`.
 
-### **Messaging & Collaboration**
-- **User-to-User Messaging**: Real-time chat rooms (direct & group)
-- **Presence Indicators**: Online/offline/away status tracking
-- **Message Reactions**: Emoji reactions on messages
-- **Unread Tracking**: Per-room unread message counts
+| Category | Formats |
+|----------|---------|
+| **Office & long-form** | PDF, DOCX, **PPTX**, EPUB |
+| **Text & markup** | TXT, **Markdown** (`.md`), **HTML**, **Org** (`.org`) |
+| **Mail & captures** | **EML**, URL-ingested artifacts (where configured) |
+| **Archives** | **ZIP** (expanded into child documents where applicable) |
+| **Subtitles** | **SRT**, **VTT** |
+| **Images** | Raster formats as **image** documents; companion **`*.metadata.json`** sidecars for searchable image metadata |
+| **Audio** | MP3, AAC, WAV, FLAC, OGG, M4A, WMA, Opus |
+| **Video** | MP4, MKV, AVI, MOV, WebM |
 
-### **Team-Based Collaboration**
-- **Team Management**: Create teams with roles (admin, member, viewer)
-- **Team Invitations**: Invite users via messaging system with invitation messages
-- **Team Feeds**: Social posting with text, images, and file attachments
-- **Post Interactions**: Reactions and comments on team posts
-- **Team Documents**: Share documents and folders with teams
-- **Team Chat Rooms**: Dedicated chat rooms for team communication
-- **Access Control**: Row-Level Security (RLS) policies ensure team data isolation
+---
 
-### **RSS Feed Management**
-- **Feed Subscriptions**: Add and manage RSS/Atom feeds
-- **Background Polling**: Automatic feed updates via Celery tasks
-- **Article Import**: Import feed articles into knowledge base
-- **Unread Tracking**: Track which articles have been read
-- **RSS Agent**: Natural language feed queries and article summaries
+## Capabilities in depth
 
-### **Entertainment Knowledge Base**
-- **Movies & TV Shows**: Track and query entertainment content
-- **NEO4J Integration**: Rich relationship graphs for actors, directors, franchises
-- **Entertainment Agent**: Natural language queries about movies and shows
+### Intelligence & automation
 
-### **Creative Writing & Editing**
-- **Fiction Editing Agent**: Prose editing with style preservation
-- **Character Development Agent**: Character arc analysis and suggestions
-- **Outline Editing Agent**: Story structure and outline management
-- **Story Analysis Agent**: Narrative structure analysis
-- **Proofreading Agent**: Grammar, style, and clarity improvements
+- **LangGraph orchestration** — Checkpointer-backed workflows, resumable threads, structured tool I/O.
+- **Agent Factory** — **Playbooks**, **skills**, tool packs, optional **M365 / GitHub / DevOps**-style actions when configured; **artifacts** you can reopen, pin, and share.
+- **Agent lines** — **Templates**, **heartbeat schedules** (interval or cron with timezone), continuity and delivery hooks for recurring autonomous runs.
+- **Tool service (gRPC)** — Document, search, org, RSS, messaging, crawl, data workspace, and domain tools for agents—centralized and typed.
+- **Human-in-the-loop** — Permission gates for sensitive tools (e.g. web, outbound messaging).
+- **Web & research** — SearXNG metasearch, Crawl4AI microservice, crawl and ingestion paths to grow your library from the web.
 
-### **Data Workspaces**
-- **Dedicated Data Platform**: Isolated PostgreSQL database for user data workspaces
-- **Custom Databases**: Create and manage custom databases within workspaces
-- **Data Import**: CSV, JSON, Excel file import with automatic schema inference
-- **Visual Table Management**: Create, edit, and query custom tables
-- **Styling Support**: Color-coded workspaces and databases for organization
-- **External Connections**: Connect to external databases (PostgreSQL, MySQL, SQLite)
-- **Data Transformations**: Built-in transformation operations on imported data
-- **Query History**: Track and reuse LLM-powered data queries
-- **Microservice Architecture**: Dedicated gRPC-based data service for performance
+### Library, search, and graph
 
-### **Weather & Location**
-- **Weather Agent**: Current weather and forecasts via OpenWeatherMap
-- **Location-Aware**: Query weather for any location
-- **Natural Language**: "What's the weather in San Francisco?"
+- **Hybrid retrieval** — Dense vectors (**Qdrant**), optional **BM25** / lexical paths where enabled, reranking where configured.
+- **Knowledge graph** — **Neo4j** entities and relationships for exploration and entertainment catalogs.
+- **Unified search** — One mental model for “find it” across documents, tools, and agents; answers with **citations** and previews.
+- **Operator-grade UI** — Folder tree, tabs, batch folder hydration for large libraries, WebSockets for pipeline status.
 
-### **Image Generation**
-- **Image Generation Agent**: Create images via OpenRouter-supported image generation models
-- **Natural Language Prompts**: Describe what you want to create
-- **Multiple Styles**: Support for different artistic styles and parameters
+### Writing, editing, and long-form
 
-### **Specialized Agents**
-- **Data Formatting Agent**: Format data into tables, charts, and structured outputs
-- **Content Analysis Agent**: Deep content analysis and summarization
-- **Fact Checking Agent**: Verify claims and check facts
-- **Site Crawl Agent**: Extract content from websites for research
-- **Website Crawler Agent**: Ingest entire websites into knowledge base
-- **Podcast Script Agent**: Generate podcast scripts
-- **Substack Agent**: Manage Substack content
-- **Rules Editing Agent**: Game rules and documentation editing
+- Flows for **fiction**, **outline**, **character**, **proofreading**, and **rules** editing grounded in your manuscript and project context.
+- **Collaborative editing** — Real-time shared editing on supported documents (Yjs-backed collab in the editor when a room is active; per-document encryption disables collaboration—see in-app help).
+- **Document versioning** for editable text types (e.g. Markdown, Org, plain text).
+- **Org-mode** as a first-class citizen: structure preserved, **WebDAV** for mobile clients (e.g. beorg / Orgzly-class apps), capture and agenda surfaces in the app.
 
-### **Audio Processing**
-- **Audio Transcription**: Upload audio files for transcription via OpenAI Whisper
-- **Multiple Formats**: Support for MP3, WAV, M4A, and more
+### Data workspaces & SQL
+
+- Isolated **postgres-data** plus a **data-service** gRPC API.
+- **CSV / JSON / Excel** import with schema inference, styled tables, query history, NL and SQL interfaces.
+- **External connections** to PostgreSQL, MySQL, SQLite for federated analysis (see Agent Factory connectors).
+
+### Collaboration & comms
+
+- **User messaging** — In-app **chat rooms** (direct messages and ad hoc groups), **presence**, **reactions**, unread counts, optional **encryption at rest**, file attachments; agents can participate where configured.
+- **Teams** — Long-lived **teams** with **admin / member / viewer** roles, invitations via messaging, **team feeds** (posts, attachments, comments), **team chat rooms**, and **shared team libraries** (folders and documents), all enforced with **PostgreSQL RLS**.
+- **Collaborative documents** — Invite collaborators into a **collab session** on supported text documents so multiple signed-in users edit the same file with live cursors and synced text (started from the document viewer when collaboration is available).
+- **Optional federation** — Pair Bastion instances for cross-server rooms when enabled (`SITE_URL`, `SECRET_KEY`).
+
+### Feeds, news, and passive intake
+
+- **RSS/Atom** subscriptions, Celery-driven polling, read/unread, import into the library, NL queries over feeds.
+- **GReader-compatible** HTTP API for classic mobile readers (toggle via env).
+
+### Media, voice, and reading room
+
+- **Voice service** — STT (e.g. Whisper) and TTS providers (e.g. ElevenLabs, OpenAI, Piper) behind gRPC.
+- **Image pipeline** — Upload, optional **vision** microservice for richer media understanding, **image generation** from chat and agents.
+- **EPUB / OPDS** — Catalogs in settings, in-app reader, optional progress sync (KoReader-style workflows).
+
+### Maps, routing, and location-aware workflows
+
+- **PMTiles** basemap support and legacy tile-server URLs where configured.
+- **Valhalla** (default) or **OSRM**-style routing via compose for maps and location-aware agents.
+
+### Operator-facing extras
+
+- **Celery** workers (orchestrator, agents, RSS, reindex queues), **Beat**, **Flower** UI.
+- **Optional BBS** — SSH/telnet text UI for menus, chat, RSS, org surfaces, and ASCII / wallpaper modes.
+- **Home dashboard** — Widgets, embeds, scratch-pad style blocks.
+
+### Security posture (summary)
+
+- **JWT** sessions, bcrypt password storage, **PostgreSQL RLS** on sensitive tables, path sanitization, parameterized SQL.
+- **Secrets in environment**, not in the repo—see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for production hardening.
+
+---
 
 ## Technical Architecture
 
@@ -144,7 +139,7 @@ Think of it as your personal command center - whether you're researching documen
 
 ### AI & LLM Integration
 - **LLM Providers**: OpenRouter (using OpenAI API)
-- **Embeddings**: OpenAI text-embedding-3-large vectorization)
+- **Embeddings**: OpenAI text-embedding-3-large vectorization
 - **Image Generation**: OpenRouter-supported image generation models
 - **Speech**: OpenAI Whisper (transcription), TTS (future)
 - **Intent Classification**: Select fast models for routing
@@ -157,6 +152,10 @@ Think of it as your personal command center - whether you're researching documen
 - **External Services**: Qdrant and Neo4j
 - **Networking**: Bridge network for inter-service communication
 - **Volumes**: Persistent storage for uploads, processed files, operational database, and data workspaces
+
+## Deployment
+
+For **compose files**, **`.env` layout**, **minimal stacks**, **GHCR images**, security and operations (hobby through production operators), see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ## Quick Start
 
@@ -176,7 +175,9 @@ cp .env.example .env
 ```
 
 ### 2. Configure Environment
-Edit `.env` file with your API keys and service endpoints:
+Copy [`.env.example`](.env.example) to `.env` and set at least the variables you need for your stack. For **profiles**, **Postgres/password models**, **Qdrant/Neo4j topologies**, and **registry-based deploys**, use **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+
+Minimal example — keys and external services (your URLs will differ):
 
 ```env
 # Required: OpenAI API Key
@@ -262,6 +263,13 @@ The power of Bastion lies in its natural language interface. Examples:
 2. **Organize**: Create folders, move documents, apply tags and categories
 3. **Search**: Use semantic search across all documents
 4. **Query**: Ask natural language questions about your documents
+5. **Collaborate** (supported docs): Start or join a **collaborative editing** session so teammates edit the same document in real time (not available for per-file encrypted documents)
+
+### Teams
+1. **Create or join a team** from the Teams area in the sidebar (roles: admin, member, viewer)
+2. **Invite members** using the team invitation flow (often via messaging)
+3. **Use the team feed** for announcements, files, and comments; open **team chat** for ongoing discussion
+4. **Share libraries**: Add or move documents and folders into the team workspace so members see shared **document trees** with RLS-backed access
 
 ### Data Workspaces
 1. **Create Workspace**: Click "Data Workspaces" in sidebar → Create New
@@ -279,14 +287,16 @@ The power of Bastion lies in its natural language interface. Examples:
 
 ### Messaging
 1. **Open Drawer**: Click the floating mail icon (bottom-right)
-2. **Create Room**: Click "+ New Conversation"
-3. **Send Messages**: Real-time messaging with presence indicators
-4. **Agent Integration**: AI can send messages to other users
+2. **Create Room**: Click "+ New Conversation" for a **direct** or **group** chat room (separate from team feed posts—use Teams for long-lived orgs)
+3. **Send Messages**: Real-time messaging with **presence** indicators
+4. **Agent Integration**: AI can send messages to other users when tools and permissions allow
 
 ## Configuration
 
 ### Environment Variables
-Key configuration options (see `docker-compose.yml` for full list):
+**Full deployment and env grouping:** [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The snippet below highlights common keys; **`docker-compose.yml`** defines every injected variable for the default stack.
+
+Key configuration options (see `docker-compose.yml` for the authoritative list):
 
 ```yaml
 # Core
