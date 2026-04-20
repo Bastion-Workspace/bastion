@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: Frontend Docker build uses Node 22 and `NODE_OPTIONS=--max-old-space-size=4096` so `vite build` meets dependency engine ranges and avoids heap OOM on CI.
+- Update: `.env.example` lists every variable referenced in root `docker-compose.yml` (with compose-aligned defaults) plus application-only env vars for migration toward externalized / Kubernetes config.
+- Update: `docker-compose.yml` documents `${VAR:-default}` pattern; DB URLs, JWT, Qdrant/Neo4j, LangGraph DB creds, data-workspace Postgres, prod frontend `VITE_*` runtime, and pgbouncer healthcheck honor `.env` overrides with same defaults as before when unset.
+- Update: Docker Compose uses single `LOG_LEVEL` for all first-party services (removed per-service `*_LOG_LEVEL` env indirection).
 - Fix: `build-and-push` workflow sets `IMAGE_PREFIX` to lowercase `github.repository_owner` so GHCR tags validate (e.g. `ghcr.io/bastion-workspace/bastion-backend:0.70.0`).
 - Update: README — drop standalone **Deployment** section; fold operator link into **Technical Architecture** (see `docs/DEPLOYMENT.md`).
 - Update: README — dedicated **Agent Factory** section (building blocks, hybrid skill discovery, concrete examples); **Agent Factory** snapshot + skill rows; remove premature **code-workspace** claims; reframe long-form editing as user-composed agents.

@@ -208,7 +208,7 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
       - DEVELOPMENT_BYPASS_AUTH=false
-      - LOG_LEVEL=${BACKEND_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - USE_GRPC_ORCHESTRATOR=true
       - GRPC_ORCHESTRATOR_PERCENTAGE=100
     ports:
@@ -270,7 +270,7 @@ services:
       - VECTOR_EMBEDDING_ENABLED=${VECTOR_EMBEDDING_ENABLED:-true}
       - VECTOR_EMBEDDING_REQUIRED=${VECTOR_EMBEDDING_REQUIRED:-false}
       - GRPC_TOOL_SERVICE_PORT=50052
-      - LOG_LEVEL=${TOOLS_SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SECRET_KEY=${SECRET_KEY:-bastion-secret-key-change-in-production}
       - HYBRID_SEARCH_ENABLED=${HYBRID_SEARCH_ENABLED:-false}
       - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-3072}
@@ -374,7 +374,7 @@ services:
       - QUALITY_THRESHOLD=${QUALITY_THRESHOLD:-0.7}
       - DEBUG=${DEBUG:-true}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
-      - LOG_LEVEL=${CELERY_WORKER_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
@@ -427,7 +427,7 @@ services:
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
       - DEBUG=${DEBUG:-true}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
-      - LOG_LEVEL=${CELERY_BEAT_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - SECRET_KEY=${SECRET_KEY:-bastion-secret-key-change-in-production}
     volumes:
       - ./logs:/app/logs
@@ -562,7 +562,7 @@ services:
       - WEBDAV_HOST=0.0.0.0
       - WEBDAV_PORT=8001
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
-      - LOG_LEVEL=${WEBDAV_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
       - "0.0.0.0:8002:8001"
     volumes:
@@ -592,7 +592,7 @@ services:
     environment:
       - SERVICE_NAME=llm-orchestrator
       - GRPC_PORT=50051
-      - LOG_LEVEL=${LLM_ORCHESTRATOR_LOG_LEVEL:-DEBUG}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=bastion_knowledge_base
@@ -644,7 +644,7 @@ services:
     environment:
       SERVICE_NAME: vector-service
       GRPC_PORT: "50053"
-      LOG_LEVEL: ${VECTOR_SERVICE_LOG_LEVEL:-INFO}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       VECTOR_DB_BACKEND: ${VECTOR_DB_BACKEND:-qdrant}
       QDRANT_URL: ${QDRANT_URL:-http://localhost:6333}
       ES_URL: ${ES_URL:-}
@@ -742,7 +742,7 @@ services:
     environment:
       - SERVICE_NAME=data-service
       - GRPC_PORT=50054
-      - LOG_LEVEL=${DATA_SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - POSTGRES_HOST=postgres-data
       - POSTGRES_PORT=5432
       - POSTGRES_DB=data_workspace
@@ -781,7 +781,7 @@ services:
       - SERVICE_NAME=image-vision-service
       - GRPC_PORT=50056
       - SERVICE_VERSION=0.70.0
-      - LOG_LEVEL=${IMAGE_VISION_SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEVICE=${IMAGE_VISION_DEVICE:-auto}
       - MAX_WORKERS=4
     ports:
@@ -819,7 +819,7 @@ services:
     environment:
       - SERVICE_NAME=connections-service
       - GRPC_PORT=50057
-      - LOG_LEVEL=${SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MICROSOFT_GRAPH_BASE=https://graph.microsoft.com/v1.0
       - BACKEND_URL=http://backend:8000
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-changeme-internal-key}
@@ -854,7 +854,7 @@ services:
     environment:
       - SERVICE_NAME=voice-service
       - GRPC_PORT=50059
-      - LOG_LEVEL=${VOICE_SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - VOICE_STT_PROVIDER=whisper
       - VOICE_TTS_PROVIDER=${VOICE_TTS_PROVIDER:-elevenlabs}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
@@ -894,7 +894,7 @@ services:
     environment:
       - SERVICE_NAME=document-service
       - GRPC_PORT=50058
-      - LOG_LEVEL=${DOCUMENT_SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - GLINER_MODEL=${GLINER_MODEL:-fastino/gliner2-base-v1}
       - MAX_TEXT_LENGTH=${DOCUMENT_SERVICE_MAX_TEXT_LENGTH:-1000000}
     ports:
@@ -925,7 +925,7 @@ services:
     environment:
       - SERVICE_NAME=crawl4ai-service
       - GRPC_PORT=50055
-      - LOG_LEVEL=${CRAWL4AI_SERVICE_LOG_LEVEL:-INFO}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - MAX_CONCURRENT_CRAWLS=10
       - DEFAULT_TIMEOUT_SECONDS=60
       - DEFAULT_MAX_CONTENT_LENGTH=1000000
@@ -994,7 +994,7 @@ services:
   #     - BBS_MAX_CONNECTIONS=${BBS_MAX_CONNECTIONS:-20}
   #     - BBS_IDLE_TIMEOUT=${BBS_IDLE_TIMEOUT:-600}
   #     - BBS_THEME=${BBS_THEME:-green}
-  #     - LOG_LEVEL=${SERVICE_LOG_LEVEL:-INFO}
+  #     - LOG_LEVEL=${LOG_LEVEL:-INFO}
   #   depends_on:
   #     backend:
   #       condition: service_healthy

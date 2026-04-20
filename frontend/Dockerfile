@@ -1,5 +1,5 @@
-# Build stage
-FROM node:18-alpine as build
+# Build stage (Node 22: satisfies marked/langium/chevrotain engine ranges; larger default resources help Vite)
+FROM node:22-alpine AS build
 
 # Set working directory
 WORKDIR /app
@@ -15,7 +15,7 @@ RUN npm cache clean --force \
     && npm config set fetch-retries 5 \
     && npm config set fetch-retry-mintimeout 20000 \
     && npm config set fetch-retry-maxtimeout 120000
-RUN npm install --production=false
+RUN npm install
 
 # Vite embeds VITE_* at build time
 ARG VITE_API_URL=
@@ -38,6 +38,9 @@ COPY public/ ./public/
 COPY src/ ./src/
 COPY scripts/ ./scripts/
 COPY .env* ./
+
+# Vite production transform can exceed the default ~2 GiB heap on CI builders
+ENV NODE_OPTIONS="--max-old-space-size=4096"
 
 # Build the app
 RUN npm run build
