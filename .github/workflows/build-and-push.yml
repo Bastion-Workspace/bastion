@@ -208,24 +208,6 @@ jobs:
             BUILDKIT_INLINE_CACHE=1
             VITE_VERSION=${{ steps.metadata.outputs.version }}
 
-      - name: Build and push frontend-dev
-        uses: docker/build-push-action@v5
-        with:
-          context: ./frontend
-          file: ./frontend/Dockerfile.dev
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:${{ steps.metadata.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:${{ steps.metadata.outputs.latest_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:sha-${{ steps.metadata.outputs.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:${{ steps.metadata.outputs.branch }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
-            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
-            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
-
       - name: Build and push webdav
         uses: docker/build-push-action@v5
         with:
@@ -423,7 +405,6 @@ jobs:
           echo "- celery-beat" >> $GITHUB_STEP_SUMMARY
           echo "- celery-flower" >> $GITHUB_STEP_SUMMARY
           echo "- frontend" >> $GITHUB_STEP_SUMMARY
-          echo "- frontend-dev" >> $GITHUB_STEP_SUMMARY
           echo "- webdav" >> $GITHUB_STEP_SUMMARY
           echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
           echo "- vector-service" >> $GITHUB_STEP_SUMMARY

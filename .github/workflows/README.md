@@ -28,7 +28,7 @@ When a tag is pushed, each image receives multiple tags for flexibility:
 
 ## Images Built
 
-The workflow builds and pushes every first-party image referenced by `docker-compose.yml` (pull-only services such as Postgres are not built here):
+The workflow builds and pushes every first-party image referenced by `docker-compose.yml` (pull-only services such as Postgres are not built here). The Vite HMR image **`bastion-frontend-dev`** is **not** published from CI; build it locally with `docker compose --profile dev --build` (see `frontend/Dockerfile.dev`).
 
 1. `bastion-backend` - Backend API service
 2. `bastion-tools-service` - gRPC tools service
@@ -37,17 +37,16 @@ The workflow builds and pushes every first-party image referenced by `docker-com
 5. `bastion-celery-beat` - Celery beat scheduler
 6. `bastion-celery-flower` - Celery Flower UI
 7. `bastion-frontend` - Production static web UI (nginx)
-8. `bastion-frontend-dev` - Vite dev server image (HMR profile)
-9. `bastion-webdav` - WebDAV server for OrgMode sync
-10. `bastion-llm-orchestrator` - LLM orchestrator service
-11. `bastion-vector-service` - Vector embedding service
-12. `bastion-data-service` - Data workspace service
-13. `bastion-image-vision-service` - Image vision / face pipeline
-14. `bastion-connections-service` - External connections (OAuth, messaging, connectors)
-15. `bastion-voice-service` - STT/TTS gRPC service
-16. `bastion-document-service` - Document library and processing
-17. `bastion-crawl4ai-service` - Crawl4AI microservice
-18. `bastion-bbs-server` - Optional BBS (telnet/SSH)
+8. `bastion-webdav` - WebDAV server for OrgMode sync
+9. `bastion-llm-orchestrator` - LLM orchestrator service
+10. `bastion-vector-service` - Vector embedding service
+11. `bastion-data-service` - Data workspace service
+12. `bastion-image-vision-service` - Image vision / face pipeline
+13. `bastion-connections-service` - External connections (OAuth, messaging, connectors)
+14. `bastion-voice-service` - STT/TTS gRPC service
+15. `bastion-document-service` - Document library and processing
+16. `bastion-crawl4ai-service` - Crawl4AI microservice
+17. `bastion-bbs-server` - Optional BBS (telnet/SSH)
 
 ## Image Naming Convention
 

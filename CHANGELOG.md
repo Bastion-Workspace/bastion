@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Feature: BBS menu prompts use single-key `[letter]` shortcuts without Enter (multi-digit row numbers still read digits then Enter).
 - Fix: Frontend Docker build uses Node 22 and `NODE_OPTIONS=--max-old-space-size=4096` so `vite build` meets dependency engine ranges and avoids heap OOM on CI.
 - Update: `.env.example` lists every variable referenced in root `docker-compose.yml` (with compose-aligned defaults) plus application-only env vars for migration toward externalized / Kubernetes config.
 - Update: `docker-compose.yml` documents `${VAR:-default}` pattern; DB URLs, JWT, Qdrant/Neo4j, LangGraph DB creds, data-workspace Postgres, prod frontend `VITE_*` runtime, and pgbouncer healthcheck honor `.env` overrides with same defaults as before when unset.
@@ -15,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update: README — drop standalone **Deployment** section; fold operator link into **Technical Architecture** (see `docs/DEPLOYMENT.md`).
 - Update: README — dedicated **Agent Factory** section (building blocks, hybrid skill discovery, concrete examples); **Agent Factory** snapshot + skill rows; remove premature **code-workspace** claims; reframe long-form editing as user-composed agents.
 - Update: README product overview — platform snapshot, supported formats table, and expanded capability sections for operators and evaluators.
-- Update: GitHub Actions `build-and-push` workflow builds and pushes all first-party Compose images (tools-service, cli-worker, Celery variants, document-service, connections-service, voice-service, image-vision-service, bbs-server, frontend-dev) on version tags.
+- Update: GitHub Actions `build-and-push` publishes production `frontend` only; `frontend-dev` (Vite HMR) is not built in CI—use `docker compose --profile dev --build` locally.
 - Update: Added `docs/DEPLOYMENT.md` (compose scenarios, env grouping, GHCR, operations) and linked it from `README.md`.
 
 ## [0.70.0] - 2026-04-20
