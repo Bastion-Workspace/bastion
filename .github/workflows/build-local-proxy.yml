@@ -4,11 +4,11 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
     paths:
       - 'local-proxy/**'
       - '.github/workflows/build-local-proxy.yml'
-  tags:
-    - 'v*'
   workflow_dispatch:
 
 jobs:
