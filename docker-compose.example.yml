@@ -1,13 +1,17 @@
 # Docker Compose example for GitHub / public use. No hardcoded passwords or secrets.
 # Copy to docker-compose.yml and set values in .env (or export) before running.
 # Required: POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD, JWT_SECRET_KEY, and API keys (OPENAI_API_KEY, etc.).
-# Note: backend/sql/01_init.sql creates bastion_user with a default password; set POSTGRES_APP_PASSWORD
-# to match that for first-run, or change the password in the init script and use a strong value.
+# Postgres images bundle backend/sql and data-service/sql (see postgres/Dockerfile). For image-only
+# deploys, pull ghcr.io/<org>/bastion-postgres:<tag> from CI. 01_init.sql creates bastion_user with a
+# default password; set POSTGRES_APP_PASSWORD to match for first-run, or ALTER USER after init.
 
 services:
   # PostgreSQL Database for Settings and Metadata
   postgres:
-    image: postgres:15-alpine
+    build:
+      context: .
+      dockerfile: postgres/Dockerfile
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-postgres:latest
     container_name: ${COMPOSE_PROJECT_NAME:-bastion}-postgres
     environment:
       - POSTGRES_DB=postgres
@@ -35,7 +39,6 @@ services:
       -c max_parallel_maintenance_workers=4
     volumes:
       - bastion_postgres_data:/var/lib/postgresql/data
-      - ./backend/sql:/docker-entrypoint-initdb.d
     ports:
       - "5433:5432"
     restart: unless-stopped
@@ -694,7 +697,10 @@ services:
       retries: 3
 
   postgres-data:
-    image: postgres:15-alpine
+    build:
+      context: .
+      dockerfile: postgres-data/Dockerfile
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-postgres-data:latest
     container_name: ${COMPOSE_PROJECT_NAME:-bastion}-postgres-data
     environment:
       - POSTGRES_DB=data_workspace
@@ -712,7 +718,6 @@ services:
       -c work_mem=8MB
     volumes:
       - bastion_data_workspace_db:/var/lib/postgresql/data
-      - ./data-service/sql:/docker-entrypoint-initdb.d
     ports:
       - "5434:5432"
     restart: unless-stopped

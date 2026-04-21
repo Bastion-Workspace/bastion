@@ -10,6 +10,14 @@ on:
         description: 'Image version label (leave empty to use VERSION file from the selected branch)'
         required: false
         type: string
+      build_scope:
+        description: 'postgres_only publishes just bastion-postgres + bastion-postgres-data (quick first run). all builds every image.'
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - postgres_only
 
 env:
   REGISTRY: ghcr.io
@@ -43,23 +51,6 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      # GHCR / OCI require lowercase paths; github.repository_owner preserves org casing.
-      - name: Set GHCR image prefix (lowercase)
-        run: |
-          owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
-          echo "IMAGE_PREFIX=${owner_lc}/bastion" >> "$GITHUB_ENV"
-          echo "Using IMAGE_PREFIX=${owner_lc}/bastion"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Extract version and metadata
         id: metadata
         env:
@@ -75,13 +66,17 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           
-          # Detect if dev or production
+          # Detect if dev or production (e.g. 0.70.5-dev vs 0.70.0). Drives GHCR package family:
+          # - production → ghcr.io/<owner>/bastion-<service> (intended public)
+          # - dev        → ghcr.io/<owner>/bastion-dev-<service> (stays private; separate package name)
           if [[ "$VERSION" == *"-dev" ]]; then
             echo "is_dev=true" >> $GITHUB_OUTPUT
             echo "latest_tag=latest-dev" >> $GITHUB_OUTPUT
+            echo "image_base=bastion-dev" >> $GITHUB_OUTPUT
           else
             echo "is_dev=false" >> $GITHUB_OUTPUT
             echo "latest_tag=latest" >> $GITHUB_OUTPUT
+            echo "image_base=bastion" >> $GITHUB_OUTPUT
           fi
           
           # Get git SHA (short)
@@ -91,7 +86,6 @@ jobs:
           # Get branch name (from tag or default)
           BRANCH=${GITHUB_REF#refs/heads/}
           if [[ "$BRANCH" == "refs/tags/"* ]]; then
-            # Extract branch from tag context or use default
             if [[ "$VERSION" == *"-dev" ]]; then
               BRANCH="dev"
             else
@@ -104,14 +98,100 @@ jobs:
           if [[ "$VERSION" == *"-dev" ]]; then
             echo "Is Dev: true"
             echo "Latest Tag: latest-dev"
+            echo "Image base: bastion-dev-* (private channel)"
           else
             echo "Is Dev: false"
             echo "Latest Tag: latest"
+            echo "Image base: bastion-* (production channel)"
           fi
           echo "SHA: $SHA"
           echo "Branch: $BRANCH"
 
+      # GHCR / OCI require lowercase paths; github.repository_owner preserves org casing.
+      - name: Set GHCR image prefix (lowercase)
+        run: |
+          owner_lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE_PREFIX=${owner_lc}/${{ steps.metadata.outputs.image_base }}" >> "$GITHUB_ENV"
+          echo "Using IMAGE_PREFIX=${owner_lc}/${{ steps.metadata.outputs.image_base }}"
+
+      - name: Ensure ref matches release channel (main vs dev)
+        env:
+          IS_DEV: ${{ steps.metadata.outputs.is_dev }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if [[ "$IS_DEV" == "true" ]]; then
+            git fetch origin dev
+          fi
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            SHA=$(git rev-parse HEAD)
+            if [[ "$IS_DEV" == "true" ]]; then
+              git merge-base --is-ancestor "$SHA" origin/dev || {
+                echo "::error::Dev image tags (version ending in -dev) must point at a commit on origin/dev."
+                exit 1
+              }
+            else
+              git merge-base --is-ancestor "$SHA" origin/main || {
+                echo "::error::Production image tags must point at a commit on origin/main."
+                exit 1
+              }
+            fi
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "$IS_DEV" == "true" ]]; then
+              [[ "${{ github.ref }}" == "refs/heads/dev" ]] || {
+                echo "::error::Manual dev builds (-dev VERSION) must be run from the dev branch."
+                exit 1
+              }
+            else
+              [[ "${{ github.ref }}" == "refs/heads/main" ]] || {
+                echo "::error::Manual production builds must be run from the main branch."
+                exit 1
+              }
+            fi
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push postgres (bundled backend/sql init)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: postgres/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+          build-args: BUILDKIT_INLINE_CACHE=1
+
+      - name: Build and push postgres-data (bundled data-service/sql init)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: postgres-data/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres-data:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres-data:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres-data:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-postgres-data:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+          build-args: BUILDKIT_INLINE_CACHE=1
+
       - name: Build and push backend
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -130,6 +210,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push tools-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -148,6 +229,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push cli-worker
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -166,6 +248,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push celery-worker
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -184,6 +267,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push celery-beat
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -201,25 +285,8 @@ jobs:
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
-      - name: Build and push celery-flower
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./backend/Dockerfile.celery-flower
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.latest_tag }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:sha-${{ steps.metadata.outputs.sha }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.branch }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=min
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
-            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
-            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
-
       - name: Build and push frontend
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
@@ -237,6 +304,7 @@ jobs:
             VITE_VERSION=${{ steps.metadata.outputs.version }}
 
       - name: Build and push webdav
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -255,6 +323,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push llm-orchestrator
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -273,6 +342,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push vector-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -291,6 +361,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push data-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -309,6 +380,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push image-vision-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -327,6 +399,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push connections-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -345,6 +418,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push voice-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -363,6 +437,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push document-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -381,6 +456,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push crawl4ai-service
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -399,6 +475,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push bbs-server
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -417,29 +494,46 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Summary
+        env:
+          REGISTRY: ${{ env.REGISTRY }}
+          IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
+          BUILD_SCOPE: ${{ github.event.inputs.build_scope }}
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.metadata.outputs.is_dev }}" == "true" ]]; then
+            echo "**Channel:** dev — images are \`ghcr.io/.../bastion-dev-*\` (keep packages **private**; separate from production)." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Channel:** production — images are \`ghcr.io/.../bastion-*\` (set GHCR package visibility **public** for anonymous pulls; see \`.github/workflows/README.md\`)." >> $GITHUB_STEP_SUMMARY
+          fi
+          if [[ "$BUILD_SCOPE" == "postgres_only" ]]; then
+            echo "**Build scope:** \`postgres_only\` — only DB images were built; re-run with \`all\` (or push a \`v*\` tag) for the rest." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
           echo "**Version:** ${{ steps.metadata.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "**Latest Tag:** ${{ steps.metadata.outputs.latest_tag }}" >> $GITHUB_STEP_SUMMARY
           echo "**SHA:** ${{ steps.metadata.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Branch:** ${{ steps.metadata.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch label:** ${{ steps.metadata.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image prefix:** \`${REGISTRY}/${IMAGE_PREFIX}-\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images built (GHCR)" >> $GITHUB_STEP_SUMMARY
-          echo "- backend" >> $GITHUB_STEP_SUMMARY
-          echo "- tools-service" >> $GITHUB_STEP_SUMMARY
-          echo "- cli-worker" >> $GITHUB_STEP_SUMMARY
-          echo "- celery-worker" >> $GITHUB_STEP_SUMMARY
-          echo "- celery-beat" >> $GITHUB_STEP_SUMMARY
-          echo "- celery-flower" >> $GITHUB_STEP_SUMMARY
-          echo "- frontend" >> $GITHUB_STEP_SUMMARY
-          echo "- webdav" >> $GITHUB_STEP_SUMMARY
-          echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
-          echo "- vector-service" >> $GITHUB_STEP_SUMMARY
-          echo "- data-service" >> $GITHUB_STEP_SUMMARY
-          echo "- image-vision-service" >> $GITHUB_STEP_SUMMARY
-          echo "- connections-service" >> $GITHUB_STEP_SUMMARY
-          echo "- voice-service" >> $GITHUB_STEP_SUMMARY
-          echo "- document-service" >> $GITHUB_STEP_SUMMARY
-          echo "- crawl4ai-service" >> $GITHUB_STEP_SUMMARY
-          echo "- bbs-server" >> $GITHUB_STEP_SUMMARY
+          echo "- postgres (SQL init baked in)" >> $GITHUB_STEP_SUMMARY
+          echo "- postgres-data (data workspace SQL init baked in)" >> $GITHUB_STEP_SUMMARY
+          if [[ "$BUILD_SCOPE" != "postgres_only" ]]; then
+            echo "- backend" >> $GITHUB_STEP_SUMMARY
+            echo "- tools-service" >> $GITHUB_STEP_SUMMARY
+            echo "- cli-worker" >> $GITHUB_STEP_SUMMARY
+            echo "- celery-worker" >> $GITHUB_STEP_SUMMARY
+            echo "- celery-beat" >> $GITHUB_STEP_SUMMARY
+            echo "- frontend" >> $GITHUB_STEP_SUMMARY
+            echo "- webdav" >> $GITHUB_STEP_SUMMARY
+            echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
+            echo "- vector-service" >> $GITHUB_STEP_SUMMARY
+            echo "- data-service" >> $GITHUB_STEP_SUMMARY
+            echo "- image-vision-service" >> $GITHUB_STEP_SUMMARY
+            echo "- connections-service" >> $GITHUB_STEP_SUMMARY
+            echo "- voice-service" >> $GITHUB_STEP_SUMMARY
+            echo "- document-service" >> $GITHUB_STEP_SUMMARY
+            echo "- crawl4ai-service" >> $GITHUB_STEP_SUMMARY
+            echo "- bbs-server" >> $GITHUB_STEP_SUMMARY
+          fi

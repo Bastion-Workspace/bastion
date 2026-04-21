@@ -2,189 +2,198 @@
 
 ## Overview
 
-This repository uses GitHub Actions to automatically build and push Docker images to GitHub Container Registry (ghcr.io) when git tags are created.
+This repository uses GitHub Actions to build and push Docker images to GitHub Container Registry (`ghcr.io`) when you push a **version tag** matching `v*` (for example `v0.70.0` or `v0.70.5-dev`). You can also run the workflow manually from **Actions → Build and Push Docker Images → Run workflow** (optional **version** input; if omitted, the `VERSION` file on the selected branch is used).
+
+## Main vs dev release channels
+
+Releases are **tag-driven** and aligned with two branches:
+
+| Branch | Version examples (in `VERSION` / tag) | GHCR image prefix | Intended visibility |
+|--------|----------------------------------------|-------------------|---------------------|
+| **`main`** | `0.70.0` (no `-dev` suffix) | `ghcr.io/<owner>/bastion-<service>:…` | **Public** anonymous pulls |
+| **`dev`** | `0.70.5-dev` (suffix **`-dev`**) | `ghcr.io/<owner>/bastion-dev-<service>:…` | **Private** (org members / auth) |
+
+The workflow **checks** that:
+
+- **Production** tags (`v0.70.0`, etc.) point at a commit that is on **`origin/main`**.
+- **Development** tags (`v0.70.5-dev`, etc.) point at a commit that is on **`origin/dev`**.
+- **Manual runs** use **`main`** for production versions and **`dev`** for `-dev` versions (per `VERSION` / input).
+
+### Why two image prefixes (`bastion-` vs `bastion-dev-`)?
+
+On GitHub Container Registry, **visibility is per package**, not per tag. A single package cannot be “public for some tags and private for others.” Also, **a package that has been made public cannot be made private again.**
+
+So dev and production **must** use **different package names** if you want private prerelease images and public release images from the same repo. Dev builds therefore publish to **`bastion-dev-<service>`**; production builds publish to **`bastion-<service>`** (unchanged for stable releases).
+
+### Making production images public
+
+Workflows that publish with `GITHUB_TOKEN` follow GitHub’s [default rules](https://docs.github.com/en/packages/managing-github-packages-using-github-actions-workflows/publishing-and-installing-a-package-with-github-actions#default-permissions-and-access-settings-for-packages-modified-through-workflows) for new packages. In practice:
+
+- Keep **organization** defaults so **new packages stay private** if you need dev images to remain private.
+- For **`bastion-*`** production packages, use each package’s **Package settings → Change visibility → Public** once (or your org’s documented process). After that, new pushes add tags to the same **public** package.
+
+Dev **`bastion-dev-*`** packages should stay **private**.
 
 ## Workflow Trigger
 
-The workflow (`build-and-push.yml`) triggers automatically when you push a git tag matching the pattern `v*` (e.g., `v0.10.1-dev` or `v0.10.1`). You can also run it manually from **Actions → Build and Push Docker Images → Run workflow** (optional **version** input; if omitted, the `VERSION` file on the selected branch is used).
+The workflow (`build-and-push.yml`) runs when:
+
+1. You push a git tag matching `v*`, or  
+2. You use **workflow_dispatch** (and satisfy the branch rules above).
+
+### Manual run: Postgres-only (fast)
+
+In **Actions → Build and Push Docker Images → Run workflow**, set **build scope** to **`postgres_only`** to build and push only **`bastion-postgres`** and **`bastion-postgres-data`** (useful for a first CI run or when only SQL/images changed). Leave **build scope** on **`all`** (default) for the full matrix, or use a **`v*`** tag push (always builds everything).
 
 ## Version Management
 
-Version numbers are tracked in the `VERSION` file at the repository root. This file serves as the source of truth for the current version.
+Version numbers are tracked in the `VERSION` file at the repository root. This file is the source of truth for in-repo tooling; **release tags** carry the authoritative version for CI.
 
-### Version Format
+### Version format
 
-- **Development versions**: `0.10.1-dev` (tagged as `v0.10.1-dev`)
-- **Production versions**: `0.10.1` (tagged as `v0.10.1`)
+- **Production**: `0.70.0` → tag **`v0.70.0`** (no `-dev` in the version string).
+- **Development**: `0.70.5-dev` → tag **`v0.70.5-dev`** (suffix **`-dev`** marks the dev channel).
 
 ## Image Tagging Strategy
 
-When a tag is pushed, each image receives multiple tags for flexibility:
+When a tag is pushed, each image receives multiple tags:
 
-1. **Version tag**: The exact version from the git tag (e.g., `0.10.1-dev`)
-2. **Latest tag**: `latest-dev` for development tags, `latest` for production tags
-3. **SHA tag**: Git commit hash for traceability (e.g., `sha-abc1234`)
-4. **Branch tag**: Branch name (`dev` or `main`)
+1. **Version tag**: Exact version from the tag (e.g. `0.70.5-dev` or `0.70.0`).
+2. **Latest tag**: `latest-dev` for dev versions, `latest` for production.
+3. **SHA tag**: Short git SHA (e.g. `sha-abc1234`).
+4. **Branch tag**: `dev` or `main` (label only; channel is determined by the version suffix).
 
 ## Images Built
 
-The workflow builds and pushes every first-party image referenced by `docker-compose.yml` (pull-only services such as Postgres are not built here). The Vite HMR image **`bastion-frontend-dev`** is **not** published from CI; build it locally with `docker compose --profile dev --build` (see `frontend/Dockerfile.dev`).
+The workflow builds and pushes first-party images from `docker-compose.yml`, including **`bastion-postgres`** and **`bastion-postgres-data`** (init SQL baked in; no bind mount of `backend/sql` required in production). The Vite HMR image **`bastion-frontend-dev`** is **not** published from CI; build it locally with `docker compose --profile dev --build` (see `frontend/Dockerfile.dev`). **`bastion-celery-flower`** is also **not** published from CI; build it locally from `backend/Dockerfile.celery-flower` if you use the optional Flower service in Compose.
 
-1. `bastion-backend` - Backend API service
-2. `bastion-tools-service` - gRPC tools service
-3. `bastion-cli-worker` - CLI / codegen sidecar for the orchestrator
-4. `bastion-celery-worker` - Celery worker (orchestrator, agents, RSS, default queues)
-5. `bastion-celery-beat` - Celery beat scheduler
-6. `bastion-celery-flower` - Celery Flower UI
-7. `bastion-frontend` - Production static web UI (nginx)
-8. `bastion-webdav` - WebDAV server for OrgMode sync
-9. `bastion-llm-orchestrator` - LLM orchestrator service
-10. `bastion-vector-service` - Vector embedding service
-11. `bastion-data-service` - Data workspace service
-12. `bastion-image-vision-service` - Image vision / face pipeline
-13. `bastion-connections-service` - External connections (OAuth, messaging, connectors)
-14. `bastion-voice-service` - STT/TTS gRPC service
-15. `bastion-document-service` - Document library and processing
-16. `bastion-crawl4ai-service` - Crawl4AI microservice
-17. `bastion-bbs-server` - Optional BBS (telnet/SSH)
+1. `bastion-postgres` / `bastion-dev-postgres` — main DB (`backend/sql` in image)
+2. `bastion-postgres-data` / `bastion-dev-postgres-data` — data workspace DB (`data-service/sql` in image)
+3. `bastion-backend` / `bastion-dev-backend` (by channel)
+4. `bastion-tools-service` / `bastion-dev-tools-service`
+5. `bastion-cli-worker` / `bastion-dev-cli-worker`
+6. `bastion-celery-worker` / `bastion-dev-celery-worker`
+7. `bastion-celery-beat` / `bastion-dev-celery-beat`
+8. `bastion-frontend` / `bastion-dev-frontend`
+9. `bastion-webdav` / `bastion-dev-webdav`
+10. `bastion-llm-orchestrator` / `bastion-dev-llm-orchestrator`
+11. `bastion-vector-service` / `bastion-dev-vector-service`
+12. `bastion-data-service` / `bastion-dev-data-service`
+13. `bastion-image-vision-service` / `bastion-dev-image-vision-service`
+14. `bastion-connections-service` / `bastion-dev-connections-service`
+15. `bastion-voice-service` / `bastion-dev-voice-service`
+16. `bastion-document-service` / `bastion-dev-document-service`
+17. `bastion-crawl4ai-service` / `bastion-dev-crawl4ai-service`
+18. `bastion-bbs-server` / `bastion-dev-bbs-server`
 
 ## Image Naming Convention
 
-All images are pushed to: `ghcr.io/{GITHUB_ORG}/bastion-{service}:{tag}`
+**Production** (example org `myorg`, version `0.70.0`):
 
-`{GITHUB_ORG}` is `${{ github.repository_owner }}` converted to **lowercase** (GHCR rejects mixed-case repository paths).
+- `ghcr.io/myorg/bastion-backend:0.70.0`
+- `ghcr.io/myorg/bastion-backend:latest`
+- `ghcr.io/myorg/bastion-backend:sha-abc1234`
+- `ghcr.io/myorg/bastion-backend:main`
 
-Example for backend service with version `0.10.1-dev`:
-- `ghcr.io/{GITHUB_ORG}/bastion-backend:0.10.1-dev`
-- `ghcr.io/{GITHUB_ORG}/bastion-backend:latest-dev`
-- `ghcr.io/{GITHUB_ORG}/bastion-backend:sha-abc1234`
-- `ghcr.io/{GITHUB_ORG}/bastion-backend:dev`
+**Development** (version `0.70.5-dev`):
+
+- `ghcr.io/myorg/bastion-dev-backend:0.70.5-dev`
+- `ghcr.io/myorg/bastion-dev-backend:latest-dev`
+- `ghcr.io/myorg/bastion-dev-backend:sha-abc1234`
+- `ghcr.io/myorg/bastion-dev-backend:dev`
+
+`myorg` is `${{ github.repository_owner }}` in **lowercase** (GHCR requires lowercase paths).
 
 ## Usage Workflow
 
-### Development Release
+### Development release (from `dev`)
 
-1. Update the `VERSION` file with the new version:
+1. Update `VERSION` on `dev`, e.g. `0.70.5-dev`.
+2. Commit and push to **`dev`**.
+3. Tag and push (note the **`v`** prefix and **`-dev`** in the tag name):
+
    ```bash
-   echo "0.10.1" > VERSION
+   git tag v0.70.5-dev
+   git push origin v0.70.5-dev
    ```
 
-2. Commit and push the version change:
+Images are published under **`bastion-dev-*`** and should remain **private** at the org level.
+
+### Production release (from `main`)
+
+1. Merge `dev` → **`main`** when ready.
+2. Set `VERSION` to a **non-`-dev`** version (e.g. `0.70.0`) on `main` if needed.
+3. Tag and push:
+
    ```bash
-   git add VERSION
-   git commit -m "Bump version to 0.10.1"
-   git push origin dev
+   git tag v0.70.0
+   git push origin v0.70.0
    ```
 
-3. Create and push the development tag:
-   ```bash
-   git tag v0.10.1-dev
-   git push origin v0.10.1-dev
-   ```
-
-The GitHub Actions workflow will automatically:
-- Build all listed images
-- Tag them with `0.10.1-dev`, `latest-dev`, SHA, and `dev`
-- Push to GitHub Container Registry
-
-### Production Release
-
-1. Merge dev branch to main:
-   ```bash
-   git checkout main
-   git merge dev
-   git push origin main
-   ```
-
-2. Create and push the production tag:
-   ```bash
-   git tag v0.10.1
-   git push origin v0.10.1
-   ```
-
-The workflow will build and tag images with:
-- `0.10.1`, `latest`, SHA, and `main`
+Images are published under **`bastion-*`**. Set GHCR package visibility to **public** for these packages (once per package) so anonymous `docker pull` works for operators.
 
 ## GitHub Repository Settings
 
 ### Required Permissions
 
-The workflow requires the following permissions (automatically granted via `GITHUB_TOKEN`):
+The workflow uses `GITHUB_TOKEN` with:
 
-- **Contents**: Read (to checkout code)
-- **Packages**: Write (to push images to GHCR)
+- **Contents**: Read (checkout; fetch `main` / `dev` for checks)
+- **Packages**: Write (push images to GHCR)
 
 ### Enabling GitHub Packages
 
-1. Go to your repository settings
-2. Navigate to "Actions" → "General"
-3. Under "Workflow permissions", ensure "Read and write permissions" is selected
-4. Under "Packages", ensure "Allow GitHub Actions to create and approve pull requests" is enabled
-
-### Container Registry Access
-
-Images are pushed to GitHub Container Registry (ghcr.io). By default, images are **private**. To make them public:
-
-1. Go to your repository's "Packages" section
-2. Click on a package (e.g., `bastion-backend`)
-3. Click "Package settings"
-4. Scroll to "Danger Zone" and click "Change visibility" → "Public"
+1. Repository **Settings → Actions → General**
+2. Under **Workflow permissions**, enable **Read and write permissions** if your org allows it.
 
 ## Build Performance
 
-- **First build**: Takes longer as there's no cache
-- **Subsequent builds**: Faster due to BuildKit cache stored in GitHub Actions cache
-- **Parallel builds**: Images build sequentially in one job (can be split into a matrix for speed if needed)
+- **First build**: Longer when there is no cache.
+- **Subsequent builds**: Faster with BuildKit cache in GitHub Actions cache.
+- **Parallel builds**: Images build sequentially in one job (a matrix can be added later for speed).
 
 ## Troubleshooting
 
 ### Workflow Not Triggering
 
-- Ensure the tag starts with `v` (e.g., `v0.10.1-dev`, not `0.10.1-dev`)
-- Check that the tag was pushed to the remote repository
-- Verify workflow file is in `.github/workflows/` directory
+- Tag must start with `v` (e.g. `v0.70.5-dev`, not `0.70.5-dev` alone on the remote).
+- Confirm the tag was pushed to the remote.
+
+### “Production image tags must point at a commit on origin/main” (or dev variant)
+
+- The tagged commit must be an ancestor of **`origin/main`** (production) or **`origin/dev`** (dev). Create the tag from the correct branch history.
 
 ### Authentication Errors
 
-- Ensure `GITHUB_TOKEN` has write permissions to packages
-- Check repository settings for Actions permissions
-- Verify the repository owner/organization has GitHub Packages enabled
-
-### Build Failures
-
-- Check the Actions logs for specific error messages
-- Verify all Dockerfiles are present and valid
-- Ensure all required files and dependencies are in the repository
+- Confirm Actions can write packages (`packages: write`).
+- Confirm the org allows GitHub Packages.
 
 ### Image Not Found After Push
 
-- Images are private by default - check package visibility settings
-- Verify the image name matches: `ghcr.io/{ORG}/bastion-{service}:{tag}`
-- Check that the workflow completed successfully
+- Confirm the workflow finished successfully.
+- Use the right prefix: **`bastion-dev-`** for `-dev` versions, **`bastion-`** for production.
+- Private images require `docker login ghcr.io` with a token that can read the package.
 
 ## Using Images in Docker Compose
 
-To use the versioned images from GHCR instead of building locally, update `docker-compose.yml`:
+Override `image:` to the GHCR reference you need, for example:
 
 ```yaml
 services:
   backend:
-    image: ghcr.io/{GITHUB_ORG}/bastion-backend:0.10.1-dev
-    # Remove or comment out the build section
-    # build:
-    #   context: .
-    #   dockerfile: ./backend/Dockerfile
+    image: ghcr.io/myorg/bastion-dev-backend:0.70.5-dev
 ```
 
-Replace `{GITHUB_ORG}` with your GitHub organization or username.
+or for production:
+
+```yaml
+services:
+  backend:
+    image: ghcr.io/myorg/bastion-backend:0.70.0
+```
+
+Replace `myorg` with your GitHub org or user (lowercase).
 
 ## Cache Management
 
-The workflow uses GitHub Actions cache (GHA) for BuildKit cache. This provides:
-- Faster rebuilds when dependencies haven't changed
-- Automatic cache management by GitHub
-- No manual cache cleanup required
-
-Cache is stored per repository and persists across workflow runs.
-
-
+The workflow uses GitHub Actions cache (GHA) for BuildKit cache (`mode=min`), which speeds rebuilds when layers are unchanged.

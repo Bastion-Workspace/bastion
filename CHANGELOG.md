@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Feature: **`bastion-postgres`** and **`bastion-postgres-data`** images bundle `backend/sql` and `data-service/sql` so deployments work without bind-mounting the repo; CI publishes them alongside other services. Compose uses `postgres/Dockerfile` and `postgres-data/Dockerfile` by default.
+- Update: `build-and-push` manual runs support **build scope** `postgres_only` (DB images only) vs `all` (default); tag pushes always build all images.
+- Update: `build-and-push` uses separate GHCR package families — **`bastion-<service>`** for production tags (e.g. `v0.70.0` from `main`) and **`bastion-dev-<service>`** for `-dev` versions (e.g. `v0.70.5-dev` from `dev`); workflow validates tag commits against `main`/`dev`. See `.github/workflows/README.md` for visibility (public vs private) on GitHub Container Registry.
+- Update: In-app help — **Data Workspaces overview** and getting-started cross-links aligned with the current UI (databases, import formats, Run SQL, grid features, sharing, agent binding); help-docs sync manifest hashes refreshed.
 - Fix: `build-local-proxy` Linux CI installs `libpipewire-0.3-dev` so `libspa-sys` (PipeWire) links during `cargo build`.
 - Fix: `build-local-proxy` Linux CI installs `libgbm-dev` and `libxdo-dev` so the release link step finds `-lgbm` and `-lxdo` (egui/glutin and tray stack).
 - Fix: `local-proxy` — export `CreateDirectoryCapability`, match `git2::BranchType` in `git_info`, and box recursive async helpers (`list_dir_recursive`, `build_tree`, `walk_and_search`) for stable Linux CI builds.

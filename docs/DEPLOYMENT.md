@@ -99,14 +99,23 @@ docker compose \
 
 On **`v*`** tags, CI builds and pushes first-party images (see [`.github/workflows/README.md`](../.github/workflows/README.md)).
 
-**Image pattern:** `ghcr.io/<github_org_owner_lowercase>/bastion-<service>:<tag>` (GHCR requires a lowercase repository path; GitHub org/user names with capitals are normalized in CI.)  
-Examples: `bastion-backend`, `bastion-document-service`, `bastion-tools-service`, …
+**Image patterns** (GHCR requires a lowercase owner path; CI lowercases `github.repository_owner`):
+
+- **Production** (version **without** `-dev`, tags from **`main`**):  
+  `ghcr.io/<owner_lowercase>/bastion-<service>:<tag>`  
+  Examples: `bastion-backend`, `bastion-document-service`, `bastion-tools-service`, …
+- **Development** (version **with** `-dev`, tags from **`dev`**):  
+  `ghcr.io/<owner_lowercase>/bastion-dev-<service>:<tag>`  
+  Same services as above, but a separate **private** package family so prerelease images are not mixed with public production packages.
+
+**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/sql` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.0`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/sql`.
 
 **Typical operator pattern:**
 
-1. Pull images by version tag (or `latest` / `latest-dev` per your policy).
-2. Add a **compose override** (e.g. `docker-compose.override.yml`, not committed) that sets **`image:`** for each built service and **removes or replaces `build:`** so the host does not compile images.
-3. Keep using the same **environment** and **volumes** as the main compose.
+1. Pull images by version tag (or `latest` / `latest-dev` per your policy), using **`bastion-`** vs **`bastion-dev-`** to match the release channel.
+2. Pull **`bastion-postgres`** and **`bastion-postgres-data`** with the same tag when not building DB images locally.
+3. Add a **compose override** (e.g. `docker-compose.override.yml`, not committed) that sets **`image:`** for each built service and **removes or replaces `build:`** so the host does not compile images.
+4. Keep using the same **environment** and **volumes** as the main compose.
 
 **UID/GID note:** CI builds with **`BASTION_RUNTIME_UID` / `BASTION_RUNTIME_GID` = 10001** in the image layers. Your compose **`user:`** line can still be overridden via `.env` for **runtime**, but bind mounts and named volumes must be **consistent** with the numeric owner you run as; mismatches cause permission or SQLite “readonly database” issues on caches.
 
