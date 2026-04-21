@@ -2,6 +2,12 @@
 
 PostgreSQL schema and initialization notes for Bastion.
 
+## Docker `docker-entrypoint-initdb.d`
+
+Files in this directory are copied into the official Postgres image (see [`postgres/Dockerfile`](../../postgres/Dockerfile)). The entrypoint runs each top-level `.sql` file in a **new** `psql` session, defaulting to **`POSTGRES_DB`** (often `postgres`). [`01_init.sql`](01_init.sql) connects to **`bastion_knowledge_base`** with `\c`; the wrappers [`02_document_sharing.sql`](02_document_sharing.sql), [`03_document_chunk_index_state.sql`](03_document_chunk_index_state.sql), and [`04_document_processing_resilience.sql`](04_document_processing_resilience.sql) also `\c bastion_knowledge_base` before `\ir` so migrations run against the app database.
+
+**If init failed once** (errors in logs, then restarts show *Skipping initialization*): remove the Postgres named data volume (e.g. `docker compose down` then `docker volume rm <project>_bastion_postgres_data`), deploy an image that includes the fixed SQL, and start again so init runs cleanly.
+
 ## 📁 Current Structure
 
 ```

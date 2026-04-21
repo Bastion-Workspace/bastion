@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: `backend/sql/02_document_sharing.sql`, `03_document_chunk_index_state.sql`, and `04_document_processing_resilience.sql` run `\c bastion_knowledge_base` before `\ir` so Docker init applies migrations in the app DB (each init file is a new `psql` session).
 - Feature: **`bastion-postgres`** and **`bastion-postgres-data`** images bundle `backend/sql` and `data-service/sql` so deployments work without bind-mounting the repo; CI publishes them alongside other services. Compose uses `postgres/Dockerfile` and `postgres-data/Dockerfile` by default.
 - Update: `build-and-push` manual runs support **build scope** `postgres_only` (DB images only) vs `all` (default); tag pushes always build all images.
 - Update: `build-and-push` uses separate GHCR package families — **`bastion-<service>`** for production tags (e.g. `v0.70.0` from `main`) and **`bastion-dev-<service>`** for `-dev` versions (e.g. `v0.70.5-dev` from `dev`); workflow validates tag commits against `main`/`dev`. See `.github/workflows/README.md` for visibility (public vs private) on GitHub Container Registry.
