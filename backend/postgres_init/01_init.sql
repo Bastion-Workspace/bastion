@@ -4973,6 +4973,7 @@ CREATE TABLE IF NOT EXISTS agent_lines (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
     name VARCHAR(255) NOT NULL,
+    handle VARCHAR(100),
     description TEXT,
     mission_statement TEXT,
     status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'archived')),
@@ -4985,8 +4986,12 @@ CREATE TABLE IF NOT EXISTS agent_lines (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+ALTER TABLE agent_lines ADD COLUMN IF NOT EXISTS handle VARCHAR(100);
 CREATE INDEX IF NOT EXISTS idx_agent_lines_user ON agent_lines(user_id);
 CREATE INDEX IF NOT EXISTS idx_agent_lines_status ON agent_lines(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_lines_handle
+    ON agent_lines(handle)
+    WHERE handle IS NOT NULL AND handle != '';
 
 CREATE TABLE IF NOT EXISTS agent_line_memberships (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

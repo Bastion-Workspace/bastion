@@ -62,7 +62,7 @@ Primary PostgreSQL database for all application data including:
 ### PostgreSQL (Data Workspace Database)
 
 **Container:** `postgres-data`  
-**Image:** `postgres:15-alpine`  
+**Image:** `postgres-data/Dockerfile` (extends `postgres:15-alpine`; bundles `data-service/sql/` at build time)  
 **Port:** `5434:5432` (external:internal)
 
 **Purpose:**
@@ -75,11 +75,10 @@ Dedicated PostgreSQL instance for Data Workspace functionality:
 **Key Features:**
 - Isolated from main application database
 - Optimized for data workspace workloads
-- Automatic initialization from `data-service/sql/`
+- First-boot init runs `postgres-data/init-data-workspace.sh`, which applies `data-service/sql/01_init.sql` (nested `migrations/*.sql` are not auto-run by the stock Postgres entrypoint)
 
 **Volumes:**
-- `bastion_data_workspace_db` - Persistent workspace data storage
-- `./data-service/sql` - Initialization scripts
+- `bastion_data_workspace_db` - Persistent workspace data storage (remove this volume after upgrading the postgres-data image if you need a clean schema replay)
 
 **Configuration:**
 - Database: `data_workspace`
