@@ -4068,6 +4068,7 @@ CREATE TABLE IF NOT EXISTS external_connections (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     last_sync_at TIMESTAMP WITH TIME ZONE,
     is_active BOOLEAN DEFAULT true,
+    is_locked BOOLEAN DEFAULT false,
     connection_status VARCHAR(50) DEFAULT 'active',
     UNIQUE(user_id, provider, connection_type, account_identifier)
 );
@@ -4336,6 +4337,7 @@ CREATE TABLE IF NOT EXISTS data_source_connectors (
     icon VARCHAR(50),
     category VARCHAR(100),
     tags TEXT[] DEFAULT '{}',
+    is_locked BOOLEAN DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -4397,6 +4399,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     handle VARCHAR(100),
     description TEXT,
     is_active BOOLEAN DEFAULT true,
+    is_locked BOOLEAN DEFAULT false,
     model_preference VARCHAR(255),
     model_source VARCHAR(50),
     model_provider_type VARCHAR(50),
@@ -4434,6 +4437,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_profiles_user ON agent_profiles(user_id);
 CREATE INDEX IF NOT EXISTS idx_agent_profiles_active ON agent_profiles(user_id, is_active);
 CREATE INDEX IF NOT EXISTS idx_agent_profiles_handle ON agent_profiles(user_id, handle);
 CREATE INDEX IF NOT EXISTS idx_agent_profiles_persona_id ON agent_profiles(persona_id);
+
+-- Migration 058 parity: lock columns on brownfield volumes created before is_locked was in CREATE TABLE
+ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT false;
+ALTER TABLE data_source_connectors ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT false;
+ALTER TABLE external_connections ADD COLUMN IF NOT EXISTS is_locked BOOLEAN DEFAULT false;
 
 -- AGENT DATA SOURCE BINDINGS
 CREATE TABLE IF NOT EXISTS agent_data_sources (
@@ -5362,19 +5370,23 @@ BEGIN
     CREATE POLICY agent_skills_insert ON agent_skills FOR INSERT WITH CHECK (
       current_setting('app.current_user_role', true) = 'admin'
       OR user_id = current_setting('app.current_user_id', true)::varchar
+      OR (is_builtin IS TRUE AND user_id IS NULL)
     );
     DROP POLICY IF EXISTS agent_skills_update ON agent_skills;
     CREATE POLICY agent_skills_update ON agent_skills FOR UPDATE USING (
       current_setting('app.current_user_role', true) = 'admin'
       OR user_id = current_setting('app.current_user_id', true)::varchar
+      OR (is_builtin IS TRUE AND user_id IS NULL)
     ) WITH CHECK (
       current_setting('app.current_user_role', true) = 'admin'
       OR user_id = current_setting('app.current_user_id', true)::varchar
+      OR (is_builtin IS TRUE AND user_id IS NULL)
     );
     DROP POLICY IF EXISTS agent_skills_delete ON agent_skills;
     CREATE POLICY agent_skills_delete ON agent_skills FOR DELETE USING (
       current_setting('app.current_user_role', true) = 'admin'
       OR user_id = current_setting('app.current_user_id', true)::varchar
+      OR (is_builtin IS TRUE AND user_id IS NULL)
     );
   END IF;
 END $$;
