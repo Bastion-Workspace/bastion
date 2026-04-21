@@ -4,6 +4,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 
 from config.settings import settings
+from db.schema_bootstrap import ensure_data_workspace_schema
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +41,9 @@ class DatabaseConnectionManager:
             self._initialized = True
             logger.info(f"Database connection pool initialized successfully (size: {settings.DB_POOL_MIN_SIZE}-{settings.DB_POOL_MAX_SIZE})")
             
-            # Test connection
+            # Test connection; heal empty DB if Docker init was skipped (existing volume)
             async with self.pool.acquire() as conn:
+                await ensure_data_workspace_schema(conn)
                 version = await conn.fetchval("SELECT version()")
                 logger.info(f"PostgreSQL version: {version}")
                 

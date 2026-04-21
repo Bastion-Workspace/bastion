@@ -32,7 +32,10 @@ COPY protos/ ./protos/
 COPY --from=builder /app/data_service_pb2.py /app/data_service_pb2.py
 COPY --from=builder /app/data_service_pb2_grpc.py /app/data_service_pb2_grpc.py
 
-RUN groupadd --gid "${BASTION_RUNTIME_GID}" appgroup && \
+# psql used at startup to apply sql/01_init.sql when postgres-data volume skipped Docker init
+RUN apt-get update && apt-get install -y --no-install-recommends postgresql-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${BASTION_RUNTIME_GID}" appgroup && \
     useradd --uid "${BASTION_RUNTIME_UID}" --gid appgroup --create-home --shell /bin/bash datauser && \
     chown -R datauser:appgroup /app
 USER datauser
