@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: Messaging WebSocket — register **`/api/messaging/ws/user`** before **`/api/messaging/ws/{room_id}`** so the user notification socket is not captured as **`room_id="user"`**. **`update_user_presence`** skips inserts when **`users`** has no matching **`user_id`** (avoids FK errors from stale JWTs after DB resets).
 - Fix: **`agent_lines.handle`** (and partial unique index) in **`01_init.sql`** for greenfield — matches migration **093** after **101** rename so **`/api/agent-factory/handles`** queries succeed.
 - Fix: **`postgres-data`** image runs **`00_init_data_workspace.sh`**, which applies **`data-service/sql/01_init.sql`** via **`psql -f`**, because nested files under **`docker-entrypoint-initdb.d/migrations/`** are not executed by the stock Postgres entrypoint (only top-level `*.sql` / `*.sh`). SQL is copied to **`/var/lib/bastion-data-workspace-sql/`**. Recreate the **`bastion_data_workspace_db`** volume after pulling this image so init runs.
 - Fix: **`01_init.sql`** greenfield — add **`is_locked`** to **`agent_profiles`**, **`data_source_connectors`**, and **`external_connections`** (parity with migration **058**); **`ALTER ADD COLUMN IF NOT EXISTS`** for older init-created tables. Relax **`agent_skills`** RLS insert/update/delete so global built-in rows (**`user_id` NULL**, **`is_builtin`**) can be seeded and updated by **`bastion_user`**.

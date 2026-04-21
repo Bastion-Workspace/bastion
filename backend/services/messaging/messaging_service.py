@@ -1021,16 +1021,28 @@ class MessagingService:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
-                
+
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM users WHERE user_id = $1",
+                    user_id,
+                )
+                if not exists:
+                    logger.warning(
+                        "Skipping user_presence update: no users row for user_id=%s "
+                        "(stale JWT after DB reset, or token not yet tied to a row)",
+                        (user_id[:48] + "...") if user_id and len(user_id) > 48 else user_id,
+                    )
+                    return False
+
                 await conn.execute("""
                     INSERT INTO user_presence (user_id, status, last_seen_at, status_message)
                     VALUES ($1, $2, NOW(), $3)
                     ON CONFLICT (user_id) DO UPDATE
                     SET status = $2, last_seen_at = NOW(), status_message = $3
                 """, user_id, status, status_message)
-                
+
                 return True
-        
+
         except Exception as e:
             logger.error(f"❌ Failed to update user presence: {e}")
             return False

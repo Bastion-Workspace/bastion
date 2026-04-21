@@ -950,94 +950,8 @@ async def get_mentionables(
 # =====================
 # WEBSOCKET ENDPOINT
 # =====================
-
-@router.websocket("/api/messaging/ws/{room_id}")
-async def websocket_room_endpoint(websocket: WebSocket, room_id: str):
-    """
-    WebSocket endpoint for real-time room messaging
-    
-    Requires token authentication via query parameter
-    """
-    logger.info(f"💬 Room WebSocket connection attempt for room: {room_id}")
-    
-    try:
-        # Get token from query parameters
-        token = websocket.query_params.get("token")
-        if not token:
-            logger.error(f"❌ Room WebSocket missing token for room: {room_id}")
-            await websocket.close(code=4001, reason="Missing token")
-            return
-        
-        logger.info("🔐 Room WebSocket token received")
-        
-        # Validate token and get user
-        try:
-            from utils.auth_middleware import decode_jwt_token
-            payload = decode_jwt_token(token)
-            user_id = payload.get("user_id")
-            if not user_id:
-                logger.error(f"❌ Room WebSocket invalid token for room: {room_id}")
-                await websocket.close(code=4003, reason="Invalid token")
-                return
-        except Exception as e:
-            logger.error(f"❌ Room WebSocket token validation failed for room {room_id}: {e}")
-            await websocket.close(code=4003, reason="Invalid token")
-            return
-        
-        logger.info(f"✅ Room WebSocket token validated for room: {room_id}, user: {user_id}")
-        
-        # Connect to WebSocket manager
-        ws_manager = get_websocket_manager()
-        await ws_manager.connect_to_room(websocket, room_id, user_id)
-        logger.info(f"✅ Room WebSocket connected to manager for room: {room_id}")
-        
-        # Update user presence to online
-        await messaging_service.update_user_presence(user_id, status='online')
-        await ws_manager.broadcast_presence_update(user_id, 'online')
-        
-        try:
-            # Keep connection alive and handle messages
-            while True:
-                # Receive message from client
-                data = await websocket.receive_json()
-                
-                # Handle heartbeat/presence updates
-                if data.get("type") == "heartbeat":
-                    await messaging_service.update_user_presence(user_id, status='online')
-                    await websocket.send_json({"type": "heartbeat_ack"})
-                
-                # Handle typing indicators
-                elif data.get("type") == "typing":
-                    await ws_manager.broadcast_to_room(
-                        room_id=room_id,
-                        message={
-                            "type": "typing",
-                            "user_id": user_id,
-                            "is_typing": data.get("is_typing", True)
-                        },
-                        exclude_user_id=user_id
-                    )
-        
-        except WebSocketDisconnect:
-            logger.info(f"💬 Room WebSocket disconnected for room: {room_id}, user: {user_id}")
-        finally:
-            # Cleanup
-            await ws_manager.disconnect_from_room(websocket, room_id, user_id)
-            
-            # Only update presence to offline if NO OTHER connections exist for this user
-            if not ws_manager.is_user_connected(user_id):
-                await messaging_service.update_user_presence(user_id, status='offline')
-                await ws_manager.broadcast_presence_update(user_id, 'offline')
-                logger.info(f"🚩 User {user_id} now OFFLINE (all connections closed)")
-            else:
-                logger.info(f"📡 User {user_id} still has active connections, keeping ONLINE")
-    
-    except Exception as e:
-        logger.error(f"❌ Room WebSocket error for room {room_id}: {e}")
-        try:
-            await websocket.close(code=4000, reason="Connection failed")
-        except Exception:
-            pass
+# Register /api/messaging/ws/user BEFORE /api/messaging/ws/{room_id}: otherwise Starlette
+# matches room_id="user" and the user notification socket never hits the correct handler.
 
 
 @router.websocket("/api/messaging/ws/user")
@@ -1131,6 +1045,95 @@ async def websocket_user_endpoint(websocket: WebSocket):
     
     except Exception as e:
         logger.error(f"❌ User WebSocket error: {e}")
+        try:
+            await websocket.close(code=4000, reason="Connection failed")
+        except Exception:
+            pass
+
+
+@router.websocket("/api/messaging/ws/{room_id}")
+async def websocket_room_endpoint(websocket: WebSocket, room_id: str):
+    """
+    WebSocket endpoint for real-time room messaging
+
+    Requires token authentication via query parameter
+    """
+    logger.info(f"💬 Room WebSocket connection attempt for room: {room_id}")
+
+    try:
+        # Get token from query parameters
+        token = websocket.query_params.get("token")
+        if not token:
+            logger.error(f"❌ Room WebSocket missing token for room: {room_id}")
+            await websocket.close(code=4001, reason="Missing token")
+            return
+
+        logger.info("🔐 Room WebSocket token received")
+
+        # Validate token and get user
+        try:
+            from utils.auth_middleware import decode_jwt_token
+            payload = decode_jwt_token(token)
+            user_id = payload.get("user_id")
+            if not user_id:
+                logger.error(f"❌ Room WebSocket invalid token for room: {room_id}")
+                await websocket.close(code=4003, reason="Invalid token")
+                return
+        except Exception as e:
+            logger.error(f"❌ Room WebSocket token validation failed for room {room_id}: {e}")
+            await websocket.close(code=4003, reason="Invalid token")
+            return
+
+        logger.info(f"✅ Room WebSocket token validated for room: {room_id}, user: {user_id}")
+
+        # Connect to WebSocket manager
+        ws_manager = get_websocket_manager()
+        await ws_manager.connect_to_room(websocket, room_id, user_id)
+        logger.info(f"✅ Room WebSocket connected to manager for room: {room_id}")
+
+        # Update user presence to online
+        await messaging_service.update_user_presence(user_id, status='online')
+        await ws_manager.broadcast_presence_update(user_id, 'online')
+
+        try:
+            # Keep connection alive and handle messages
+            while True:
+                # Receive message from client
+                data = await websocket.receive_json()
+
+                # Handle heartbeat/presence updates
+                if data.get("type") == "heartbeat":
+                    await messaging_service.update_user_presence(user_id, status='online')
+                    await websocket.send_json({"type": "heartbeat_ack"})
+
+                # Handle typing indicators
+                elif data.get("type") == "typing":
+                    await ws_manager.broadcast_to_room(
+                        room_id=room_id,
+                        message={
+                            "type": "typing",
+                            "user_id": user_id,
+                            "is_typing": data.get("is_typing", True)
+                        },
+                        exclude_user_id=user_id
+                    )
+
+        except WebSocketDisconnect:
+            logger.info(f"💬 Room WebSocket disconnected for room: {room_id}, user: {user_id}")
+        finally:
+            # Cleanup
+            await ws_manager.disconnect_from_room(websocket, room_id, user_id)
+
+            # Only update presence to offline if NO OTHER connections exist for this user
+            if not ws_manager.is_user_connected(user_id):
+                await messaging_service.update_user_presence(user_id, status='offline')
+                await ws_manager.broadcast_presence_update(user_id, 'offline')
+                logger.info(f"🚩 User {user_id} now OFFLINE (all connections closed)")
+            else:
+                logger.info(f"📡 User {user_id} still has active connections, keeping ONLINE")
+
+    except Exception as e:
+        logger.error(f"❌ Room WebSocket error for room {room_id}: {e}")
         try:
             await websocket.close(code=4000, reason="Connection failed")
         except Exception:
