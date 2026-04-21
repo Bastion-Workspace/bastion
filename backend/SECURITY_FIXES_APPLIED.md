@@ -25,7 +25,7 @@
 
 ### 3. Row-Level Security (RLS) ⚠️ MANUAL STEP REQUIRED
 
-**Created `backend/sql/02_enable_document_rls.sql`** with:
+**Created `backend/postgres_init/02_enable_document_rls.sql`** with:
 - RLS enabled on `document_metadata` table
 - SELECT policy: Users see their own docs, global docs, and team docs
 - UPDATE policy: Users update their own docs, team admins update team docs
@@ -38,7 +38,7 @@
 docker compose up -d
 
 # Apply RLS (choose the correct postgres container name from docker ps)
-docker exec -i bastion-postgres psql -U postgres -d codex < backend/sql/02_enable_document_rls.sql
+docker exec -i bastion-postgres psql -U postgres -d codex < backend/postgres_init/02_enable_document_rls.sql
 ```
 
 ### 4. Real Ownership Checking ✅ COMPLETED
@@ -84,7 +84,7 @@ After applying RLS policies, test:
 
 - `backend/main.py` - Added auth checks and `check_document_access()` function
 - `backend/services/user_document_service.py` - Fixed `_document_belongs_to_user()`
-- `backend/sql/02_enable_document_rls.sql` - RLS policies (needs manual application)
+- `backend/postgres_init/02_enable_document_rls.sql` - RLS policies (needs manual application)
 
 ## Impact
 

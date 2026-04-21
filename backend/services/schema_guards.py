@@ -1,8 +1,10 @@
 """
-Idempotent PostgreSQL column/index ensures shared by the API (lifespan) and Celery workers.
+Read-only PostgreSQL schema checks shared by the API (lifespan) and Celery workers.
 
-Workers do not run FastAPI lifespan; without these guards, scheduled tasks can hit
-UndefinedColumnError on databases provisioned before newer migrations.
+DDL (ALTER TABLE, CREATE INDEX) is not run as the app role: tables are owned by the
+bootstrap superuser. Greenfield installs get columns and indexes from
+`backend/postgres_init/01_init.sql`; legacy DBs should run migration 108 (or full
+`migrations/108_memory_session_summary.sql`) as a privileged user.
 """
 
 import logging
@@ -15,11 +17,10 @@ logger = logging.getLogger(__name__)
 
 
 async def ensure_user_memory_schema_columns() -> None:
-    """Ensure session summary flag and episode tier columns (migration 108).
+    """Verify session summary flag and episode tier columns (migration 108).
 
-    Skips DDL when columns and indexes already exist. App role (e.g. bastion_user) is not
-    table owner: ALTER/CREATE INDEX require owner/superuser, so running them every startup
-    spams errors even when migration 108 was applied as postgres.
+    Logs at debug when complete; warns once if anything is missing so operators can
+    apply migration 108 as superuser. Does not execute DDL as bastion_user.
     """
     try:
         conn = await asyncpg.connect(settings.DATABASE_URL)
@@ -62,34 +63,20 @@ async def ensure_user_memory_schema_columns() -> None:
             )
 
             if has_conv_col and has_ep_col and has_idx_conv and has_idx_ep:
-                logger.debug(
-                    "User memory schema (108) already present; skipping DDL as non-owner"
-                )
+                logger.debug("User memory schema (108) present")
                 return
 
-            if not has_conv_col:
-                await conn.execute(
-                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS "
-                    "needs_session_summary BOOLEAN NOT NULL DEFAULT FALSE"
-                )
-            if not has_ep_col:
-                await conn.execute(
-                    "ALTER TABLE user_episodes ADD COLUMN IF NOT EXISTS "
-                    "is_aged BOOLEAN NOT NULL DEFAULT FALSE"
-                )
-            if not has_idx_conv:
-                await conn.execute(
-                    """CREATE INDEX IF NOT EXISTS idx_conversations_needs_summary_updated
-                       ON conversations (needs_session_summary, updated_at)
-                       WHERE needs_session_summary = TRUE"""
-                )
-            if not has_idx_ep:
-                await conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_user_episodes_created_aged "
-                    "ON user_episodes (created_at, is_aged)"
-                )
-            logger.info("Ensured user memory schema columns (needs_session_summary, is_aged)")
+            logger.warning(
+                "User memory schema (108) incomplete "
+                "(conversations.needs_session_summary=%s, user_episodes.is_aged=%s, "
+                "idx_conversations_needs_summary_updated=%s, idx_user_episodes_created_aged=%s). "
+                "Apply migration 108 as a table owner or superuser.",
+                has_conv_col,
+                has_ep_col,
+                has_idx_conv,
+                has_idx_ep,
+            )
         finally:
             await conn.close()
     except Exception as e:
-        logger.warning("Could not ensure user memory schema columns: %s", e)
+        logger.warning("Could not verify user memory schema: %s", e)

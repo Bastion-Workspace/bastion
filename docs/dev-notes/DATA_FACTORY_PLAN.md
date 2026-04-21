@@ -387,7 +387,7 @@ CREATE INDEX idx_scraper_runs_started ON scraper_runs(started_at DESC);
 ### Tasks
 
 1. **Database migration** - Add `scraper_definitions` and `scraper_runs` tables.
-   - File: `backend/sql/migrations/add_scraper_tables.sql`
+   - File: `backend/postgres_init/migrations/add_scraper_tables.sql`
 
 2. **Pydantic models** - Define request/response models for scraper CRUD and run management.
    - File: `backend/models/scraper_models.py`

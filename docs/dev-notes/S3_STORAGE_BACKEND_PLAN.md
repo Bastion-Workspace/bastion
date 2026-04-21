@@ -14,7 +14,7 @@ Introduce a `StorageBackend` protocol that abstracts all blob I/O behind a commo
 | File reads / downloads | `backend/api/document_api.py` | `FileResponse(file_path)` for downloads; `aiofiles.open(...)` for content reads |
 | Collab saves | `backend/services/collab_persist.py` | Resolves paths with `Path(settings.UPLOAD_DIR)` + fallback glob patterns |
 | WebDAV | `backend/webdav/orgmode_provider.py` | Reads org files from the filesystem directly |
-| Messaging attachments | `backend/api/document_api.py`, `backend/sql/01_init.sql` | `message_attachments.file_path VARCHAR(512)` stores a literal filesystem path |
+| Messaging attachments | `backend/api/document_api.py`, `backend/postgres_init/01_init.sql` | `message_attachments.file_path VARCHAR(512)` stores a literal filesystem path |
 
 **Key structural fact:** `document_metadata` does **not** store a `file_path` column. Physical paths are derived at runtime from the folder/user/team hierarchy by `FolderService`. This means migrating to S3 keys that mirror the same logical structure (e.g., `Users/{username}/{folder}/{filename}`) is straightforward — the derivation logic changes, not the database schema.
 
@@ -285,7 +285,7 @@ When `STORAGE_BACKEND_TYPE=s3` with MinIO:
 | `tools-service` | Document content reads — uses same paths | 2 |
 | `image-vision-service` | Read-only mount — uses same paths | 2 |
 | `docker-compose.yml` | Remove shared volume mounts; add MinIO | 3 |
-| `backend/sql/01_init.sql` | Rename `message_attachments.file_path` | 2 |
+| `backend/postgres_init/01_init.sql` | Rename `message_attachments.file_path` | 2 |
 
 ### WebDAV Special Case
 
@@ -344,5 +344,5 @@ For users upgrading from a local-only deployment to S3:
 - `docs/dev-notes/FILE_SERVICE_SEPARATION.md` — notes that S3 migration would eliminate the shared-volume coupling between a future file-service and other services
 - `backend/services/folder_service.py` — primary path resolution logic
 - `backend/services/document_service_v2.py` — primary file write path
-- `backend/sql/01_init.sql` — `document_metadata` schema (no `file_path` column; keys are derived)
+- `backend/postgres_init/01_init.sql` — `document_metadata` schema (no `file_path` column; keys are derived)
 - `docker-compose.yml` — current shared `./uploads` mounts

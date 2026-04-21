@@ -59,7 +59,7 @@ The **default** [`docker-compose.yml`](../docker-compose.yml) in this repo assum
 
 **Use when:** You already have Qdrant and Neo4j (or test endpoints) at the URLs expected by [`docker-compose.yml`](../docker-compose.yml), or you are developing against fixed lab IPs.
 
-**Important — Postgres passwords in default compose:** The checked-in **`docker-compose.yml`** uses **fixed** literals such as `bastion_secure_password` for the app DB user, aligned with [`backend/sql/01_init.sql`](../backend/sql/01_init.sql). Those values are **not** read from `.env` in that file. Changing DB passwords for the default stack requires **consistent edits** across compose, pgbouncer healthchecks, and init SQL (or migrating to the example compose pattern).
+**Important — Postgres passwords in default compose:** The checked-in **`docker-compose.yml`** uses **fixed** literals such as `bastion_secure_password` for the app DB user, aligned with [`backend/postgres_init/01_init.sql`](../backend/postgres_init/01_init.sql). Those values are **not** read from `.env` in that file. Changing DB passwords for the default stack requires **consistent edits** across compose, pgbouncer healthchecks, and init SQL (or migrating to the example compose pattern).
 
 **UI profile:** Set **`COMPOSE_PROFILES=prod`** in `.env` for the nginx frontend on port **3051**. For Vite HMR, use profile **`dev`** (`frontend-dev`) and **do not** activate `prod` at the same time (both bind **3051**). See comments at the top of `.env.example`.
 
@@ -108,7 +108,7 @@ On **`v*`** tags, CI builds and pushes first-party images (see [`.github/workflo
   `ghcr.io/<owner_lowercase>/bastion-dev-<service>:<tag>`  
   Same services as above, but a separate **private** package family so prerelease images are not mixed with public production packages.
 
-**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/sql` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.0`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/sql`.
+**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/postgres_init` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.0`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/postgres_init`.
 
 **Typical operator pattern:**
 

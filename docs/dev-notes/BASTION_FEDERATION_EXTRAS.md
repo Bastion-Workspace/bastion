@@ -66,7 +66,7 @@ Returns articles as signed JSON. Instance B's RSS poller calls this on its regul
 | `backend/api/rss_api.py` | Add "subscribe to federated feed" endpoint |
 | `backend/services/rss_service.py` | Handle `federation_peer_id` feeds |
 | `backend/services/celery_tasks/rss_tasks.py` | Branch for federated feed polling |
-| `backend/sql/migrations/` | `federation_peer_id`, `federation_remote_feed_id` on `rss_feeds` |
+| `backend/postgres_init/migrations/` | `federation_peer_id`, `federation_remote_feed_id` on `rss_feeds` |
 | `frontend/src/components/` | RSS settings: "Add from federated instance" option |
 
 ---
@@ -183,7 +183,7 @@ POST /api/federation/documents/push-update          -- Instance A pushes content
 | `backend/services/document_service_v2.py` | Detect federated docs, proxy content fetch |
 | `backend/repositories/document_repository.py` | Federated doc queries |
 | `backend/services/federation_service.py` | Share grant, mirror push, update events |
-| `backend/sql/migrations/` | `federated_peer_id`, `federation_mode` on `document_metadata` and `document_shares` |
+| `backend/postgres_init/migrations/` | `federated_peer_id`, `federation_mode` on `document_metadata` and `document_shares` |
 | `frontend/src/components/DocumentsPage.js` | "Share with federated instance" action |
 | `frontend/src/components/DocumentViewer.js` | Remote origin badge on federated docs |
 
@@ -240,7 +240,7 @@ POST /api/federation/artifacts/import                   -- Instance B imports an
 | `backend/api/federation_api.py` | Artifact catalog + definition + version push endpoints |
 | `backend/api/agent_factory_api.py` | "Publish to federation" action; import endpoint |
 | `backend/services/agent_factory_service.py` | Publish/import logic, dependency manifest |
-| `backend/sql/migrations/` | `federation_published`, `source_peer_id`, etc. on artifact tables |
+| `backend/postgres_init/migrations/` | `federation_published`, `source_peer_id`, etc. on artifact tables |
 | `frontend/src/components/agent-factory/AgentEditor.js` | "Publish" toggle, "Imported from" badge |
 | `frontend/src/components/agent-factory/AgentListSidebar.js` | Import from peer, version update notification |
 
@@ -396,7 +396,7 @@ async def invoke_agent(member, query, context):
 |------|--------|
 | `backend/api/federation_api.py` | Task invocation + result endpoints + agent catalog |
 | `backend/services/agent_line_service.py` | Federated member resolution |
-| `backend/sql/migrations/` | `federated_peer_id`, `federated_agent_id` on `agent_line_memberships`; `federation_invocable` on `agent_profiles` |
+| `backend/postgres_init/migrations/` | `federated_peer_id`, `federated_agent_id` on `agent_line_memberships`; `federation_invocable` on `agent_profiles` |
 | `llm-orchestrator/orchestrator/agents/` | Federated agent resolver |
 | `llm-orchestrator/orchestrator/engines/` | Federation transport layer for task dispatch |
 | `connections-service/` | May relay federated task streaming if WebSocket-style delivery is needed |

@@ -187,7 +187,7 @@ When a fact is updated, the system detects conflicts and protects user-authored 
 
 ## References
 
-- Migrations: `backend/sql/migrations/066_enhance_user_facts.sql`, `backend/sql/migrations/067_add_episodic_memory_and_fact_history.sql`
+- Migrations: `backend/postgres_init/migrations/066_enhance_user_facts.sql`, `backend/postgres_init/migrations/067_add_episodic_memory_and_fact_history.sql`
 - Backend: `backend/services/settings_service.py`, `backend/services/grpc_context_gatherer.py`, `backend/services/grpc_tool_service.py`, `backend/services/episode_service.py`
 - Orchestrator: `llm-orchestrator/orchestrator/utils/fact_utils.py`, `llm-orchestrator/orchestrator/agents/custom_agent_runner.py`, `llm-orchestrator/orchestrator/tools/user_profile_tools.py`
 - Celery: `backend/services/celery_tasks/fact_tasks.py`, `backend/services/celery_tasks/episode_tasks.py`

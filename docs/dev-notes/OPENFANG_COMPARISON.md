@@ -78,7 +78,7 @@ OpenFang ships 7 pre-built autonomous agents that run independently. Bastion has
 
 ### 2.4 Security Systems: ~6 vs 16
 
-**Bastion today:** JWT auth, RLS, DB audit logging, Fernet encryption, input validation, CORS (`backend/utils/auth_middleware.py`, `backend/sql/01_init.sql`).
+**Bastion today:** JWT auth, RLS, DB audit logging, Fernet encryption, input validation, CORS (`backend/utils/auth_middleware.py`, `backend/postgres_init/01_init.sql`).
 
 **OpenFang claims:** 16 discrete security layers.
 

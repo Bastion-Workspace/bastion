@@ -65,9 +65,9 @@ When a tag is pushed, each image receives multiple tags:
 
 ## Images Built
 
-The workflow builds and pushes first-party images from `docker-compose.yml`, including **`bastion-postgres`** and **`bastion-postgres-data`** (init SQL baked in; no bind mount of `backend/sql` required in production). The Vite HMR image **`bastion-frontend-dev`** is **not** published from CI; build it locally with `docker compose --profile dev --build` (see `frontend/Dockerfile.dev`). **`bastion-celery-flower`** is also **not** published from CI; build it locally from `backend/Dockerfile.celery-flower` if you use the optional Flower service in Compose.
+The workflow builds and pushes first-party images from `docker-compose.yml`, including **`bastion-postgres`** and **`bastion-postgres-data`** (init SQL baked in; no bind mount of `backend/postgres_init` required in production). The Vite HMR image **`bastion-frontend-dev`** is **not** published from CI; build it locally with `docker compose --profile dev --build` (see `frontend/Dockerfile.dev`). **`bastion-celery-flower`** is also **not** published from CI; build it locally from `backend/Dockerfile.celery-flower` if you use the optional Flower service in Compose.
 
-1. `bastion-postgres` / `bastion-dev-postgres` — main DB (`backend/sql` in image)
+1. `bastion-postgres` / `bastion-dev-postgres` — main DB (`backend/postgres_init` in image)
 2. `bastion-postgres-data` / `bastion-dev-postgres-data` — data workspace DB (`data-service/sql` in image)
 3. `bastion-backend` / `bastion-dev-backend` (by channel)
 4. `bastion-tools-service` / `bastion-dev-tools-service`

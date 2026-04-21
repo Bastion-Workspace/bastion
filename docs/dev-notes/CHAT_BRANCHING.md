@@ -17,7 +17,7 @@ This note describes how **edit-and-resend** creates alternate timelines, how the
 
 ## Data model (PostgreSQL)
 
-Defined in migration `backend/sql/migrations/112_message_branching.sql` and used by `ConversationService`.
+Defined in migration `backend/postgres_init/migrations/112_message_branching.sql` and used by `ConversationService`.
 
 - **`conversations.current_node_message_id`** — Leaf of the timeline the user is viewing. New messages append under this parent (unless a caller supplies an explicit parent). Switching branches updates this column.
 - **`conversation_messages.parent_message_id`** — Tree edge to the previous message in that timeline.
@@ -103,7 +103,7 @@ Documenting these as explicit product decisions will keep UI (which path is show
 
 | Layer | Location |
 |-------|----------|
-| Schema | `backend/sql/migrations/112_message_branching.sql` |
+| Schema | `backend/postgres_init/migrations/112_message_branching.sql` |
 | Branch / switch / path / thread id | `backend/services/conversation_service.py` |
 | REST routes | `backend/api/conversation_api.py` |
 | Stream + branch context injection | `backend/api/grpc_orchestrator_proxy.py` |

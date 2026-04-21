@@ -72,7 +72,7 @@ The Agent Factory is a **GUI-driven, no-code agent composition system** that let
 
 ### 1. Agent Profile (`agent_profiles`)
 
-Primary artifact per custom agent. Notable columns (see `backend/sql/01_init.sql` and `_row_to_profile` in `agent_factory_service.py`):
+Primary artifact per custom agent. Notable columns (see `backend/postgres_init/01_init.sql` and `_row_to_profile` in `agent_factory_service.py`):
 
 | Field | Purpose |
 |-------|---------|

@@ -92,4 +92,4 @@ Agents in a team can send messages to each other. Messages are stored in `agent_
 
 - Plan: Autonomous Agent Lines (Phase 2)
 - Teams: `docs/dev-notes/AGENT_TEAMS_ARCHITECTURE.md`
-- Migration: `backend/sql/migrations/087_agent_messages.sql`
+- Migration: `backend/postgres_init/migrations/087_agent_messages.sql`

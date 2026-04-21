@@ -261,4 +261,4 @@ Agent Factory UI: `ConversationWatchSection.js` lets users configure which rooms
 | Message API | `backend/api/messaging_api.py` |
 | Message service | `backend/services/messaging/messaging_service.py` |
 | Agent watch task | `backend/services/celery_tasks/agent_tasks.py` |
-| DB schema | `backend/sql/migrations/` (new migration for parent_message_id, is_edited, etc.) |
+| DB schema | `backend/postgres_init/migrations/` (new migration for parent_message_id, is_edited, etc.) |

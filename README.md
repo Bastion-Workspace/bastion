@@ -546,7 +546,7 @@ CREATE POLICY policy_name ON table_name
     );
 ```
 
-See `backend/sql/01_init.sql` for complete RLS policy definitions.
+See `backend/postgres_init/01_init.sql` for complete RLS policy definitions.
 
 ### Orchestrator architecture
 

@@ -437,7 +437,7 @@ This phase replaces or supplements BFP with the Matrix federation protocol, allo
 
 | File | Change |
 |------|--------|
-| `backend/sql/migrations/` | New migration: `federation_peers` (with `connectivity_mode`), `federation_outbox`, `federated_users`, schema changes to `chat_rooms`, `chat_messages` |
+| `backend/postgres_init/migrations/` | New migration: `federation_peers` (with `connectivity_mode`), `federation_outbox`, `federated_users`, schema changes to `chat_rooms`, `chat_messages` |
 | `backend/api/federation_api.py` | New file (includes outbox drain + WebSocket stream endpoints) |
 | `backend/services/federation_service.py` | New file (pairing, connectivity probe, outbox management) |
 | `backend/utils/federation_crypto.py` | New file (Ed25519 sign/verify utilities) |

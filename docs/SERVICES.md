@@ -41,12 +41,12 @@ Primary PostgreSQL database for all application data including:
 **Key Features:**
 - Optimized for high concurrency (200 max connections)
 - Tuned for performance (shared buffers, work memory, parallel workers)
-- Automatic initialization from SQL scripts in `backend/sql/`
+- Automatic initialization from SQL scripts in `backend/postgres_init/`
 - Health checks for dependency management
 
 **Volumes:**
 - `bastion_postgres_data` - Persistent database storage
-- `./backend/sql` - Initialization scripts
+- `./backend/postgres_init` - Initialization scripts
 
 **Configuration:**
 - Database: `postgres` (initial), `bastion_knowledge_base` (application)
@@ -54,8 +54,8 @@ Primary PostgreSQL database for all application data including:
 - Password: `bastion_secure_password` (change in production!)
 
 **Related Documentation:**
-- Database schema: `backend/sql/01_init.sql`
-- Migrations: `backend/sql/migrations/`
+- Database schema: `backend/postgres_init/01_init.sql`
+- Migrations: `backend/postgres_init/migrations/`
 
 ---
 
@@ -654,7 +654,7 @@ All services with health checks:
 - `./uploads` - User uploaded files (shared across: backend, celery_worker, webdav, data-service)
 - `./processed` - Processed document outputs (backend, celery_worker)
 - `./logs` - Application logs (backend, celery_worker, celery_beat)
-- `./backend/sql` - Database initialization scripts (postgres)
+- `./backend/postgres_init` - Database initialization scripts (postgres)
 - `./data-service/sql` - Data workspace initialization scripts (postgres-data)
 - `./searxng` - SearXNG configuration (searxng)
 

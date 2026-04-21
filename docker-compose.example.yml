@@ -1,7 +1,7 @@
 # Docker Compose example for GitHub / public use. No hardcoded passwords or secrets.
 # Copy to docker-compose.yml and set values in .env (or export) before running.
 # Required: POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD, JWT_SECRET_KEY, and API keys (OPENAI_API_KEY, etc.).
-# Postgres images bundle backend/sql and data-service/sql (see postgres/Dockerfile). For image-only
+# Postgres images bundle backend/postgres_init and data-service/sql (see postgres/Dockerfile). For image-only
 # deploys, pull ghcr.io/<org>/bastion-postgres:<tag> from CI. 01_init.sql creates bastion_user with a
 # default password; set POSTGRES_APP_PASSWORD to match for first-run, or ALTER USER after init.
 

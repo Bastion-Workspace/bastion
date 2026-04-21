@@ -135,4 +135,4 @@ Auth: all routes use `get_current_user`; line ownership is enforced in the servi
 
 - Plan: Autonomous Agent Lines (phases 1–7)
 - Agent Factory: `docs/dev-notes/AGENT_FACTORY_ARCHITECTURE.md`
-- Migration: `backend/sql/migrations/101_agent_teams_to_agent_lines.sql`
+- Migration: `backend/postgres_init/migrations/101_agent_teams_to_agent_lines.sql`

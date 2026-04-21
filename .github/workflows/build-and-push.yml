@@ -160,7 +160,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push postgres (bundled backend/sql init)
+      - name: Build and push postgres (bundled backend/postgres_init init)
         uses: docker/build-push-action@v5
         with:
           context: .

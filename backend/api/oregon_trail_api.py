@@ -158,7 +158,7 @@ async def _save_game(state: GameState) -> None:
     await pool.execute(
         """
         INSERT INTO oregon_trail_saves (id, user_id, game_state, is_active, final_score, updated_at)
-        VALUES ($1::uuid, $2::uuid, $3::jsonb, $4, $5, NOW())
+        VALUES ($1::uuid, $2::varchar, $3::jsonb, $4, $5, NOW())
         ON CONFLICT (id) DO UPDATE SET
             game_state = EXCLUDED.game_state,
             is_active = EXCLUDED.is_active,
@@ -167,7 +167,7 @@ async def _save_game(state: GameState) -> None:
         WHERE oregon_trail_saves.user_id = EXCLUDED.user_id
         """,
         uuid.UUID(state.game_id),
-        uuid.UUID(uid),
+        uid,
         json.dumps(data),
         not state.is_finished,
         state.final_score,
@@ -177,9 +177,9 @@ async def _save_game(state: GameState) -> None:
 async def _load_game(game_id: str, user_id: str) -> Optional[GameState]:
     pool = await _require_db_pool()
     gid = _parse_game_id(game_id)
-    uid = uuid.UUID(_uid(user_id))
+    uid = _uid(user_id)
     row = await pool.fetchrow(
-        "SELECT game_state FROM oregon_trail_saves WHERE id = $1::uuid AND user_id = $2::uuid",
+        "SELECT game_state FROM oregon_trail_saves WHERE id = $1::uuid AND user_id = $2::varchar",
         gid,
         uid,
     )
@@ -193,10 +193,10 @@ async def _list_saves(user_id: str) -> List[Dict[str, Any]]:
     rows = await pool.fetch(
         """
         SELECT id, game_state, is_active, final_score, updated_at
-        FROM oregon_trail_saves WHERE user_id = $1::uuid
+        FROM oregon_trail_saves WHERE user_id = $1::varchar
         ORDER BY updated_at DESC LIMIT 20
         """,
-        uuid.UUID(_uid(user_id)),
+        _uid(user_id),
     )
     results = []
     for r in rows:
@@ -362,9 +362,9 @@ async def delete_game(
     pool = await _require_db_pool()
     gid = _parse_game_id(game_id)
     await pool.execute(
-        "DELETE FROM oregon_trail_saves WHERE id = $1::uuid AND user_id = $2::uuid",
+        "DELETE FROM oregon_trail_saves WHERE id = $1::uuid AND user_id = $2::varchar",
         gid,
-        uuid.UUID(_uid(current_user.user_id)),
+        _uid(current_user.user_id),
     )
     return {"deleted": True}
 
