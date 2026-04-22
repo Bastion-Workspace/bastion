@@ -52,6 +52,18 @@ def _coerce_processing_status(raw: Any) -> ProcessingStatus:
         return ProcessingStatus.PENDING
 
 
+def _db_rls_context(user_id: Optional[str]) -> Dict[str, str]:
+    """RLS dict for execute_query/fetch_one — must be passed per query (pooling).
+
+    The async context manager in rls_context.py sets GUCs via separate execute()
+    calls that each use a different pooled connection, so it does not reliably
+    precede fetch_one/execute on the connection that runs the actual statement.
+    """
+    if user_id:
+        return {"user_id": str(user_id), "user_role": "user"}
+    return {"user_id": "", "user_role": "admin"}
+
+
 class DocumentRepository:
     """Repository for document metadata database operations"""
     
@@ -1035,22 +1047,21 @@ class DocumentRepository:
         """Set lease if none or expired. Returns True when this worker acquired the lease."""
         try:
             from ds_db.database_manager.database_helpers import fetch_one
-            from ds_db.database_manager.rls_context import rls_context
 
-            async with rls_context(user_id):
-                row = await fetch_one(
-                    """
-                    UPDATE document_metadata
-                    SET locked_by = $2,
-                        locked_until = NOW() + ($3 * INTERVAL '1 second')
-                    WHERE document_id = $1
-                      AND (locked_by IS NULL OR locked_until IS NULL OR locked_until < NOW())
-                    RETURNING document_id
-                    """,
-                    document_id,
-                    worker_id,
-                    int(ttl_seconds),
-                )
+            row = await fetch_one(
+                """
+                UPDATE document_metadata
+                SET locked_by = $2,
+                    locked_until = NOW() + ($3 * INTERVAL '1 second')
+                WHERE document_id = $1
+                  AND (locked_by IS NULL OR locked_until IS NULL OR locked_until < NOW())
+                RETURNING document_id
+                """,
+                document_id,
+                worker_id,
+                int(ttl_seconds),
+                rls_context=_db_rls_context(user_id),
+            )
             return row is not None
         except Exception as e:
             logger.error("acquire_processing_lease failed for %s: %s", document_id, e)
@@ -1065,20 +1076,19 @@ class DocumentRepository:
     ) -> bool:
         try:
             from ds_db.database_manager.database_helpers import fetch_one
-            from ds_db.database_manager.rls_context import rls_context
 
-            async with rls_context(user_id):
-                row = await fetch_one(
-                    """
-                    UPDATE document_metadata
-                    SET locked_until = NOW() + ($3 * INTERVAL '1 second')
-                    WHERE document_id = $1 AND locked_by = $2
-                    RETURNING document_id
-                    """,
-                    document_id,
-                    worker_id,
-                    int(ttl_seconds),
-                )
+            row = await fetch_one(
+                """
+                UPDATE document_metadata
+                SET locked_until = NOW() + ($3 * INTERVAL '1 second')
+                WHERE document_id = $1 AND locked_by = $2
+                RETURNING document_id
+                """,
+                document_id,
+                worker_id,
+                int(ttl_seconds),
+                rls_context=_db_rls_context(user_id),
+            )
             return row is not None
         except Exception as e:
             logger.warning("renew_processing_lease failed for %s: %s", document_id, e)
@@ -1089,19 +1099,18 @@ class DocumentRepository:
     ) -> bool:
         try:
             from ds_db.database_manager.database_helpers import fetch_one
-            from ds_db.database_manager.rls_context import rls_context
 
-            async with rls_context(user_id):
-                row = await fetch_one(
-                    """
-                    UPDATE document_metadata
-                    SET locked_by = NULL, locked_until = NULL
-                    WHERE document_id = $1 AND locked_by = $2
-                    RETURNING document_id
-                    """,
-                    document_id,
-                    worker_id,
-                )
+            row = await fetch_one(
+                """
+                UPDATE document_metadata
+                SET locked_by = NULL, locked_until = NULL
+                WHERE document_id = $1 AND locked_by = $2
+                RETURNING document_id
+                """,
+                document_id,
+                worker_id,
+                rls_context=_db_rls_context(user_id),
+            )
             return row is not None
         except Exception as e:
             logger.warning("release_processing_lease failed for %s: %s", document_id, e)
@@ -1137,28 +1146,27 @@ class DocumentRepository:
         """Increment attempt_count, insert attempt row. Returns (attempt_id: str, attempt_number: int) or None."""
         try:
             from ds_db.database_manager.database_helpers import fetch_one
-            from ds_db.database_manager.rls_context import rls_context
 
-            async with rls_context(user_id):
-                row = await fetch_one(
-                    """
-                    WITH inc AS (
-                        UPDATE document_metadata
-                        SET attempt_count = attempt_count + 1,
-                            processing_started_at = COALESCE(processing_started_at, NOW())
-                        WHERE document_id = $1
-                        RETURNING attempt_count
-                    )
-                    INSERT INTO document_processing_attempts
-                        (document_id, attempt_number, stage, worker_id, status, started_at)
-                    SELECT $1, inc.attempt_count, $2, $3, 'running', NOW()
-                    FROM inc
-                    RETURNING attempt_id::text, attempt_number
-                    """,
-                    document_id,
-                    stage,
-                    worker_id,
+            row = await fetch_one(
+                """
+                WITH inc AS (
+                    UPDATE document_metadata
+                    SET attempt_count = attempt_count + 1,
+                        processing_started_at = COALESCE(processing_started_at, NOW())
+                    WHERE document_id = $1
+                    RETURNING attempt_count
                 )
+                INSERT INTO document_processing_attempts
+                    (document_id, attempt_number, stage, worker_id, status, started_at)
+                SELECT $1, inc.attempt_count, $2, $3, 'running', NOW()
+                FROM inc
+                RETURNING attempt_id::text, attempt_number
+                """,
+                document_id,
+                stage,
+                worker_id,
+                rls_context=_db_rls_context(user_id),
+            )
             if not row:
                 return None
             return (row["attempt_id"], int(row["attempt_number"]))
@@ -1177,25 +1185,24 @@ class DocumentRepository:
     ) -> bool:
         try:
             from ds_db.database_manager.database_helpers import execute
-            from ds_db.database_manager.rls_context import rls_context
 
-            async with rls_context(user_id):
-                await execute(
-                    """
-                    UPDATE document_processing_attempts
-                    SET ended_at = NOW(),
-                        status = $2,
-                        error_kind = $3,
-                        error_message = $4,
-                        error_traceback = $5
-                    WHERE attempt_id = $1::uuid
-                    """,
-                    attempt_id,
-                    status,
-                    error_kind,
-                    error_message,
-                    error_traceback,
-                )
+            await execute(
+                """
+                UPDATE document_processing_attempts
+                SET ended_at = NOW(),
+                    status = $2,
+                    error_kind = $3,
+                    error_message = $4,
+                    error_traceback = $5
+                WHERE attempt_id = $1::uuid
+                """,
+                attempt_id,
+                status,
+                error_kind,
+                error_message,
+                error_traceback,
+                rls_context=_db_rls_context(user_id),
+            )
             return True
         except Exception as e:
             logger.error("finish_processing_attempt_row failed: %s", e)
@@ -1207,23 +1214,22 @@ class DocumentRepository:
         """Mark any still-running attempt rows as ended (e.g. lease expiry)."""
         try:
             from ds_db.database_manager.database_helpers import execute
-            from ds_db.database_manager.rls_context import rls_context
 
-            async with rls_context(user_id):
-                await execute(
-                    """
-                    UPDATE document_processing_attempts
-                    SET ended_at = NOW(),
-                        status = $2,
-                        error_kind = $3,
-                        error_message = $4
-                    WHERE document_id = $1 AND ended_at IS NULL
-                    """,
-                    document_id,
-                    status,
-                    error_kind,
-                    error_message,
-                )
+            await execute(
+                """
+                UPDATE document_processing_attempts
+                SET ended_at = NOW(),
+                    status = $2,
+                    error_kind = $3,
+                    error_message = $4
+                WHERE document_id = $1 AND ended_at IS NULL
+                """,
+                document_id,
+                status,
+                error_kind,
+                error_message,
+                rls_context=_db_rls_context(user_id),
+            )
             return True
         except Exception as e:
             logger.warning("close_open_processing_attempts failed for %s: %s", document_id, e)

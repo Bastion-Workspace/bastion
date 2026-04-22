@@ -1,4 +1,9 @@
-"""Async context manager for PostgreSQL RLS session variables (document_metadata writes)."""
+"""Async context manager for PostgreSQL RLS session variables.
+
+Unsafe with DatabaseManager pooling: each internal execute() may use a different
+connection than the following fetch_one/execute. Prefer passing rls_context=dict
+into database_helpers.execute/fetch_one (see document_repository._db_rls_context).
+"""
 
 from contextlib import asynccontextmanager
 from typing import Optional
