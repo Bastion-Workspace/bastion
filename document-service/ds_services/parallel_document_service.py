@@ -813,7 +813,25 @@ class ParallelDocumentService(DocumentService):
         except Exception as e:
             logger.error(f"❌ Failed to resume incomplete processing: {e}")
 
-    async def _process_document_async(self, document_id: str, file_path: Path, doc_type: str, user_id: str = None):
+    async def reprocess_metadata_only(
+        self,
+        document_id: str,
+        file_path: Path,
+        doc_type: str,
+        user_id: Optional[str] = None,
+    ) -> None:
+        """v2 non-parallel path for types outside primary chunk+vector policy (e.g. org)."""
+        await super()._process_document_async(document_id, file_path, doc_type, user_id)
+
+    async def _process_document_async(
+        self,
+        document_id: str,
+        file_path: Path,
+        doc_type: str,
+        user_id: str = None,
+        *,
+        force_parallel_submit: bool = False,
+    ):
         """Override to use parallel processing for reprocessing with user isolation support"""
         try:
             logger.info(f"🔄 Processing document with parallel processors: {document_id}")
@@ -823,7 +841,13 @@ class ParallelDocumentService(DocumentService):
                 logger.info(f"🚀 Using parallel document processor for reprocess: {document_id}")
                 
                 # Submit to parallel processor with user_id
-                await self.parallel_processor.submit_document(document_id, str(file_path), doc_type, user_id=user_id)
+                await self.parallel_processor.submit_document(
+                    document_id,
+                    str(file_path),
+                    doc_type,
+                    user_id=user_id,
+                    force=force_parallel_submit,
+                )
                 
                 # Wait for completion with timeout
                 success = await self.parallel_processor.wait_for_document_completion(document_id, timeout=300)

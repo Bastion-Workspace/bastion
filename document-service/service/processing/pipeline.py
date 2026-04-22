@@ -154,29 +154,6 @@ class DocumentProcessingPipeline:
         )
         zip_flag = getattr(doc_info, "is_zip_container", None)
 
-        if not is_chunk_index_eligible(doc_type_val, zip_flag):
-            await pds.document_repository.update_chunk_count(document_id, 0)
-            return True, "ineligible_doc_type"
-
-        if not force_reprocess:
-            idx_at = getattr(doc_info, "chunk_indexed_at", None)
-            idx_hash = getattr(doc_info, "chunk_indexed_file_hash", None) or ""
-            idx_ver = int(getattr(doc_info, "chunk_index_schema_version", 0) or 0)
-            file_hash = doc_info.file_hash or ""
-            if idx_at and idx_hash == file_hash and idx_ver == APP_CHUNK_INDEX_SCHEMA_VERSION:
-                has_chunks = await pds.document_repository.document_has_chunks(document_id)
-                if not has_chunks:
-                    logger.info(
-                        "Chunk index state marked fresh but no rows in document_chunks; "
-                        "clearing drift state for %s",
-                        document_id,
-                    )
-                    await pds.document_repository.clear_chunk_index_state(document_id)
-                else:
-                    return True, "already_indexed"
-        else:
-            await pds.document_repository.clear_chunk_index_state(document_id)
-
         collection_type = getattr(doc_info, "collection_type", None) or "user"
         team_id = getattr(doc_info, "team_id", None)
         if team_id is not None and not isinstance(team_id, str):
@@ -222,8 +199,41 @@ class DocumentProcessingPipeline:
         if not file_path or not file_path.exists():
             return False, "File not found on disk"
 
+        if not is_chunk_index_eligible(doc_type_val, zip_flag):
+            await pds.document_repository.update_chunk_count(document_id, 0)
+            doc_type = pds._detect_document_type(doc_info.filename)
+            # Types like .org are excluded from Qdrant chunking policy; still run the v2
+            # metadata path so status is not left stuck in "processing" after a reprocess.
+            await pds.reprocess_metadata_only(document_id, file_path, doc_type, path_user_id)
+            return True, "metadata_only_reprocess"
+
+        if not force_reprocess:
+            idx_at = getattr(doc_info, "chunk_indexed_at", None)
+            idx_hash = getattr(doc_info, "chunk_indexed_file_hash", None) or ""
+            idx_ver = int(getattr(doc_info, "chunk_index_schema_version", 0) or 0)
+            file_hash = doc_info.file_hash or ""
+            if idx_at and idx_hash == file_hash and idx_ver == APP_CHUNK_INDEX_SCHEMA_VERSION:
+                has_chunks = await pds.document_repository.document_has_chunks(document_id)
+                if not has_chunks:
+                    logger.info(
+                        "Chunk index state marked fresh but no rows in document_chunks; "
+                        "clearing drift state for %s",
+                        document_id,
+                    )
+                    await pds.document_repository.clear_chunk_index_state(document_id)
+                else:
+                    return True, "already_indexed"
+        else:
+            await pds.document_repository.clear_chunk_index_state(document_id)
+
         doc_type = pds._detect_document_type(doc_info.filename)
-        await pds._process_document_async(document_id, file_path, doc_type, path_user_id)
+        await pds._process_document_async(
+            document_id,
+            file_path,
+            doc_type,
+            path_user_id,
+            force_parallel_submit=force_reprocess,
+        )
         return True, ""
 
     async def get_processing_status(self, document_id: str) -> Tuple[bool, str, str]:

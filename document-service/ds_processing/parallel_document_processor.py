@@ -331,16 +331,36 @@ class ParallelDocumentProcessor:
         self.workers.clear()
         logger.info("🔄 All workers stopped")
     
-    async def submit_document(self, document_id: str, file_path: str, doc_type: str, priority: int = 0, user_id: str = None) -> bool:
-        """Submit a document for parallel processing"""
+    async def submit_document(
+        self,
+        document_id: str,
+        file_path: str,
+        doc_type: str,
+        priority: int = 0,
+        user_id: str = None,
+        *,
+        force: bool = False,
+    ) -> bool:
+        """Submit a document for parallel processing.
+
+        If *force* is True, an in-flight slot for the same *document_id* is cleared so
+        operator reprocess can queue work even when a prior job is still marked active
+        (e.g. stuck lease / duplicate queue pressure).
+        """
         try:
             self.completed_jobs.pop(document_id, None)
             if document_id in self.active_jobs:
+                if not force:
+                    logger.info(
+                        "Document %s already in parallel processing queue; skipping duplicate submit",
+                        document_id,
+                    )
+                    return True
+                del self.active_jobs[document_id]
                 logger.info(
-                    "Document %s already in parallel processing queue; skipping duplicate submit",
+                    "Document %s: force submit clearing in-flight slot for reprocess",
                     document_id,
                 )
-                return True
 
             job = ProcessingJob(
                 document_id=document_id,
