@@ -699,7 +699,9 @@ class DocumentFileHandler(FileSystemEventHandler):
                         # **BULLY! ENTERTAINMENT KG EXTRACTION!** 🎬
                         # If this is an entertainment document, extract domain-specific relationships
                         try:
-                            from ds_services.entertainment_kg_extractor import get_entertainment_kg_extractor
+                            from shims.services.entertainment_kg_extractor import (
+                                get_entertainment_kg_extractor,
+                            )
                             ent_extractor = get_entertainment_kg_extractor()
                             
                             # Get document info for tag checking
