@@ -247,12 +247,27 @@ export default function UserLLMProviders() {
   );
 }
 
+/** Match backend composite "provider_id:rest" where rest may contain ':' (e.g. ollama tags). */
+function rawModelIdFromComposite(compositeModelId, providerIdNum) {
+  const s = String(compositeModelId || '');
+  const prefix = `${providerIdNum}:`;
+  if (s.startsWith(prefix)) {
+    return s.slice(prefix.length);
+  }
+  const i = s.indexOf(':');
+  if (i >= 0 && /^\d+$/.test(s.slice(0, i))) {
+    return s.slice(i + 1);
+  }
+  return s;
+}
+
 function ProviderModelsCard({ provider, onRemove, onEnabledChange }) {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [search, setSearch] = useState('');
   const [subProviderFilter, setSubProviderFilter] = useState('');
   const [showOnlyEnabled, setShowOnlyEnabled] = useState(false);
+  const providerIdNum = Number(provider.id);
 
   const { data: modelsData, isLoading: modelsLoading } = useQuery(
     ['userLlmProviderModels', provider.id],
@@ -270,8 +285,8 @@ function ProviderModelsCard({ provider, onRemove, onEnabledChange }) {
   const userEnabled = userEnabledData?.enabled_models || [];
   // API returns composite model_id "provider_id:model_id"; provider models use raw id. Strip prefix for this provider.
   const enabledForThisProvider = userEnabled
-    .filter((e) => e.provider_id === provider.id)
-    .map((e) => (e.model_id && e.model_id.includes(':') ? e.model_id.split(':', 2)[1] : e.model_id));
+    .filter((e) => Number(e.provider_id) === providerIdNum)
+    .map((e) => rawModelIdFromComposite(e.model_id, providerIdNum));
 
   const subProviders = useMemo(
     () =>
@@ -312,6 +327,8 @@ function ProviderModelsCard({ provider, onRemove, onEnabledChange }) {
       onSuccess: () => {
         queryClient.invalidateQueries('userEnabledModels');
         queryClient.invalidateQueries('enabledModels');
+        queryClient.invalidateQueries('availableModels');
+        queryClient.invalidateQueries(['userLlmProviderModels', provider.id]);
         onEnabledChange?.();
       },
     }

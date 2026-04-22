@@ -209,7 +209,13 @@ class UserLLMProviderService:
         provider_id_val = prov.get("id")
         out = []
         for m in raw_list:
-            mid = m.get("id") if isinstance(m, dict) else getattr(m, "id", None)
+            mid = None
+            if isinstance(m, dict):
+                raw_id = m.get("id") or m.get("model")
+                mid = str(raw_id).strip() if raw_id is not None else None
+            else:
+                raw_id = getattr(m, "id", None) or getattr(m, "model", None)
+                mid = str(raw_id).strip() if raw_id is not None else None
             name = m.get("name", mid) if isinstance(m, dict) else getattr(m, "name", mid)
             if mid:
                 entry = {"id": str(mid), "name": name or str(mid), "provider": provider_label}
