@@ -1,6 +1,6 @@
 {
   "name": "bastion-desktop",
-  "version": "0.70.0",
+  "version": "0.70.5",
   "description": "Bastion AI Workspace - Desktop Application",
   "main": "main.js",
   "scripts": {

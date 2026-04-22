@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.70.5] - 2026-04-22
+
 - Change: **Greenfield DB closure** — add **`09_greenfield_extensions.sql`** (`\ir` **039**, **048**, **054**, **071**, **083**, plus **`156_greenfield_agent_line_watches_workspace.sql`**) for objects previously missing from **`01_init.sql`** (conversation attachments, event watches, document edit proposals, browser sessions, chunk page columns + metadata FTS, **`agent_line_watches`** / **`agent_line_workspace`** with grants/RLS). **`01_init.sql`**: **`agent_lines.reference_config`** and **`data_workspace_config`**. Rename duplicate **`080_add_mcp_servers.sql`** → **`155_add_mcp_servers.sql`**; **`run_migration.py`** aliases **`155`** / **`156`**. Regenerate matrix: **`python backend/scripts/generate_greenfield_coverage.py`** → **`backend/postgres_init/GREENFIELD_COVERAGE.md`**. See [`docs/postgres-init.md`](docs/postgres-init.md).
 - Fix: Greenfield main DB — add **`08_user_llm_providers.sql`** so **`user_llm_providers`** and **`user_enabled_models`** exist (migrations **055**, **080**); fixes Settings → Models and **`/api/user/llm-providers`** on fresh volumes. Existing volumes: run **`055`** then **`080`** via **`run_migration.py`** or recreate the Postgres data volume after pulling the image.
 - Fix: **data-service** — on pool startup, if **`public.data_workspaces`** is missing (common when **`postgres-data`** reused a volume and Docker skipped **`docker-entrypoint-initdb.d`**), apply bundled **`sql/01_init.sql`** via **`psql`** (`postgresql-client` added to the data-service image). Complements the **`postgres-data`** init script for greenfield and volume-upgrade cases.
@@ -38,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update: `.env.example` lists every variable referenced in root `docker-compose.yml` (with compose-aligned defaults) plus application-only env vars for migration toward externalized / Kubernetes config.
 - Update: `docker-compose.yml` documents `${VAR:-default}` pattern; DB URLs, JWT, Qdrant/Neo4j, LangGraph DB creds, data-workspace Postgres, prod frontend `VITE_*` runtime, and pgbouncer healthcheck honor `.env` overrides with same defaults as before when unset.
 - Update: Docker Compose uses single `LOG_LEVEL` for all first-party services (removed per-service `*_LOG_LEVEL` env indirection).
-- Fix: `build-and-push` workflow sets `IMAGE_PREFIX` to lowercase `github.repository_owner` so GHCR tags validate (e.g. `ghcr.io/bastion-workspace/bastion-backend:0.70.0`).
+- Fix: `build-and-push` workflow sets `IMAGE_PREFIX` to lowercase `github.repository_owner` so GHCR tags validate (e.g. `ghcr.io/bastion-workspace/bastion-backend:0.70.5`).
 - Update: README — drop standalone **Deployment** section; fold operator link into **Technical Architecture** (see `docs/DEPLOYMENT.md`).
 - Update: README — dedicated **Agent Factory** section (building blocks, hybrid skill discovery, concrete examples); **Agent Factory** snapshot + skill rows; remove premature **code-workspace** claims; reframe long-form editing as user-composed agents.
 - Update: README product overview — platform snapshot, supported formats table, and expanded capability sections for operators and evaluators.

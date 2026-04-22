@@ -10,7 +10,7 @@ Releases are **tag-driven** and aligned with two branches:
 
 | Branch | Version examples (in `VERSION` / tag) | GHCR image prefix | Intended visibility |
 |--------|----------------------------------------|-------------------|---------------------|
-| **`main`** | `0.70.0` (no `-dev` suffix) | `ghcr.io/<owner>/bastion-<service>:…` | **Public** anonymous pulls |
+| **`main`** | `0.70.5` (no `-dev` suffix) | `ghcr.io/<owner>/bastion-<service>:…` | **Public** anonymous pulls |
 | **`dev`** | `0.70.5-dev` (suffix **`-dev`**) | `ghcr.io/<owner>/bastion-dev-<service>:…` | **Private** (org members / auth) |
 
 The workflow **checks** that:
@@ -51,14 +51,14 @@ Version numbers are tracked in the `VERSION` file at the repository root. This f
 
 ### Version format
 
-- **Production**: `0.70.0` → tag **`v0.70.0`** (no `-dev` in the version string).
+- **Production**: `0.70.5` → tag **`v0.70.5`** (no `-dev` in the version string).
 - **Development**: `0.70.5-dev` → tag **`v0.70.5-dev`** (suffix **`-dev`** marks the dev channel).
 
 ## Image Tagging Strategy
 
 When a tag is pushed, each image receives multiple tags:
 
-1. **Version tag**: Exact version from the tag (e.g. `0.70.5-dev` or `0.70.0`).
+1. **Version tag**: Exact version from the tag (e.g. `0.70.5-dev` or `0.70.5`).
 2. **Latest tag**: `latest-dev` for dev versions, `latest` for production.
 3. **SHA tag**: Short git SHA (e.g. `sha-abc1234`).
 4. **Branch tag**: `dev` or `main` (label only; channel is determined by the version suffix).
@@ -88,9 +88,9 @@ The workflow builds and pushes first-party images from `docker-compose.yml`, inc
 
 ## Image Naming Convention
 
-**Production** (example org `myorg`, version `0.70.0`):
+**Production** (example org `myorg`, version `0.70.5`):
 
-- `ghcr.io/myorg/bastion-backend:0.70.0`
+- `ghcr.io/myorg/bastion-backend:0.70.5`
 - `ghcr.io/myorg/bastion-backend:latest`
 - `ghcr.io/myorg/bastion-backend:sha-abc1234`
 - `ghcr.io/myorg/bastion-backend:main`
@@ -122,12 +122,12 @@ Images are published under **`bastion-dev-*`** and should remain **private** at 
 ### Production release (from `main`)
 
 1. Merge `dev` → **`main`** when ready.
-2. Set `VERSION` to a **non-`-dev`** version (e.g. `0.70.0`) on `main` if needed.
+2. Set `VERSION` to a **non-`-dev`** version (e.g. `0.70.5`) on `main` if needed.
 3. Tag and push:
 
    ```bash
-   git tag v0.70.0
-   git push origin v0.70.0
+   git tag v0.70.5
+   git push origin v0.70.5
    ```
 
 Images are published under **`bastion-*`**. Set GHCR package visibility to **public** for these packages (once per package) so anonymous `docker pull` works for operators.
@@ -189,7 +189,7 @@ or for production:
 ```yaml
 services:
   backend:
-    image: ghcr.io/myorg/bastion-backend:0.70.0
+    image: ghcr.io/myorg/bastion-backend:0.70.5
 ```
 
 Replace `myorg` with your GitHub org or user (lowercase).
