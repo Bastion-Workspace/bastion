@@ -4559,7 +4559,7 @@ CREATE TABLE IF NOT EXISTS custom_playbooks (
 CREATE INDEX IF NOT EXISTS idx_playbooks_user ON custom_playbooks(user_id);
 CREATE INDEX IF NOT EXISTS idx_playbooks_triggers ON custom_playbooks USING GIN (triggers);
 
--- Built-in default playbook (merged migrations 076 + 113): single-step ReAct agent; no extra built-in templates
+-- Built-in default playbook (merged 076 + 113 + 158): single-step ReAct; step prompt includes query, optional history, optional editor
 INSERT INTO custom_playbooks (
     id,
     user_id,
@@ -4578,15 +4578,15 @@ INSERT INTO custom_playbooks (
     '00000000-0001-4000-8000-000000000001'::uuid,
     NULL,
     'Default Agent Playbook',
-    'Built-in single-step ReAct agent with skill search and document/web research tools',
-    '1.1',
+    'Built-in single-step ReAct agent: general assistant with tools; prompt includes current message, recent conversation, and open editor when present',
+    '1.2',
     $pb001$
 {
   "steps": [
     {
       "type": "llm_agent",
       "name": "main",
-      "prompt_template": "{query}",
+      "prompt_template": "You are a helpful general assistant for this workspace. Use the available tools when they improve the answer: search the knowledge base, the web, prior conversation, and document content as needed. Be direct; add detail when the user asks for it.\n\n{{#history}}\nRecent conversation (for context; the latest user message is repeated below):\n{history}\n{{/history}}\n\nThe user's current message:\n{query}\n\n{{#editor}}\nThe user has a document open in the editor (they may say \"this file\", the selection, or a heading). Use it when it helps:\n{editor}\n{{/editor}}",
       "available_tools": [
         "search_documents_tool",
         "search_web_tool",
@@ -4600,7 +4600,7 @@ INSERT INTO custom_playbooks (
       ],
       "auto_discover_skills": true,
       "max_auto_skills": 5,
-      "max_iterations": 15
+      "max_iterations": 20
     }
   ]
 }

@@ -219,6 +219,8 @@ async def run_migration(migration_name: str):
         "remove_rss_deep_research_playbooks",
     ):
         sql_file = "157_remove_rss_and_deep_research_builtin_playbooks.sql"
+    elif migration_name in ("158", "158_default_playbook_prompt", "default_playbook_prompt"):
+        sql_file = "158_default_playbook_prompt_and_iterations.sql"
     elif migration_name in ("130", "130_messaging_improvements", "messaging_improvements"):
         sql_file = "130_messaging_improvements.sql"
     elif migration_name in ("098", "098_drop_agent_profile_icon"):
@@ -251,7 +253,7 @@ async def run_migration(migration_name: str):
             logger.info(
                 "Known aliases: messaging (check only), 039 (check only), 076/098 (check only), "
                 "042–097, 155/mcp_servers_table, 156/greenfield_line_watches, 157/remove_rss_deep_research_playbooks, "
-                "130/messaging_improvements "
+                "158/default_playbook_prompt, 130/messaging_improvements "
                 "as listed in scripts/run_migration.py, "
                 "or an exact migrations/<name>.sql filename."
             )
