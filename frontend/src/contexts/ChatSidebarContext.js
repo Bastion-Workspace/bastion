@@ -10,6 +10,7 @@ import React, {
 } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useLocation } from 'react-router-dom';
+import { useAuth } from './AuthContext';
 import apiService from '../services/apiService';
 import BackgroundJobService from '../services/backgroundJobService';
 import tabNotificationManager from '../utils/tabNotification';
@@ -18,6 +19,11 @@ import { documentDiffStore } from '../services/documentDiffStore';
 import { createAgentStatusWebSocket } from '../utils/agentStatusTypes';
 import { buildMessageTree, getActivePath, getNextSibling, extendToLinearLeaf } from '../utils/messageTreeUtils';
 import { devLog } from '../utils/devConsole';
+import {
+  LEGACY_CHAT_CONVERSATION_STORAGE_KEY,
+  persistedActiveConversationLocalKey,
+  activeConversationSessionStorageKey,
+} from '../utils/chatSelectionStorage';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -120,29 +126,15 @@ export const useChatSidebar = () => {
 
 export const ChatSidebarProvider = ({ children }) => {
   const location = useLocation();
+  const { isAuthenticated, user, loading: authLoading } = useAuth();
   // Note: EditorProvider is a child of ChatSidebarProvider, so we can't use useEditor() here
   // We'll check localStorage directly with strict validation instead
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(420);
   const [isFullWidth, setIsFullWidth] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
-  // ROOSEVELT: Load current conversation from localStorage for session persistence
-  const [currentConversationId, setCurrentConversationId] = useState(() => {
-    try {
-      const saved = localStorage.getItem('chatSidebarCurrentConversation');
-      const conversationId = saved && saved !== 'null' ? saved : null;
-      devLog('💾 Page refresh - loading conversation from localStorage:', conversationId);
-      if (conversationId) {
-        devLog('🔄 Will restore conversation automatically on page load');
-      } else {
-        devLog('🆕 No saved conversation - starting fresh');
-      }
-      return conversationId;
-    } catch (error) {
-      console.error('Failed to load current conversation from localStorage:', error);
-      return null;
-    }
-  });
+  // Restored per-user after auth resolves (see restore effect); avoid global localStorage on first paint.
+  const [currentConversationId, setCurrentConversationId] = useState(null);
   const [messages, setMessages] = useState([]);
   /** Full message tree (all branches) when loaded with include_tree */
   const [allMessages, setAllMessages] = useState([]);
@@ -181,16 +173,19 @@ export const ChatSidebarProvider = ({ children }) => {
   }, [activeArtifact]);
 
   useEffect(() => {
+    const uid = user?.user_id;
     try {
-      if (currentConversationId) {
-        sessionStorage.setItem('bastion_ui_active_conversation_id', currentConversationId);
-      } else {
-        sessionStorage.removeItem('bastion_ui_active_conversation_id');
+      if (uid && currentConversationId) {
+        const sk = activeConversationSessionStorageKey(uid);
+        if (sk) sessionStorage.setItem(sk, currentConversationId);
+      } else if (uid && !currentConversationId) {
+        const sk = activeConversationSessionStorageKey(uid);
+        if (sk) sessionStorage.removeItem(sk);
       }
     } catch (_) {
       /* ignore quota or private mode */
     }
-  }, [currentConversationId]);
+  }, [currentConversationId, user?.user_id]);
 
   const setActiveArtifact = useCallback((art) => {
     if (art == null) {
@@ -253,7 +248,9 @@ export const ChatSidebarProvider = ({ children }) => {
   const activeStreamMessageIdRef = React.useRef(null);
   const lastCreatedConversationIdRef = React.useRef(null); // Skip redundant refetch after creating new conversation
   const isLoadingFromMetadataRef = React.useRef(false); // Track when we're loading preferences from metadata to prevent save loop
-  
+  const currentConversationIdRef = React.useRef(null);
+  const lastRestoreAttemptUserRef = React.useRef(null);
+
   // **CONVERSATION-SCOPED ACTIVITY STATE**: Isolate loading indicators, job IDs, and executing plans per conversation
   // Map<conversationId, { isLoading, currentJobId, executingPlans }>
   const [conversationActivityState, setConversationActivityState] = useState(new Map());
@@ -378,6 +375,106 @@ export const ChatSidebarProvider = ({ children }) => {
   }, [currentConversationId]);
 
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    currentConversationIdRef.current = currentConversationId;
+  }, [currentConversationId]);
+
+  const clearConversationWorkspace = useCallback(() => {
+    const id = currentConversationIdRef.current;
+    if (backgroundJobService) {
+      backgroundJobService.setCurrentConversationId(null);
+      backgroundJobService.disconnectAll();
+      backgroundJobService.clearCompletedJobs();
+    }
+    setCurrentConversationId(null);
+    setMessages([]);
+    setAllMessages([]);
+    setCurrentNodeId(null);
+    setQuery('');
+    messagesConversationIdRef.current = null;
+    if (id) {
+      queryClient.removeQueries(['conversation', id]);
+      queryClient.removeQueries(['conversationMessages', id]);
+    }
+    queryClient.invalidateQueries(['conversations']);
+  }, [queryClient, backgroundJobService]);
+
+  const forgetPersistedActiveThreadForUser = useCallback((userId) => {
+    if (!userId) return;
+    try {
+      const lk = persistedActiveConversationLocalKey(userId);
+      if (lk) localStorage.removeItem(lk);
+      const sk = activeConversationSessionStorageKey(userId);
+      if (sk) sessionStorage.removeItem(sk);
+    } catch (_) {
+      /* ignore */
+    }
+  }, []);
+
+  const discardInaccessibleConversation = useCallback(() => {
+    const uid = user?.user_id;
+    clearConversationWorkspace();
+    forgetPersistedActiveThreadForUser(uid);
+  }, [clearConversationWorkspace, forgetPersistedActiveThreadForUser, user?.user_id]);
+
+  const authChatSessionRef = useRef(null);
+  useEffect(() => {
+    if (authLoading) return;
+    const snapshot = {
+      authed: !!(isAuthenticated && user?.user_id),
+      userId: user?.user_id ?? null,
+    };
+    const prev = authChatSessionRef.current;
+    if (prev == null) {
+      authChatSessionRef.current = snapshot;
+      return;
+    }
+    const hadUser = prev.authed && prev.userId;
+    const hasUser = snapshot.authed && snapshot.userId;
+    const loggedOut = hadUser && !hasUser;
+    const switchedUser = hadUser && hasUser && prev.userId !== snapshot.userId;
+    if (loggedOut || switchedUser) {
+      if (prev.userId) {
+        try {
+          const sk = activeConversationSessionStorageKey(prev.userId);
+          if (sk) sessionStorage.removeItem(sk);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      lastRestoreAttemptUserRef.current = null;
+      clearConversationWorkspace();
+    }
+    authChatSessionRef.current = snapshot;
+  }, [authLoading, isAuthenticated, user?.user_id, clearConversationWorkspace]);
+
+  useEffect(() => {
+    if (authLoading || !isAuthenticated || !user?.user_id) return;
+    const uid = user.user_id;
+    if (currentConversationId) return;
+    if (lastRestoreAttemptUserRef.current === uid) return;
+    lastRestoreAttemptUserRef.current = uid;
+
+    const key = persistedActiveConversationLocalKey(uid);
+    let saved = key ? localStorage.getItem(key) : null;
+    if (!saved || saved === 'null') {
+      const legacy = localStorage.getItem(LEGACY_CHAT_CONVERSATION_STORAGE_KEY);
+      if (legacy && legacy !== 'null' && key) {
+        try {
+          localStorage.setItem(key, legacy);
+          localStorage.removeItem(LEGACY_CHAT_CONVERSATION_STORAGE_KEY);
+          saved = legacy;
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+    if (saved && saved !== 'null') {
+      devLog('💾 Restoring last active conversation for user from localStorage:', saved);
+      setCurrentConversationId(saved);
+    }
+  }, [authLoading, isAuthenticated, user?.user_id, currentConversationId]);
 
   // Preference update function for saving to conversation metadata
   const updateConversationPreference = React.useCallback(async (key, value) => {
@@ -518,20 +615,24 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   }, [selectedModel, currentConversationId, updateConversationPreference]);
 
-  // ROOSEVELT: Save current conversation to localStorage for session persistence
+  // Per-user: last active thread survives logout/login on the same browser profile.
   useEffect(() => {
+    const uid = user?.user_id;
+    if (!uid) return;
+    const key = persistedActiveConversationLocalKey(uid);
+    if (!key) return;
     try {
       if (currentConversationId) {
-        localStorage.setItem('chatSidebarCurrentConversation', currentConversationId);
-        devLog('💾 Persisted conversation to localStorage:', currentConversationId);
+        localStorage.setItem(key, currentConversationId);
+        devLog('💾 Persisted conversation to localStorage:', currentConversationId, 'for user', uid);
       } else {
-        localStorage.removeItem('chatSidebarCurrentConversation');
-        devLog('💾 Cleared conversation from localStorage');
+        localStorage.removeItem(key);
+        devLog('💾 Cleared persisted conversation for user', uid);
       }
     } catch (error) {
       console.error('Failed to persist current conversation to localStorage:', error);
     }
-  }, [currentConversationId]);
+  }, [currentConversationId, user?.user_id]);
 
   // PRIORITY: Use unified chat service for conversation loading
   const { data: conversationData, isLoading: conversationLoading, refetch: refetchConversation } = useQuery(
@@ -554,6 +655,10 @@ export const ChatSidebarProvider = ({ children }) => {
       },
       onError: (error) => {
         console.error('❌ ChatSidebarContext: Failed to load conversation:', error);
+        const status = error?.response?.status;
+        if (status === 403 || status === 404) {
+          discardInaccessibleConversation();
+        }
       }
     }
   );
@@ -698,6 +803,10 @@ export const ChatSidebarProvider = ({ children }) => {
       },
       onError: (error) => {
         console.error('❌ ChatSidebarContext: Failed to load messages:', error);
+        const status = error?.response?.status;
+        if (status === 403 || status === 404) {
+          discardInaccessibleConversation();
+        }
       }
     }
   );

@@ -50,7 +50,7 @@ export const AuthProvider = ({ children }) => {
       
       // Store token
       localStorage.setItem('auth_token', response.access_token);
-      
+
       // Set user state
       setUser(response.user);
       setIsAuthenticated(true);

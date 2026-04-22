@@ -5,6 +5,7 @@ import teamService from '../services/teams/TeamService';
 import { useMessaging } from './MessagingContext';
 import { useNotifications } from './NotificationContext';
 import { devLog } from '../utils/devConsole';
+import { activeConversationSessionStorageKey } from '../utils/chatSelectionStorage';
 
 const TeamContext = createContext();
 
@@ -452,7 +453,12 @@ export const TeamProvider = ({ children }) => {
           if (data.type === 'agent_notification') {
             if (data.subtype === 'chat_completion' && data.conversation_id) {
               try {
-                const active = sessionStorage.getItem('bastion_ui_active_conversation_id');
+                const scoped = user?.user_id
+                  ? activeConversationSessionStorageKey(user.user_id)
+                  : null;
+                const active =
+                  (scoped && sessionStorage.getItem(scoped)) ||
+                  sessionStorage.getItem('bastion_ui_active_conversation_id');
                 if (active && data.conversation_id === active) {
                   return;
                 }

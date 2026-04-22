@@ -13,6 +13,7 @@ import TabbedContentManager from './TabbedContentManager';
 import RSSFeedManager from './RSSFeedManager';
 import { useAuth } from '../contexts/AuthContext';
 import apiService from '../services/apiService';
+import { clearAllPersistedChatConversationLocalKeys } from '../utils/chatSelectionStorage';
 
 const DocumentsPage = () => {
   const { user } = useAuth();
@@ -179,8 +180,7 @@ const DocumentsPage = () => {
             localStorage.removeItem('rss-tabs');
             localStorage.removeItem('rss-active-tab');
             localStorage.removeItem('selectedFolderId');
-            localStorage.removeItem('chatSidebarCurrentConversation');
-            localStorage.removeItem('chatSidebarCurrentConversation');
+            clearAllPersistedChatConversationLocalKeys();
             // Keep sidebar state - that's intentional across database wipes
           } catch (error) {
             console.error('Failed to clear cached folder data:', error);
@@ -207,7 +207,7 @@ const DocumentsPage = () => {
             localStorage.removeItem('rss-tabs');
             localStorage.removeItem('rss-active-tab');
             localStorage.removeItem('selectedFolderId');
-            // NOTE: Don't clear chatSidebarCurrentConversation - conversations are stored separately from documents
+            // Chat selection keys are per-user; folder-tree wipe does not clear them here.
           }
         })
         .catch(() => {
