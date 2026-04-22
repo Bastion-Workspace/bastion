@@ -213,6 +213,12 @@ async def run_migration(migration_name: str):
         sql_file = "155_add_mcp_servers.sql"
     elif migration_name in ("156", "156_greenfield_agent_line_watches_workspace", "greenfield_line_watches"):
         sql_file = "156_greenfield_agent_line_watches_workspace.sql"
+    elif migration_name in (
+        "157",
+        "157_remove_rss_and_deep_research_builtin_playbooks",
+        "remove_rss_deep_research_playbooks",
+    ):
+        sql_file = "157_remove_rss_and_deep_research_builtin_playbooks.sql"
     elif migration_name in ("130", "130_messaging_improvements", "messaging_improvements"):
         sql_file = "130_messaging_improvements.sql"
     elif migration_name in ("098", "098_drop_agent_profile_icon"):
@@ -244,7 +250,8 @@ async def run_migration(migration_name: str):
             logger.error(f"Unknown migration: {migration_name}")
             logger.info(
                 "Known aliases: messaging (check only), 039 (check only), 076/098 (check only), "
-                "042–097, 155/mcp_servers_table, 156/greenfield_line_watches, 130/messaging_improvements "
+                "042–097, 155/mcp_servers_table, 156/greenfield_line_watches, 157/remove_rss_deep_research_playbooks, "
+                "130/messaging_improvements "
                 "as listed in scripts/run_migration.py, "
                 "or an exact migrations/<name>.sql filename."
             )

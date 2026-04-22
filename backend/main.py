@@ -439,17 +439,12 @@ async def lifespan(app: FastAPI):
 
         asyncio.create_task(_check_dimension_migration())
 
-        # Seed default built-in agent profile for all users (idempotent)
+        # Seed default built-in agent profile for all users (idempotent; Bastion Assistant only)
         try:
-            from services.agent_factory_service import (
-                seed_default_agent_profiles,
-                seed_devops_advisor_profiles,
-                seed_rss_manager_profiles,
-            )
+            from services.agent_factory_service import seed_default_agent_profiles
+
             await seed_default_agent_profiles()
-            await seed_rss_manager_profiles()
-            await seed_devops_advisor_profiles()
-            logger.info("Default, RSS Manager, and DevOps Advisor agent profiles seeded")
+            logger.info("Default Bastion Assistant agent profile seeded (where missing)")
         except Exception as e:
             logger.debug("Default agent profile seed skipped or failed: %s", e)
 

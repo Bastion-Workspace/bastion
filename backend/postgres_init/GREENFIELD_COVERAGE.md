@@ -1,6 +1,6 @@
 # Greenfield coverage matrix (generated)
 
-Regenerate: `python backend/scripts/generate_greenfield_coverage.py` — CI: `--check-only`
+Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 
 ## Legend
 
@@ -15,7 +15,7 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py` — CI: `--
 ## Summary
 
 - **A**: 41
-- **B**: 19
+- **B**: 20
 - **C**: 18
 - **R**: 79
 
@@ -180,6 +180,7 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py` — CI: `--
 | `154_agent_line_brief_snapshots.sql` | A | tables in 01: agent_line_brief_snapshots |
 | `155_add_mcp_servers.sql` | A | tables in 01: mcp_servers |
 | `156_greenfield_agent_line_watches_workspace.sql` | B | included via \ir from 02-09 wrapper |
+| `157_remove_rss_and_deep_research_builtin_playbooks.sql` | B | included via \ir from 02-09 wrapper |
 
 ## Wrapper `\ir` targets (02-09)
 
@@ -202,3 +203,4 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py` — CI: `--
 - `148_document_chunk_index_state.sql`
 - `151_document_processing_resilience.sql`
 - `156_greenfield_agent_line_watches_workspace.sql`
+- `157_remove_rss_and_deep_research_builtin_playbooks.sql`

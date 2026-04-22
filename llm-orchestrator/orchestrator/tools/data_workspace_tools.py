@@ -86,10 +86,11 @@ def _get_llm_for_nl_to_sql(pipeline_metadata: Optional[Dict[str, Any]] = None):
         from config.settings import settings
     except Exception:
         return None
+    from orchestrator.utils.llm_credentials_from_metadata import get_openrouter_credentials
+
     meta = pipeline_metadata or {}
     model = meta.get("user_chat_model") or settings.DEFAULT_MODEL
-    api_key = meta.get("user_llm_api_key") or settings.OPENROUTER_API_KEY or settings.OPENAI_API_KEY
-    base_url = meta.get("user_llm_base_url") or settings.OPENROUTER_BASE_URL
+    api_key, base_url = get_openrouter_credentials(meta)
     return ChatOpenAI(
         model=model,
         openai_api_key=api_key,

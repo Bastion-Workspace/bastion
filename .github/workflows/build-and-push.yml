@@ -7,17 +7,22 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image version label (leave empty to use VERSION file from the selected branch)'
+        description: 'Semver label from VERSION file (or override here). Hotfixes do not require a bump: every push also tags sha-<short> and the branch name—pin those in deploy without changing VERSION.'
         required: false
         type: string
       build_scope:
-        description: 'postgres_only publishes just bastion-postgres + bastion-postgres-data (quick first run). all builds every image.'
+        description: 'Legacy preset when build_targets is empty: all vs postgres_only.'
         required: false
         default: all
         type: choice
         options:
           - all
           - postgres_only
+      build_targets:
+        description: 'Optional. Overrides build_scope when non-empty. Comma-separated image keys, e.g. backend or backend,tools-service. Use all or postgres_only for presets. Valid keys: postgres, postgres-data, backend, tools-service, cli-worker, celery-worker, celery-beat, frontend, webdav, llm-orchestrator, vector-service, data-service, image-vision-service, connections-service, voice-service, document-service, crawl4ai-service, bbs-server.'
+        required: false
+        default: ''
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -160,7 +165,112 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve per-image build flags
+        env:
+          BUILD_TARGETS_RAW: ${{ inputs.build_targets }}
+          BUILD_SCOPE_LEGACY: ${{ inputs.build_scope }}
+        run: |
+          set -euo pipefail
+          keys=(
+            POSTGRES POSTGRES_DATA BACKEND TOOLS_SERVICE CLI_WORKER CELERY_WORKER CELERY_BEAT
+            FRONTEND WEBDAV LLM_ORCHESTRATOR VECTOR_SERVICE DATA_SERVICE IMAGE_VISION_SERVICE
+            CONNECTIONS_SERVICE VOICE_SERVICE DOCUMENT_SERVICE CRAWL4AI_SERVICE BBS_SERVER
+          )
+          declare -A want=()
+          for k in "${keys[@]}"; do want["$k"]=0; done
+          set_all() {
+            local v="$1"
+            for k in "${keys[@]}"; do want["$k"]=$v; done
+          }
+          emit() {
+            for k in "${keys[@]}"; do
+              if [[ "${want[$k]}" -eq 1 ]]; then
+                echo "BUILD_${k}=true" >> "$GITHUB_ENV"
+              else
+                echo "BUILD_${k}=false" >> "$GITHUB_ENV"
+              fi
+            done
+          }
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            set_all 1
+            emit
+            echo "Resolved build targets: all (non-manual run)."
+            exit 0
+          fi
+          raw_trim="${BUILD_TARGETS_RAW:-}"
+          raw_trim="${raw_trim#"${raw_trim%%[![:space:]]*}"}"
+          raw_trim="${raw_trim%"${raw_trim##*[![:space:]]}"}"
+          if [[ -z "$raw_trim" ]]; then
+            if [[ "${BUILD_SCOPE_LEGACY:-}" == "postgres_only" ]]; then
+              set_all 0
+              want["POSTGRES"]=1
+              want["POSTGRES_DATA"]=1
+              emit
+              echo "Resolved build targets: postgres_only (legacy build_scope)."
+            else
+              set_all 1
+              emit
+              echo "Resolved build targets: all (legacy build_scope)."
+            fi
+            exit 0
+          fi
+          effective_lower=$(echo "$raw_trim" | tr '[:upper:]' '[:lower:]')
+          if [[ "$effective_lower" == "all" ]]; then
+            set_all 1
+            emit
+            echo "Resolved build targets: all."
+            exit 0
+          fi
+          if [[ "$effective_lower" == "postgres_only" ]]; then
+            set_all 0
+            want["POSTGRES"]=1
+            want["POSTGRES_DATA"]=1
+            emit
+            echo "Resolved build targets: postgres_only."
+            exit 0
+          fi
+          IFS=',' read -ra parts <<< "$effective_lower"
+          declare -A map=(
+            [postgres]=POSTGRES
+            [postgres-data]=POSTGRES_DATA
+            [backend]=BACKEND
+            [tools-service]=TOOLS_SERVICE
+            [cli-worker]=CLI_WORKER
+            [celery-worker]=CELERY_WORKER
+            [celery-beat]=CELERY_BEAT
+            [frontend]=FRONTEND
+            [webdav]=WEBDAV
+            [llm-orchestrator]=LLM_ORCHESTRATOR
+            [vector-service]=VECTOR_SERVICE
+            [data-service]=DATA_SERVICE
+            [image-vision-service]=IMAGE_VISION_SERVICE
+            [connections-service]=CONNECTIONS_SERVICE
+            [voice-service]=VOICE_SERVICE
+            [document-service]=DOCUMENT_SERVICE
+            [crawl4ai-service]=CRAWL4AI_SERVICE
+            [bbs-server]=BBS_SERVER
+          )
+          matched=0
+          for part in "${parts[@]}"; do
+            token=$(echo "$part" | tr -d '[:space:]')
+            [[ -n "$token" ]] || continue
+            flag="${map[$token]:-}"
+            if [[ -z "$flag" ]]; then
+              echo "::error::Unknown build_targets token: '$token'. See workflow input description for valid keys."
+              exit 1
+            fi
+            want["$flag"]=1
+            matched=$((matched + 1))
+          done
+          if [[ "$matched" -eq 0 ]]; then
+            echo "::error::build_targets was non-empty but no valid tokens were parsed."
+            exit 1
+          fi
+          emit
+          echo "Resolved build_targets: ${effective_lower}"
+
       - name: Build and push postgres (bundled backend/postgres_init init)
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_POSTGRES == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -176,6 +286,7 @@ jobs:
           build-args: BUILDKIT_INLINE_CACHE=1
 
       - name: Build and push postgres-data (bundled data-service/sql init)
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_POSTGRES_DATA == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -191,7 +302,7 @@ jobs:
           build-args: BUILDKIT_INLINE_CACHE=1
 
       - name: Build and push backend
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_BACKEND == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -210,7 +321,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push tools-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_TOOLS_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -229,7 +340,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push cli-worker
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_CLI_WORKER == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -248,7 +359,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push celery-worker
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_CELERY_WORKER == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -267,7 +378,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push celery-beat
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_CELERY_BEAT == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -286,7 +397,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push frontend
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_FRONTEND == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
@@ -304,7 +415,7 @@ jobs:
             VITE_VERSION=${{ steps.metadata.outputs.version }}
 
       - name: Build and push webdav
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_WEBDAV == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -323,7 +434,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push llm-orchestrator
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_LLM_ORCHESTRATOR == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -342,7 +453,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push vector-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_VECTOR_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -361,7 +472,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push data-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_DATA_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -380,7 +491,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push image-vision-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_IMAGE_VISION_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -399,7 +510,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push connections-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_CONNECTIONS_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -418,7 +529,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push voice-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_VOICE_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -437,7 +548,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push document-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_DOCUMENT_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -456,7 +567,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push crawl4ai-service
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_CRAWL4AI_SERVICE == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -475,7 +586,7 @@ jobs:
             BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push bbs-server
-        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_scope == 'all' }}
+        if: ${{ github.event_name != 'workflow_dispatch' || env.BUILD_BBS_SERVER == 'true' }}
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -497,7 +608,9 @@ jobs:
         env:
           REGISTRY: ${{ env.REGISTRY }}
           IMAGE_PREFIX: ${{ env.IMAGE_PREFIX }}
-          BUILD_SCOPE: ${{ github.event.inputs.build_scope }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_BUILD_TARGETS: ${{ github.event.inputs.build_targets }}
+          INPUT_BUILD_SCOPE: ${{ github.event.inputs.build_scope }}
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -506,8 +619,15 @@ jobs:
           else
             echo "**Channel:** production — images are \`ghcr.io/.../bastion-*\` (set GHCR package visibility **public** for anonymous pulls; see \`.github/workflows/README.md\`)." >> $GITHUB_STEP_SUMMARY
           fi
-          if [[ "$BUILD_SCOPE" == "postgres_only" ]]; then
-            echo "**Build scope:** \`postgres_only\` — only DB images were built; re-run with \`all\` (or push a \`v*\` tag) for the rest." >> $GITHUB_STEP_SUMMARY
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            bt="${INPUT_BUILD_TARGETS:-}"
+            bt="${bt#"${bt%%[![:space:]]*}"}"
+            bt="${bt%"${bt##*[![:space:]]}"}"
+            if [[ -n "$bt" ]]; then
+              echo "**Build targets:** \`${bt}\` (subset of images)." >> $GITHUB_STEP_SUMMARY
+            else
+              echo "**Build targets:** legacy \`build_scope\` = \`${INPUT_BUILD_SCOPE:-all}\`." >> $GITHUB_STEP_SUMMARY
+            fi
             echo "" >> $GITHUB_STEP_SUMMARY
           fi
           echo "**Version:** ${{ steps.metadata.outputs.version }}" >> $GITHUB_STEP_SUMMARY
@@ -517,23 +637,21 @@ jobs:
           echo "**Image prefix:** \`${REGISTRY}/${IMAGE_PREFIX}-\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Images built (GHCR)" >> $GITHUB_STEP_SUMMARY
-          echo "- postgres (SQL init baked in)" >> $GITHUB_STEP_SUMMARY
-          echo "- postgres-data (data workspace SQL init baked in)" >> $GITHUB_STEP_SUMMARY
-          if [[ "$BUILD_SCOPE" != "postgres_only" ]]; then
-            echo "- backend" >> $GITHUB_STEP_SUMMARY
-            echo "- tools-service" >> $GITHUB_STEP_SUMMARY
-            echo "- cli-worker" >> $GITHUB_STEP_SUMMARY
-            echo "- celery-worker" >> $GITHUB_STEP_SUMMARY
-            echo "- celery-beat" >> $GITHUB_STEP_SUMMARY
-            echo "- frontend" >> $GITHUB_STEP_SUMMARY
-            echo "- webdav" >> $GITHUB_STEP_SUMMARY
-            echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
-            echo "- vector-service" >> $GITHUB_STEP_SUMMARY
-            echo "- data-service" >> $GITHUB_STEP_SUMMARY
-            echo "- image-vision-service" >> $GITHUB_STEP_SUMMARY
-            echo "- connections-service" >> $GITHUB_STEP_SUMMARY
-            echo "- voice-service" >> $GITHUB_STEP_SUMMARY
-            echo "- document-service" >> $GITHUB_STEP_SUMMARY
-            echo "- crawl4ai-service" >> $GITHUB_STEP_SUMMARY
-            echo "- bbs-server" >> $GITHUB_STEP_SUMMARY
-          fi
+          [[ "${BUILD_POSTGRES:-}" == "true" ]] && echo "- postgres (SQL init baked in)" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_POSTGRES_DATA:-}" == "true" ]] && echo "- postgres-data (data workspace SQL init baked in)" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_BACKEND:-}" == "true" ]] && echo "- backend" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_TOOLS_SERVICE:-}" == "true" ]] && echo "- tools-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_CLI_WORKER:-}" == "true" ]] && echo "- cli-worker" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_CELERY_WORKER:-}" == "true" ]] && echo "- celery-worker" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_CELERY_BEAT:-}" == "true" ]] && echo "- celery-beat" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_FRONTEND:-}" == "true" ]] && echo "- frontend" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_WEBDAV:-}" == "true" ]] && echo "- webdav" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_LLM_ORCHESTRATOR:-}" == "true" ]] && echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_VECTOR_SERVICE:-}" == "true" ]] && echo "- vector-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_DATA_SERVICE:-}" == "true" ]] && echo "- data-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_IMAGE_VISION_SERVICE:-}" == "true" ]] && echo "- image-vision-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_CONNECTIONS_SERVICE:-}" == "true" ]] && echo "- connections-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_VOICE_SERVICE:-}" == "true" ]] && echo "- voice-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_DOCUMENT_SERVICE:-}" == "true" ]] && echo "- document-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_CRAWL4AI_SERVICE:-}" == "true" ]] && echo "- crawl4ai-service" >> $GITHUB_STEP_SUMMARY
+          [[ "${BUILD_BBS_SERVER:-}" == "true" ]] && echo "- bbs-server" >> $GITHUB_STEP_SUMMARY

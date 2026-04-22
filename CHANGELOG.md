@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Change: **Agent Factory** — greenfield and app startup only seed the **Bastion Assistant** built-in profile; **RSS Manager**, **DevOps Advisor**, and the **Deep research** / **RSS Manager** built-in playbooks are no longer pre-seeded. Brownfield: **`157_remove_rss_and_deep_research_builtin_playbooks.sql`**, included from **`09_greenfield_extensions.sql`**, removes prior rows. **`run_migration.py`** alias **`157`** / **`remove_rss_deep_research_playbooks`**.
+
 ## [0.70.5] - 2026-04-22
 
 - Change: **Greenfield DB closure** — add **`09_greenfield_extensions.sql`** (`\ir` **039**, **048**, **054**, **071**, **083**, plus **`156_greenfield_agent_line_watches_workspace.sql`**) for objects previously missing from **`01_init.sql`** (conversation attachments, event watches, document edit proposals, browser sessions, chunk page columns + metadata FTS, **`agent_line_watches`** / **`agent_line_workspace`** with grants/RLS). **`01_init.sql`**: **`agent_lines.reference_config`** and **`data_workspace_config`**. Rename duplicate **`080_add_mcp_servers.sql`** → **`155_add_mcp_servers.sql`**; **`run_migration.py`** aliases **`155`** / **`156`**. Regenerate matrix: **`python backend/scripts/generate_greenfield_coverage.py`** → **`backend/postgres_init/GREENFIELD_COVERAGE.md`**. See [`docs/postgres-init.md`](docs/postgres-init.md).

@@ -954,16 +954,11 @@ class AuthenticationService:
                 except Exception as pe:
                     logger.error(f"❌ Post-create provisioning failed for {user_id}: {pe}")
 
-                # Seed default Agent Factory profile for new user
+                # Seed default Agent Factory profile for new user (Bastion Assistant only)
                 try:
-                    from services.agent_factory_service import (
-                        seed_default_agent_profiles,
-                        seed_devops_advisor_profiles,
-                        seed_rss_manager_profiles,
-                    )
+                    from services.agent_factory_service import seed_default_agent_profiles
+
                     await seed_default_agent_profiles(user_id)
-                    await seed_rss_manager_profiles(user_id)
-                    await seed_devops_advisor_profiles(user_id)
                 except Exception as af_e:
                     logger.warning("Default agent profile seed for new user failed: %s", af_e)
 

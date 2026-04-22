@@ -10,3 +10,4 @@
 \ir migrations/071_add_browser_session_states.sql
 \ir migrations/083_add_chunk_page_columns.sql
 \ir migrations/156_greenfield_agent_line_watches_workspace.sql
+\ir migrations/157_remove_rss_and_deep_research_builtin_playbooks.sql

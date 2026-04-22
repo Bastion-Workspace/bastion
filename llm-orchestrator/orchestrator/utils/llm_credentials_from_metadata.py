@@ -13,6 +13,22 @@ except ImportError:
     settings = None
 
 
+def _normalize_openai_api_base(
+    base_url: str, provider_type: str = ""
+) -> str:
+    """
+    OpenAI-compatible local servers (Ollama, vLLM) expect base URL to end in /v1
+    so that POST /chat/completions maps to the server's /v1/chat/completions.
+    """
+    u = (base_url or "").strip().rstrip("/")
+    if not u or u.endswith("/v1"):
+        return u
+    p = (provider_type or "").lower()
+    if p in ("ollama", "vllm") or ":11434" in u:
+        return f"{u}/v1"
+    return u
+
+
 def get_openrouter_credentials(metadata: Optional[Dict] = None) -> Tuple[Optional[str], str]:
     """
     Extract OpenRouter/OpenAI API key and base URL from metadata with fallback to settings.
@@ -45,5 +61,9 @@ def get_openrouter_credentials(metadata: Optional[Dict] = None) -> Tuple[Optiona
     base_url = meta.get("user_llm_base_url")
     if not base_url and settings:
         base_url = getattr(settings, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    
+
+    ptype = (meta.get("user_llm_provider_type") or "").strip()
+    if base_url:
+        base_url = _normalize_openai_api_base(base_url, ptype)
+
     return (api_key, base_url)

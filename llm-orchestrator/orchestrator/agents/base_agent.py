@@ -297,11 +297,9 @@ class BaseAgent:
         else:
             logger.debug(f"Reasoning extras skipped for provider_type={provider_type}")
 
-        # User-level LLM providers: use per-user API key and base_url when present
-        user_api_key = metadata.get("user_llm_api_key")
-        user_base_url = metadata.get("user_llm_base_url")
-        api_key = user_api_key if user_api_key else settings.OPENROUTER_API_KEY
-        base_url = user_base_url if user_base_url else settings.OPENROUTER_BASE_URL
+        from orchestrator.utils.llm_credentials_from_metadata import get_openrouter_credentials
+
+        api_key, base_url = get_openrouter_credentials(metadata)
 
         return ChatOpenAI(
             model=final_model,

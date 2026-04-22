@@ -20,7 +20,7 @@ backend/postgres_init/
 ├── 06_learning_and_message_branching.sql  # \c + \ir migrations/031, 112
 ├── 07_messaging_improvements.sql          # \c + \ir migrations/130
 ├── 08_user_llm_providers.sql             # \c + \ir migrations/055, 080 (Groq)
-├── 09_greenfield_extensions.sql          # \c + \ir 039, 048, 054, 071, 083, 156
+├── 09_greenfield_extensions.sql          # \c + \ir 039, 048, 054, 071, 083, 156, 157
 └── migrations/            # Incremental SQL (run_migration.py, \ir from wrappers)
 ```
 
@@ -42,7 +42,7 @@ After a successful first boot (empty data volume), **no extra migration run** is
 | Learning progress (`learning_progress`); message branching (`conversation_branches`, branch columns) | `06` → `031`, `112` |
 | Messaging: bot users (`users.is_bot`, `agent_profiles.bot_user_id`); reply-to / edit on `chat_messages` | `07` → `130` |
 | User LLM providers and enabled models (`user_llm_providers`, `user_enabled_models`; Groq in CHECK) | `08` → `055`, `080_add_groq_provider_type` |
-| AI convo attachments; event watches; edit proposals; browser sessions; chunk pages + metadata FTS; line watches + workspace + grants/RLS | `09` → `039`, `048`, `054`, `071`, `083`, **`156`** |
+| AI convo attachments; event watches; edit proposals; browser sessions; chunk pages + metadata FTS; line watches + workspace + grants/RLS; remove legacy RSS/Deep research built-in playbooks | `09` → `039`, `048`, `054`, `071`, `083`, **`156`**, **`157`** |
 | `mcp_servers` (brownfield idempotent DDL) | `155_add_mcp_servers.sql` (renamed from duplicate `080_*`; **`mcp_servers` in `01`**) |
 | Agent skills + connection types + execution metrics + promotion recs (068, **126**, 131–136, 133) | `01_init.sql` |
 | `agent_lines.reference_config`, `agent_lines.data_workspace_config` | `01_init.sql` |
