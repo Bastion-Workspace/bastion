@@ -32,6 +32,10 @@ from bastion_indexing.policy import APP_CHUNK_INDEX_SCHEMA_VERSION, is_chunk_ind
 
 logger = logging.getLogger(__name__)
 
+# Throttle "lease not acquired" logs per document (many workers + one job = high churn).
+_lease_denied_log_count: Dict[str, int] = {}
+_MAX_LEASE_DENIED_LOGS = 8
+
 
 class ProcessingStrategy(Enum):
     """Different strategies for parallel processing"""
@@ -545,6 +549,17 @@ class ParallelDocumentProcessor:
             job.document_id, worker_id, ttl, job.user_id
         )
         if not acquired:
+            c = _lease_denied_log_count.get(job.document_id, 0)
+            if c < _MAX_LEASE_DENIED_LOGS:
+                _lease_denied_log_count[job.document_id] = c + 1
+                logger.warning(
+                    "Processing lease not acquired for %s (worker=%s user_id=%r); re-queuing. "
+                    "No parse/embed runs until a worker holds the lease (check RLS, "
+                    "document_metadata.locked_by/locked_until, or lower parallel workers).",
+                    job.document_id,
+                    worker_id,
+                    job.user_id,
+                )
             if job.document_id in self.active_jobs:
                 del self.active_jobs[job.document_id]
             await self.processing_queue.put(job)
