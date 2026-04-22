@@ -14,7 +14,9 @@ if TYPE_CHECKING:
     from session import BBSSession
 
 _h2t = html2text.HTML2Text()
-_h2t.ignore_links = False
+# Text-only BBS: omit inline URLs and images (canonical URL still shown after article body).
+_h2t.ignore_links = True
+_h2t.ignore_images = True
 _h2t.body_width = 0
 
 # Lines used after clear_screen before body paging: blank, header bar, blank, title, blank line.
@@ -99,7 +101,7 @@ async def rss_reader(session: "BBSSession") -> None:
         unread_map = await client.rss_unread_by_feed(jwt)
         if not feeds:
             await session._write("\r\nNo RSS feeds.\r\n[B]ack: ")
-            if (await session.read_line()).strip().lower() in ("b", "back", "q"):
+            if (await session.read_menu_choice()).strip().lower() in ("b", "back", "q"):
                 return
             continue
 
@@ -115,7 +117,9 @@ async def rss_reader(session: "BBSSession") -> None:
             f"{t.fg_bright_green}[M]{t.reset}ark all read  "
             f"{t.fg_bright_green}[B]{t.reset}ack: "
         )
-        choice_raw = (await session.read_line()).strip()
+        choice_raw = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip()
         choice_low = choice_raw.lower()
         if choice_low in ("b", "back", "q"):
             return
@@ -138,6 +142,10 @@ async def rss_reader(session: "BBSSession") -> None:
         await _feed_articles(session, feed_id)
 
 
+def _is_article_unread(a: Dict[str, Any]) -> bool:
+    return not bool(a.get("is_read"))
+
+
 async def _feed_articles(session: "BBSSession", feed_id: str) -> None:
     client = session.client
     jwt = session.jwt_token
@@ -149,18 +157,46 @@ async def _feed_articles(session: "BBSSession", feed_id: str) -> None:
         if not articles:
             await session.clear_screen()
             await session._write("\r\nNo articles.\r\n[B]ack: ")
-            if (await session.read_line()).strip().lower() in ("b", "back", "q"):
+            if (await session.read_menu_choice()).strip().lower() in ("b", "back", "q"):
                 return
             return
 
-        total = len(articles)
-        page_starts = _rss_list_page_starts(articles, session.term_width, session.term_height)
+        visible = (
+            [a for a in articles if _is_article_unread(a)]
+            if session.rss_list_unread_only
+            else list(articles)
+        )
+
+        if not visible:
+            await session.clear_screen()
+            hdr_list = section_header(
+                "Articles",
+                session.term_width - 2,
+                t,
+                context=format_header_context(session.display_name or session.username),
+            )
+            await session._write(f"\r\n{hdr_list}\r\n")
+            await session._write(
+                "\r\nNo unread articles in this feed.\r\n\r\n"
+                f"{t.fg_bright_green}[V]{t.reset} Show all articles  "
+                f"{t.fg_bright_green}[B]{t.reset}ack: "
+            )
+            raw = (await session.read_menu_choice()).strip().lower()
+            if raw in ("b", "back", "q"):
+                return
+            if raw in ("v", "view", "all"):
+                session.rss_list_unread_only = False
+                page_index = 0
+            continue
+
+        total = len(visible)
+        page_starts = _rss_list_page_starts(visible, session.term_width, session.term_height)
         total_pages = len(page_starts)
         if page_index >= total_pages:
             page_index = max(0, total_pages - 1)
         start = page_starts[page_index]
         end = page_starts[page_index + 1] if page_index + 1 < total_pages else total
-        page_slice = articles[start:end]
+        page_slice = visible[start:end]
         page_num = page_index + 1 if total else 1
 
         await session.clear_screen()
@@ -171,10 +207,12 @@ async def _feed_articles(session: "BBSSession", feed_id: str) -> None:
             context=format_header_context(session.display_name or session.username),
         )
         await session._write(f"\r\n{hdr_list}\r\n")
+        view_label = "Unread only" if session.rss_list_unread_only else "All"
         first = start + 1
         last = start + len(page_slice)
         await session._write(
-            f"\r\nItems {first}-{last} of {total}  (page {page_num}/{total_pages})\r\n\r\n"
+            f"\r\nView: {view_label}  "
+            f"Items {first}-{last} of {total}  (page {page_num}/{total_pages})\r\n\r\n"
         )
         for j, a in enumerate(page_slice):
             global_idx = start + j + 1
@@ -182,17 +220,34 @@ async def _feed_articles(session: "BBSSession", feed_id: str) -> None:
             read = "R" if a.get("is_read") else " "
             for row in _rss_list_entry_lines(read, global_idx, title, session.term_width):
                 await session._write(row + "\r\n")
-        await session._write(
-            f"\r\n{t.fg_bright_green}[#]{t.reset} Article number  "
-            f"{t.fg_bright_green}[N]{t.reset}ext page  "
-            f"{t.fg_bright_green}[P]{t.reset}rev page  "
-            f"{t.fg_bright_green}[A]{t.reset}ll read  "
-            f"{t.fg_bright_green}[B]{t.reset}ack: "
+        menu_parts = [
+            f"\r\n{t.fg_bright_green}[#]{t.reset} Article  ",
+            f"{t.fg_bright_green}[V]{t.reset} All/Unread  ",
+        ]
+        if total_pages > 1:
+            menu_parts.extend(
+                [
+                    f"{t.fg_bright_green}[N]{t.reset}ext page  ",
+                    f"{t.fg_bright_green}[P]{t.reset}rev page  ",
+                ]
+            )
+        menu_parts.extend(
+            [
+                f"{t.fg_bright_green}[A]{t.reset}ll read  ",
+                f"{t.fg_bright_green}[B]{t.reset}ack: ",
+            ]
         )
-        choice_raw = (await session.read_line()).strip()
+        await session._write("".join(menu_parts))
+        choice_raw = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip()
         choice_low = choice_raw.lower()
         if choice_low in ("b", "back", "q"):
             return
+        if choice_low in ("v", "view", "filter"):
+            session.rss_list_unread_only = not session.rss_list_unread_only
+            page_index = 0
+            continue
         if choice_low in ("n", "next"):
             if page_index + 1 < total_pages:
                 page_index += 1
@@ -209,12 +264,15 @@ async def _feed_articles(session: "BBSSession", feed_id: str) -> None:
             continue
         n = _parse_menu_number(choice_raw)
         if n is None:
-            await session._write("Enter a number, N, P, A, or B.\r\n")
+            if total_pages > 1:
+                await session._write("Enter a number, N, P, V, A, or B.\r\n")
+            else:
+                await session._write("Enter a number, V, A, or B.\r\n")
             continue
         if n < 1 or n > total:
             await session._write(f"Invalid article number (1-{total}).\r\n")
             continue
-        art = articles[n - 1]
+        art = visible[n - 1]
         aid = art.get("article_id")
         title = art.get("title") or ""
         body_html = art.get("full_content_html") or art.get("full_content") or art.get("description") or ""

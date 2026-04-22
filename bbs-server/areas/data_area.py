@@ -42,7 +42,9 @@ async def data_explorer(session: "BBSSession") -> None:
             f"\r\n{t.fg_bright_green}[#]{t.reset} select  "
             f"{t.fg_bright_green}[B]{t.reset}ack: "
         )
-        choice = (await session.read_line()).strip().lower()
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if choice in ("b", "back", "q"):
             return
         if not choice.isdigit():
@@ -77,7 +79,9 @@ async def _workspace_menu(session: "BBSSession", workspace_id: str) -> None:
             f"{t.fg_bright_green}[Q]{t.reset}uery SQL  "
             f"{t.fg_bright_green}[B]{t.reset}ack: "
         )
-        choice = (await session.read_line()).strip().lower()
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if choice in ("b", "back"):
             return
         if choice == "q":
@@ -113,7 +117,9 @@ async def _tables_menu(session: "BBSSession", workspace_id: str, database_id: st
             f"\r\n{t.fg_bright_green}[#]{t.reset} view data  "
             f"{t.fg_bright_green}[B]{t.reset}ack: "
         )
-        choice = (await session.read_line()).strip().lower()
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if choice in ("b", "back"):
             return
         if not choice.isdigit():

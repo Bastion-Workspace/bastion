@@ -60,7 +60,7 @@ import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormContr
 import OrgRenderer from './OrgRenderer';
 import OrgCMEditor from './OrgCMEditor';
 import MarkdownCMEditor from './MarkdownCMEditor';
-import { markdownPreviewContainerSx, MarkdownPreWithCopy } from './markdown/markdownDocumentPreview';
+import { markdownPreviewContainerSx, MarkdownPreWithMermaid } from './markdown/markdownDocumentPreview';
 import OrgRefileDialog from './OrgRefileDialog';
 import OrgArchiveDialog from './OrgArchiveDialog';
 import OrgTagDialog from './OrgTagDialog';
@@ -3983,7 +3983,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       ...markdownPreviewContainerSx(theme),
                     })}>
                       <ReactMarkdown 
-                        components={{ pre: MarkdownPreWithCopy }}
+                        components={{ pre: MarkdownPreWithMermaid }}
                         remarkPlugins={[remarkGfm]}
                         rehypePlugins={[
                           rehypeRaw,
@@ -4063,7 +4063,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         ...markdownPreviewContainerSx(theme),
                       })}>
                         <ReactMarkdown 
-                          components={{ pre: MarkdownPreWithCopy }}
+                          components={{ pre: MarkdownPreWithMermaid }}
                           remarkPlugins={[remarkGfm]}
                           rehypePlugins={[
                             rehypeRaw,
@@ -4148,7 +4148,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 ...markdownPreviewContainerSx(theme),
               })}>
                 <ReactMarkdown 
-                  components={{ pre: MarkdownPreWithCopy }}
+                  components={{ pre: MarkdownPreWithMermaid }}
                   remarkPlugins={[remarkGfm]}
                   rehypePlugins={[
                     rehypeRaw,

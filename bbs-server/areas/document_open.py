@@ -44,7 +44,7 @@ async def open_document_by_id(session: "BBSSession", doc_id: str) -> None:
         await session._write("[V]iew formatted  [E]dit raw text  [B]ack: ")
     else:
         await session._write("[V]iew formatted  [B]ack (editing not available for this type): ")
-    choice = (await session.read_line()).strip().lower()
+    choice = (await session.read_menu_choice()).strip().lower()
     if choice in ("b", "back", "q", ""):
         return
     if choice.startswith("v") or choice == "view":

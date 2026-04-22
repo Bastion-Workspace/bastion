@@ -3,7 +3,7 @@
  * per-phase config: name, type (reason, act, search, evaluate, synthesize, refine), type-specific fields.
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import {
   Box,
   Typography,
@@ -26,6 +26,12 @@ import {
 } from '@mui/material';
 import { Add, Delete, ExpandMore, DragIndicator } from '@mui/icons-material';
 import CollapsibleToolPicker from './CollapsibleToolPicker';
+import IsolatedPromptTemplateField from './IsolatedPromptTemplateField';
+
+/** phase_results keys exposed for {phaseName.field} template autocomplete (see deep_agent_executor). */
+const SISTER_PHASE_RESULT_FIELDS = ['output', 'feedback', 'score', 'pass'];
+
+const PROMPT_TEMPLATE_PLACEHOLDER = 'Use {step_name.field} for upstream values. Type { for variables.';
 
 const PHASE_TYPES = [
   { value: 'reason', label: 'Reason' },
@@ -78,9 +84,31 @@ export default function DeepAgentPhaseEditor({
   actions = [],
   stepPaletteTools = [],
   readOnly = false,
+  upstreamSteps = [],
+  playbookInputs = [],
+  actionsByName = {},
+  drawerStepResetKey = '',
 }) {
   const phases = Array.isArray(step?.phases) ? step.phases : [];
   const [expandedPhase, setExpandedPhase] = useState(null);
+
+  const phasesFingerprint = useMemo(
+    () => phases.map((p) => (p?.name ?? '').trim()).join('\0'),
+    [phases]
+  );
+
+  const extraRefCompletionsByPhaseIndex = useMemo(() => {
+    const n = phases.length;
+    const rows = Array.from({ length: n }, () => []);
+    for (let idx = 0; idx < n; idx++) {
+      for (let i = 0; i < n; i++) {
+        if (i === idx) continue;
+        const name = (phases[i]?.name || '').trim();
+        if (name) rows[idx].push({ prefix: name, fields: SISTER_PHASE_RESULT_FIELDS });
+      }
+    }
+    return rows;
+  }, [phases]);
 
   const actionsFilteredByPalette = useMemo(() => {
     if (!stepPaletteTools || stepPaletteTools.length === 0) return actions;
@@ -120,11 +148,14 @@ export default function DeepAgentPhaseEditor({
     else if (expandedPhase > idx) setExpandedPhase(expandedPhase - 1);
   };
 
-  const updatePhase = (idx, patch) => {
-    const next = [...phases];
-    next[idx] = { ...(next[idx] || {}), ...patch };
-    setPhases(next);
-  };
+  const updatePhase = useCallback((idx, patch) => {
+    setStep((s) => {
+      const list = Array.isArray(s?.phases) ? s.phases : [];
+      const next = [...list];
+      next[idx] = { ...(next[idx] || {}), ...patch };
+      return { ...s, phases: next };
+    });
+  }, [setStep]);
 
   const phaseNames = phases.map((p) => (p?.name || '').trim()).filter(Boolean);
 
@@ -275,31 +306,43 @@ export default function DeepAgentPhaseEditor({
             </FormControl>
 
             {(phase?.type || 'reason') !== 'evaluate' && (
-              <TextField
-                size="small"
-                fullWidth
-                multiline
-                minRows={2}
-                label="Prompt"
-                value={phase?.prompt ?? ''}
-                onChange={(e) => updatePhase(idx, { prompt: e.target.value })}
-                disabled={readOnly}
-                placeholder="Use {query}, {phase_name.output}, {editor}..."
-              />
+              <>
+                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                  Prompt
+                </Typography>
+                <IsolatedPromptTemplateField
+                  resetKey={`${drawerStepResetKey}|ph-prompt|${idx}|${phasesFingerprint}`}
+                  seedPrompt={phase?.prompt ?? ''}
+                  onCommit={(val) => updatePhase(idx, { prompt: val })}
+                  readOnly={readOnly}
+                  label="Prompt"
+                  minLines={2}
+                  upstreamSteps={upstreamSteps}
+                  playbookInputs={playbookInputs}
+                  actionsByName={actionsByName}
+                  extraRefCompletions={extraRefCompletionsByPhaseIndex[idx]}
+                  placeholder={PROMPT_TEMPLATE_PLACEHOLDER}
+                />
+              </>
             )}
 
             {(phase?.type || 'reason') === 'evaluate' && (
               <>
-                <TextField
-                  size="small"
-                  fullWidth
-                  multiline
-                  minRows={2}
+                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                  Criteria
+                </Typography>
+                <IsolatedPromptTemplateField
+                  resetKey={`${drawerStepResetKey}|ph-criteria|${idx}|${phasesFingerprint}`}
+                  seedPrompt={phase?.criteria ?? ''}
+                  onCommit={(val) => updatePhase(idx, { criteria: val })}
+                  readOnly={readOnly}
                   label="Criteria"
-                  value={phase?.criteria ?? ''}
-                  onChange={(e) => updatePhase(idx, { criteria: e.target.value })}
-                  disabled={readOnly}
-                  placeholder="What to evaluate (e.g. quality, completeness)"
+                  minLines={2}
+                  upstreamSteps={upstreamSteps}
+                  playbookInputs={playbookInputs}
+                  actionsByName={actionsByName}
+                  extraRefCompletions={extraRefCompletionsByPhaseIndex[idx]}
+                  placeholder="What to evaluate (e.g. quality, completeness). Use {query}, {phase_name.output}, or {{#var}}…{{/var}}."
                 />
                 <Typography variant="caption" color="text.secondary">
                   Pass threshold: {(phase?.pass_threshold ?? 0.7) * 100}%

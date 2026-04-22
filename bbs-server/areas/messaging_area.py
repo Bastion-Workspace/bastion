@@ -207,7 +207,7 @@ async def messaging_browser(session: "BBSSession") -> None:
             if "503" in err or "not enabled" in err.lower():
                 await session._write("Messaging may be disabled (MESSAGING_ENABLED).\r\n")
             await session._write("[B]ack: ")
-            if (await session.read_line()).strip().lower() in ("b", "back", "q"):
+            if (await session.read_menu_choice()).strip().lower() in ("b", "back", "q"):
                 return
             continue
 

@@ -36,7 +36,7 @@ async def admin_menu(session: "BBSSession") -> None:
             f"{t.fg_bright_green}[T]{t.reset}oggle active  "
             f"{t.fg_bright_green}[B]{t.reset}ack\r\nChoice: "
         )
-        choice = (await session.read_line()).strip().lower()
+        choice = (await session.read_menu_choice()).strip().lower()
         if choice in ("b", "back", "q"):
             return
         if choice in ("l", "list"):

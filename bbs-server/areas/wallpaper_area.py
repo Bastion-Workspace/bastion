@@ -49,7 +49,7 @@ async def _draw_wallpaper(
     animated: bool = False,
     fps: float = 0.0,
     full_clear: bool = True,
-    draw_footer: bool = True,
+    draw_footer: bool = False,
 ) -> None:
     tw = max(10, session.term_width)
     th = max(5, session.term_height)
@@ -134,7 +134,7 @@ async def _run_animation_loop(session: "BBSSession", anim: Dict[str, Any]) -> st
                 animated=True,
                 fps=fps,
                 full_clear=paint_chrome,
-                draw_footer=paint_chrome,
+                draw_footer=False,
             )
             first_frame = False
             end = time.monotonic() + interval

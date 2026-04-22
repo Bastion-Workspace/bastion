@@ -51,7 +51,7 @@ This is the **ONLY** command needed for development and deployment. No exception
 
 #### Database Container
 - PostgreSQL with initialization scripts
-- SQL scripts in [backend/sql/](mdc:backend/sql/)
+- SQL scripts in [backend/postgres_init/](mdc:backend/postgres_init/)
 
 ### Development Principles
 

@@ -52,7 +52,7 @@ async def settings_menu(session: "BBSSession") -> None:
             f"{t.fg_bright_green}[R]{t.reset}efresh  "
             f"{t.fg_bright_green}[B]{t.reset}ack: "
         )
-        choice = (await session.read_line()).strip().lower()
+        choice = (await session.read_menu_choice()).strip().lower()
         if choice in ("b", "back", "q"):
             return
         if choice in ("r", "refresh"):

@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useState, useMemo, useRef } from 're
 import { Box, Typography, Alert } from '@mui/material';
 import DOMPurify from 'dompurify';
 import { useTheme } from '../../contexts/ThemeContext';
+import { useMermaidSvg } from '../../hooks/useMermaidSvg';
 import {
   startBridgeListener,
   buildBridgeSdkScript,
@@ -201,10 +202,12 @@ const ArtifactRenderer = ({
   onIframeMount = null,
 }) => {
   const { darkMode } = useTheme();
-  const [mermaidSvg, setMermaidSvg] = useState('');
-  const [mermaidError, setMermaidError] = useState('');
   const type = (artifact?.artifact_type || '').toLowerCase();
   const code = artifact?.code ?? '';
+  const { svg: mermaidSvg, error: mermaidError, loading: mermaidLoading } = useMermaidSvg(code, {
+    darkMode,
+    enabled: type === 'mermaid',
+  });
   const htmlIframeRef = useRef(null);
   const reactIframeRef = useRef(null);
   const chartIframeRef = useRef(null);
@@ -222,45 +225,6 @@ const ArtifactRenderer = ({
       return '';
     }
   }, [type, code]);
-
-  useEffect(() => {
-    if (type !== 'mermaid') {
-      setMermaidSvg('');
-      setMermaidError('');
-      return undefined;
-    }
-    let cancelled = false;
-    setMermaidError('');
-    setMermaidSvg('');
-    if (!code.trim()) {
-      setMermaidError('Empty diagram source');
-      return undefined;
-    }
-    const id = `mermaid-artifact-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    import('mermaid')
-      .then((mod) => {
-        if (cancelled) return;
-        const mermaid = mod.default;
-        mermaid.initialize({
-          startOnLoad: false,
-          securityLevel: 'strict',
-          theme: darkMode ? 'dark' : 'neutral',
-        });
-        return mermaid.render(id, code);
-      })
-      .then((result) => {
-        if (cancelled || !result) return;
-        setMermaidSvg(result.svg || '');
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setMermaidError(err?.message || 'Failed to render diagram');
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [type, code, darkMode]);
 
   const reactSrcDoc = useMemo(() => {
     if (type !== 'react') return '';
@@ -371,7 +335,7 @@ const ArtifactRenderer = ({
             sx={{ '& svg': { maxWidth: '100%', height: 'auto', display: 'block' } }}
             dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(mermaidSvg, { USE_PROFILES: { svg: true } }) }}
           />
-        ) : !mermaidError ? (
+        ) : mermaidLoading ? (
           <Typography variant="body2" color="text.secondary">
             Rendering diagram…
           </Typography>

@@ -158,7 +158,7 @@ async def _pick_model(session: "BBSSession") -> str:
         short = m.split("/")[-1] if "/" in m else m
         await _write(session, f"  {i}) {short}\r\n")
     await _write(session, f"\r\nEnter number [1]: ")
-    choice = (await session.read_line()).strip()
+    choice = (await session.read_menu_choice(allow_digit_suffix=True)).strip()
     if not choice:
         return models[0]
     if choice.isdigit() and 1 <= int(choice) <= len(models):
@@ -191,7 +191,7 @@ async def _new_game_wizard(session: "BBSSession") -> Optional[str]:
     await _write(session, "  2) Carpenter - $800, 2x score multiplier\r\n")
     await _write(session, "  3) Farmer    - $400, 3x score multiplier\r\n")
     await _write(session, "Choose [1]: ")
-    prof_choice = (await session.read_line()).strip()
+    prof_choice = (await session.read_menu_choice()).strip()
     prof = {"2": "carpenter", "3": "farmer"}.get(prof_choice, "banker")
 
     await _write(session, f"\r\n{t.dim}Creating your journey...{t.reset}\r\n")
@@ -382,7 +382,7 @@ async def oregon_trail_menu(session: "BBSSession", *, back_label: str = "Back to
         await _write(session, f"  [{t.bold}Q{t.reset}] {back_label}\r\n")
         await _write(session, f"\r\nChoose> ")
 
-        choice = (await session.read_line()).strip().lower()
+        choice = (await session.read_menu_choice()).strip().lower()
         if choice in ("q", "quit", "/quit", "/menu"):
             return
         if choice == "n":

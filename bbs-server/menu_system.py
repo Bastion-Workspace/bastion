@@ -75,7 +75,7 @@ async def main_menu(session: "BBSSession") -> None:
             f"{t.dim}Welcome to your ultimate workspace.{t.reset}\r\n\r\nChoice: "
         )
         await session._write(menu_prompt)
-        raw_line = await session.read_line(line_prefix="Choice: ")
+        raw_line = await session.read_menu_choice()
         raw_s = raw_line.strip().lower()
         choice = _normalize_menu_choice(raw_line)
         if not choice:

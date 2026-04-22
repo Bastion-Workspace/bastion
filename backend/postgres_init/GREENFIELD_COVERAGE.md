@@ -1,6 +1,6 @@
 # Greenfield coverage matrix (generated)
 
-Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
+Regenerate: `python backend/scripts/generate_greenfield_coverage.py` — CI: `--check-only`
 
 ## Legend
 

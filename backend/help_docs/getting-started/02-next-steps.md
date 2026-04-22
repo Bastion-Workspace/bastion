@@ -38,7 +38,7 @@ After setup, use this checklist to get the most out of Bastion. You can do these
 
 - **Teams** — Go to **Teams** in the nav to create a team or accept an invitation. Team documents show up in the Document Library under the team name; team feeds let you post and comment.
 - **RSS feeds** — In the Document Library sidebar, open **RSS** and add feeds. Articles open in a tab; you can search them like other content.
-- **Data Workspace** — In the sidebar under Data Workspace, create tables and import data. Agents and playbooks can query this data with SQL tools.
+- **Data Workspaces** — In the **Document Library** sidebar, under **Data Workspaces**, add a workspace, then create a **database** and **tables**, import (CSV, JSON, JSONL), and use **Run SQL** in the table view. Agents and playbooks can query the same data via Data Workspace tools when a profile is bound. See **Data Workspaces overview**.
 - **Knowledge Graph** — Open the **Entity Relationship Graph** or **File Link Graph** from the document tabs to browse entities and file links. Agents can populate and use the graph.
 - **Help** — Open **Help** from the user menu to read all in-app documentation. You can pop the help panel out and drag it around.
 

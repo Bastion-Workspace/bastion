@@ -132,14 +132,16 @@ async def todos_browser(session: "BBSSession") -> None:
         await session._write(
             "\r\n# = act on item  F/T//L/R/N/B: "
         )
-        choice = (await session.read_line()).strip().lower()
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if not choice:
             continue
         if choice in ("b", "back", "q"):
             return
         if choice == "f" or choice.startswith("filter"):
             await session._write("Mode [a]ctive [d]one [x]all : ")
-            m = (await session.read_line()).strip().lower()
+            m = (await session.read_menu_choice()).strip().lower()
             if m.startswith("a"):
                 filter_mode = "active"
             elif m.startswith("d"):
@@ -218,7 +220,7 @@ async def _todo_item_actions(session: "BBSSession", row: Dict[str, Any]) -> None
         await session._write(
             "[X]oggle  [S]tate  [A]rchive  [D]elete  [M]ove(refile)  [E]dit file  [B]ack\r\nChoice: "
         )
-        c = (await session.read_line()).strip().lower()
+        c = (await session.read_menu_choice()).strip().lower()
         if c in ("b", "back", ""):
             return
         if c.startswith("x") or c == "toggle":

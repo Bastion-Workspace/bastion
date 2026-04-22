@@ -84,6 +84,8 @@ class BBSSession:
         self.theme: Theme = theme_from_name(settings.BBS_THEME)
         self.chat_listing_cache: List[dict] = []
         self.messaging_rooms_cache: List[dict] = []
+        # RSS article list: False = All, True = Unread only (persists until disconnect).
+        self.rss_list_unread_only: bool = False
         self._last_activity = time.monotonic()
         self._idle_warned = False
         # Bytes pushed back after optional CRLF handling (StreamReader has no unget).
@@ -183,6 +185,95 @@ class BBSSession:
                 continue
             self._input_unread.appendleft(b)
             return
+
+    async def read_menu_choice(
+        self,
+        *,
+        allow_digit_suffix: bool = False,
+        timeout: Optional[float] = None,
+    ) -> str:
+        """
+        Menu prompts with [X] hotkeys: read the first key without requiring Enter.
+        Letters and symbols echo and return immediately (optional CRLF after the key is drained).
+        When allow_digit_suffix is True and the first key is a digit, additional digits are read
+        until Enter so multi-digit list indices still work.
+        """
+        to = timeout
+        if to is None:
+            idle = settings.BBS_IDLE_TIMEOUT
+            elapsed = time.monotonic() - self._last_activity
+            remaining = idle - elapsed
+            if remaining <= 0:
+                await self._write("\r\nDisconnected (idle timeout).\r\n")
+                raise ConnectionError("idle timeout")
+            warn_at = idle - settings.BBS_IDLE_WARN_SECONDS
+            if elapsed > warn_at and not self._idle_warned and settings.BBS_IDLE_WARN_SECONDS > 0:
+                await self._write(
+                    self.theme.dim
+                    + f"\r\nIdle timeout in {settings.BBS_IDLE_WARN_SECONDS}s; press Enter to stay connected.\r\n"
+                    + self.theme.reset
+                )
+                self._idle_warned = True
+            to = max(1.0, remaining)
+
+        deadline = time.monotonic() + to
+        while True:
+            try:
+                b = await self._next_input_byte(deadline)
+            except asyncio.TimeoutError:
+                await self._write("\r\nDisconnected (idle timeout).\r\n")
+                raise ConnectionError("idle timeout") from None
+
+            if self.telnet_mode and b == 0xFF:
+                await discard_telnet_command_from_reader(self.reader)
+                continue
+            if b in (0x0D, 0x0A):
+                if b == 0x0D:
+                    await self._consume_optional_lf_after_cr(deadline)
+                self._touch()
+                return ""
+            if 32 <= b <= 126:
+                ch = chr(b)
+                await self._write_bytes(bytes([b]))
+                self._touch()
+                if allow_digit_suffix and ch.isdigit():
+                    rest = await self._read_digit_suffix_until_enter(deadline)
+                    return ch + rest
+                await self._drain_crlf_after_pager_key(deadline)
+                if ch.isalpha():
+                    return ch.lower()
+                return ch
+            continue
+
+    async def _read_digit_suffix_until_enter(self, deadline: float) -> str:
+        """Continue reading digits until CR/LF; does not echo the terminator."""
+        buf = ""
+        while True:
+            try:
+                b = await self._next_input_byte(deadline)
+            except asyncio.TimeoutError:
+                await self._write("\r\nDisconnected (idle timeout).\r\n")
+                raise ConnectionError("idle timeout") from None
+
+            if self.telnet_mode and b == 0xFF:
+                await discard_telnet_command_from_reader(self.reader)
+                continue
+            if b in (0x0D, 0x0A):
+                if b == 0x0D:
+                    await self._consume_optional_lf_after_cr(deadline)
+                self._touch()
+                return buf
+            if ord("0") <= b <= ord("9"):
+                buf += chr(b)
+                await self._write_bytes(bytes([b]))
+                self._touch()
+                continue
+            if b in (0x7F, 0x08) and buf:
+                buf = buf[:-1]
+                await self._write_bytes(b"\b \b")
+                self._touch()
+                continue
+            continue
 
     async def read_line(
         self,
@@ -422,7 +513,8 @@ class BBSSession:
     async def read_wallpaper_poll_key(self, timeout: float = 5.0) -> str:
         """
         Wait for a key or until timeout. Does not disconnect on timeout (unlike read_pager_key).
-        Returns: 'quit' (q/Q/Ctrl-C), 'refresh' (r/R), or 'idle' when the wait expires.
+        Returns: 'quit' (q/Q/Esc/Ctrl-C), 'refresh' (r/R), or 'idle' when the wait expires.
+        Bare Esc quits; Esc followed by CSI/SS3 (arrow keys, etc.) is consumed and ignored.
         Other keys are ignored and the wait continues until timeout or a recognized key.
         """
         deadline = time.monotonic() + max(0.1, timeout)
@@ -446,6 +538,27 @@ class BBSSession:
                 return "quit"
             if b == 0x03:
                 self._touch()
+                return "quit"
+            if b == 0x1B:
+                self._touch()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return "quit"
+                esc_follow_deadline = time.monotonic() + min(0.06, remaining)
+                try:
+                    b2 = await self._next_input_byte(esc_follow_deadline)
+                except asyncio.TimeoutError:
+                    return "quit"
+                if b2 == ord("["):
+                    while True:
+                        bn = await self._next_input_byte(deadline)
+                        if 0x40 <= bn <= 0x7E:
+                            break
+                    continue
+                if b2 == ord("O"):
+                    await self._next_input_byte(deadline)
+                    continue
+                self._input_unread.appendleft(b2)
                 return "quit"
             if b in (ord("r"), ord("R")):
                 self._touch()

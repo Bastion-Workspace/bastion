@@ -31,7 +31,7 @@ async def org_desk_hub(session: "BBSSession") -> None:
             f"{t.fg_bright_green}[A]{t.reset} Agenda (scheduled / deadlines)\r\n"
             f"{t.fg_bright_green}[B]{t.reset} Back to main menu\r\n\r\nChoice: "
         )
-        raw = (await session.read_line()).strip().lower()
+        raw = (await session.read_menu_choice()).strip().lower()
         if raw in ("b", "back", "q", ""):
             return
         if raw == "t" or raw.startswith("todo"):

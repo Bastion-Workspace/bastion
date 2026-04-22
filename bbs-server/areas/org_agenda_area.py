@@ -105,7 +105,9 @@ async def agenda_view(session: "BBSSession") -> None:
             )
 
         await session._write("\r\n# = open org file  C/R/B: ")
-        choice = (await session.read_line()).strip().lower()
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if choice in ("b", "back", "q"):
             return
         if choice == "c" or choice.startswith("change"):

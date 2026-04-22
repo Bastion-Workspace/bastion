@@ -78,7 +78,7 @@ async def documents_browser(session: "BBSSession") -> None:
             roots = tree.get("folders") or []
             if not roots:
                 await session._write("\r\nNo folders (empty library).\r\n[B]ack: ")
-                if (await session.read_line()).strip().lower() in ("b", "back", "q"):
+                if (await session.read_menu_choice()).strip().lower() in ("b", "back", "q"):
                     return
                 continue
 
@@ -92,7 +92,9 @@ async def documents_browser(session: "BBSSession") -> None:
             await session._write("\r\n")
             await write_menu_line()
             await session._write("Choice: ")
-            choice = (await session.read_line()).strip().lower()
+            choice = (
+                await session.read_menu_choice(allow_digit_suffix=True)
+            ).strip().lower()
             if choice in ("b", "back", "q"):
                 return
             if choice in ("h", "home"):
@@ -185,7 +187,9 @@ async def documents_browser(session: "BBSSession") -> None:
         await session._write("\r\n")
         await write_menu_line()
         await session._write("Choice: ")
-        choice = (await session.read_line()).strip().lower()
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if choice in ("b", "back"):
             stack.pop()
             continue

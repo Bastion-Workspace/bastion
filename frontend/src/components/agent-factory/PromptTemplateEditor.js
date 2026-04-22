@@ -139,7 +139,12 @@ function createPromptEditorTheme(darkMode) {
   });
 }
 
-function createPromptAutocomplete(upstreamSteps = [], playbookInputs = [], actionsByName = {}) {
+function createPromptAutocomplete(
+  upstreamSteps = [],
+  playbookInputs = [],
+  actionsByName = {},
+  extraRefCompletions = []
+) {
   return autocompletion({
     override: [
       (context) => {
@@ -204,6 +209,18 @@ function createPromptAutocomplete(upstreamSteps = [], playbookInputs = [], actio
             add(value, name, 'Playbook input', null);
           }
         }
+        if (Array.isArray(extraRefCompletions) && extraRefCompletions.length) {
+          for (const entry of extraRefCompletions) {
+            const prefix = entry?.prefix;
+            const fields = entry?.fields;
+            if (!prefix || !Array.isArray(fields) || !fields.length) continue;
+            for (const fname of fields) {
+              if (!fname) continue;
+              const value = `{${prefix}.${fname}}`;
+              add(value, `${prefix}.${fname}`, 'Sister phase', null);
+            }
+          }
+        }
         if (options.length) return { from, options };
         return null;
       },
@@ -219,6 +236,9 @@ export default function PromptTemplateEditor({
   upstreamSteps = [],
   playbookInputs = [],
   actionsByName = {},
+  /** Deep agent (and similar): {phaseName.field} for other phases' phase_results keys */
+  extraRefCompletions = [],
+  readOnly = false,
   placeholder = 'Use {step_name.field} for upstream values. Type { for variables.',
 }) {
   const { darkMode } = useTheme();
@@ -242,15 +262,19 @@ export default function PromptTemplateEditor({
   }, [minHeightPx, editorHeight]);
 
   const extensions = useMemo(() => {
-    return [
+    const base = [
       history(),
       keymap.of([...defaultKeymap, ...completionKeymap]),
       promptHighlightPlugin,
       createPromptEditorTheme(darkMode),
-      createPromptAutocomplete(upstreamSteps, playbookInputs, actionsByName),
+      createPromptAutocomplete(upstreamSteps, playbookInputs, actionsByName, extraRefCompletions),
       EditorView.lineWrapping,
     ];
-  }, [darkMode, upstreamSteps, playbookInputs, actionsByName]);
+    if (readOnly) {
+      base.push(EditorView.editable.of(false));
+    }
+    return base;
+  }, [darkMode, upstreamSteps, playbookInputs, actionsByName, extraRefCompletions, readOnly]);
 
   const handleChange = useCallback(
     (val) => {
@@ -308,18 +332,18 @@ export default function PromptTemplateEditor({
       <Box
         role="separator"
         aria-label="Resize prompt editor"
-        onMouseDown={handleResizeStart}
-        onTouchStart={handleResizeStart}
+        onMouseDown={readOnly ? undefined : handleResizeStart}
+        onTouchStart={readOnly ? undefined : handleResizeStart}
         sx={{
           position: 'absolute',
           left: 0,
           right: 0,
           bottom: 0,
           height: 12,
-          cursor: 'row-resize',
+          cursor: readOnly ? 'default' : 'row-resize',
           zIndex: 5,
           touchAction: 'none',
-          display: 'flex',
+          display: readOnly ? 'none' : 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           '&:hover': { bgcolor: 'action.hover' },

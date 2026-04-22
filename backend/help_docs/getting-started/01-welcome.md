@@ -24,7 +24,7 @@ Other entries in the main navigation (e.g. **News**, **Map**, **Media**, **Games
 ## Navigating the interface
 
 - **Top bar** — Main navigation (Documents, Teams, Media, Agent Factory, etc.), user menu (theme, settings, help, logout), and icons for notifications and messaging.
-- **Sidebars** — On the Documents page, the left sidebar is the folder tree and org-related views (All TODOs, Contacts, Tags Browser, RSS feeds, Data Workspace). On the right, the chat sidebar shows conversations and the current chat. You can resize or collapse the chat sidebar.
+- **Sidebars** — On the Documents page, the left sidebar is the folder tree and org-related views (All TODOs, Contacts, Tags Browser, RSS feeds, **Data Workspaces**). On the right, the chat sidebar shows conversations and the current chat. You can resize or collapse the chat sidebar.
 - **Tabs** — Documents and other content open in tabs in the center area. You can have several tabs open and switch between them.
 - **Status bar** — At the bottom: date and time (your timezone), weather, music controls (if media is configured), and app version.
 

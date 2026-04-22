@@ -441,10 +441,27 @@ const RSSArticleViewer = ({
             {/* Controls */}
             <div style={controlsStyle}>
                 <div style={filterControlsStyle}>
+                    <div style={filterSegmentWrapStyle} role="group" aria-label="Article scope">
+                        <button
+                            type="button"
+                            onClick={() => setFilter('all')}
+                            style={filterSegmentButtonStyles(filter === 'all', true)}
+                        >
+                            All
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setFilter('unread')}
+                            style={filterSegmentButtonStyles(filter === 'unread', false)}
+                        >
+                            Unread
+                        </button>
+                    </div>
                     <select 
                         value={filter} 
                         onChange={(e) => setFilter(e.target.value)}
                         style={selectStyle}
+                        aria-label="Additional filters"
                     >
                         <option value="unread">Unread Only</option>
                         <option value="all">All Articles</option>
@@ -742,8 +759,29 @@ const controlsStyle = {
 
 const filterControlsStyle = {
     display: 'flex',
-    gap: '12px'
+    gap: '12px',
+    alignItems: 'center',
+    flexWrap: 'wrap',
 };
+
+const filterSegmentWrapStyle = {
+    display: 'inline-flex',
+    border: '1px solid var(--border-secondary)',
+    borderRadius: '4px',
+    overflow: 'hidden',
+};
+
+function filterSegmentButtonStyles(active, isFirst) {
+    return {
+        padding: '8px 16px',
+        fontSize: '14px',
+        border: 'none',
+        cursor: 'pointer',
+        backgroundColor: active ? '#2196f3' : 'var(--bg-primary)',
+        color: active ? '#fff' : 'var(--text-primary)',
+        borderRight: isFirst ? '1px solid var(--border-secondary)' : 'none',
+    };
+}
 
 const selectStyle = {
     padding: '8px 12px',

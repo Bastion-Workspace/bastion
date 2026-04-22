@@ -33,7 +33,7 @@ async def games_menu(session: "BBSSession") -> None:
             f"  {t.fg_bright_green}[B]{t.reset} Back to main menu\r\n\r\n"
             f"Choice: "
         )
-        raw_line = await session.read_line()
+        raw_line = await session.read_menu_choice()
         raw_s = raw_line.strip().lower()
         if not raw_s:
             continue

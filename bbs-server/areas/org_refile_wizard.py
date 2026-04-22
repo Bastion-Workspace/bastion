@@ -100,7 +100,9 @@ async def run_refile_wizard(session: "BBSSession", todo_item: Dict[str, Any]) ->
         await session._write(
             "\r\n# = pick target  N = next page  P = prev  F = filter again  B = cancel\r\nChoice: "
         )
-        raw = (await session.read_line()).strip().lower()
+        raw = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
         if raw in ("b", "back", "q", ""):
             return
         if raw == "n":
@@ -144,7 +146,7 @@ async def run_refile_wizard(session: "BBSSession", todo_item: Dict[str, Any]) ->
                     f"Refile to {target_file}"
                     f"{(' @ line ' + str(target_heading)) if target_heading else ''}? [y/N]: "
                 )
-                ok = (await session.read_line()).strip().lower()
+                ok = (await session.read_menu_choice()).strip().lower()
                 if ok not in ("y", "yes"):
                     return
 

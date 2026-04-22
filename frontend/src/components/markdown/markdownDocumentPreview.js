@@ -1,6 +1,9 @@
-import React, { useState, useRef, useCallback } from 'react';
-import { Box, IconButton, Tooltip } from '@mui/material';
+import React, { useState, useRef, useCallback, isValidElement, Children } from 'react';
+import { Box, IconButton, Tooltip, Alert, Typography, CircularProgress } from '@mui/material';
 import { ContentCopy, Check } from '@mui/icons-material';
+import DOMPurify from 'dompurify';
+import { useTheme } from '../../contexts/ThemeContext';
+import { useMermaidSvg } from '../../hooks/useMermaidSvg';
 
 /**
  * MUI sx fragment for markdown preview containers (DocumentViewer).
@@ -69,7 +72,104 @@ export function markdownPreviewContainerSx(theme) {
       backgroundColor: isDark ? 'rgba(255, 255, 255, 0.06)' : theme.palette.grey[100],
       borderBottomWidth: 2,
     },
+    '& .markdown-mermaid-block': { my: 2 },
   };
+}
+
+function collectCodeText(node) {
+  if (node == null) return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(collectCodeText).join('');
+  if (isValidElement(node)) return collectCodeText(node.props?.children);
+  return '';
+}
+
+/** @returns {{ source: string } | null} */
+function tryParseMermaidFence(children) {
+  const arr = Children.toArray(children);
+  if (arr.length !== 1 || !isValidElement(arr[0])) return null;
+  const codeEl = arr[0];
+  if (codeEl.type !== 'code') return null;
+  const className = codeEl.props.className || '';
+  if (!/\blanguage-mermaid\b/.test(className)) return null;
+  const source = collectCodeText(codeEl.props.children);
+  return { source };
+}
+
+function MarkdownMermaidFenceBlock({ source }) {
+  const { darkMode } = useTheme();
+  const { svg, error, loading } = useMermaidSvg(source, { darkMode, enabled: true });
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // clipboard may be denied; ignore
+    }
+  }, [source]);
+
+  const sanitized = svg
+    ? DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true } })
+    : '';
+
+  return (
+    <Box
+      className="markdown-mermaid-block"
+      sx={{
+        position: 'relative',
+        display: 'block',
+        width: '100%',
+        borderRadius: 1,
+        border: 1,
+        borderColor: 'divider',
+        p: 2,
+        pt: 5,
+        bgcolor: 'action.hover',
+        overflow: 'auto',
+      }}
+    >
+      <Tooltip title={copied ? 'Copied' : 'Copy Mermaid source'}>
+        <span>
+          <IconButton
+            type="button"
+            size="small"
+            onClick={handleCopy}
+            aria-label={copied ? 'Copied' : 'Copy Mermaid source'}
+            sx={{
+              position: 'absolute',
+              top: 4,
+              right: 4,
+              zIndex: 1,
+              color: 'text.secondary',
+              bgcolor: 'action.hover',
+              '&:hover': { bgcolor: 'action.selected' },
+            }}
+          >
+            {copied ? <Check fontSize="small" /> : <ContentCopy fontSize="small" />}
+          </IconButton>
+        </span>
+      </Tooltip>
+      {error && (
+        <Alert severity="warning" sx={{ mb: 1 }}>
+          {error}
+        </Alert>
+      )}
+      {loading && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
+          <CircularProgress size={18} />
+          <Typography variant="body2" color="text.secondary">
+            Rendering diagram…
+          </Typography>
+        </Box>
+      )}
+      {sanitized ? (
+        <Box sx={{ '& svg': { maxWidth: '100%', height: 'auto', display: 'block' } }} dangerouslySetInnerHTML={{ __html: sanitized }} />
+      ) : null}
+    </Box>
+  );
 }
 
 /** react-markdown `pre` with copy-to-clipboard control */
@@ -118,4 +218,13 @@ export function MarkdownPreWithCopy({ children, node: _node, ...props }) {
       </pre>
     </Box>
   );
+}
+
+/** react-markdown `pre`: Mermaid fenced blocks render as diagrams; other fences use MarkdownPreWithCopy */
+export function MarkdownPreWithMermaid({ children, node: _node, ...props }) {
+  const info = tryParseMermaidFence(children);
+  if (info) {
+    return <MarkdownMermaidFenceBlock source={info.source} />;
+  }
+  return <MarkdownPreWithCopy {...props}>{children}</MarkdownPreWithCopy>;
 }

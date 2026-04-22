@@ -1,0 +1,25 @@
+---
+description: Postgres greenfield — new migrations must land in 01_init or a numbered wrapper
+globs: backend/postgres_init/**/*.sql
+alwaysApply: false
+---
+
+# Postgres migrations and greenfield init
+
+Docker only runs **top-level** `backend/postgres_init/0N_*.sql` (each in a new `psql` session). Files under `migrations/` are **not** executed unless `\ir`'d from `01_init.sql` or from a wrapper **`02_*.sql` … `09_*.sql`** (or the next numbered wrapper), after `\c bastion_knowledge_base`.
+
+## When you add or change `migrations/*.sql`
+
+1. **Merge into** [`backend/postgres_init/01_init.sql`](backend/postgres_init/01_init.sql), **or**
+2. **Wire greenfield:** add `\ir migrations/<file>.sql` to the appropriate numbered wrapper (same pattern as [`09_greenfield_extensions.sql`](backend/postgres_init/09_greenfield_extensions.sql)), **or**
+3. **Explicitly brownfield-only:** destructive renames, `DROP` of app tables, one-off `UPDATE` seeds, legacy team→line chains — document in the migration header why it must **not** run on fresh init. Do **not** rely on these for new installs.
+
+## After schema changes
+
+- Regenerate the matrix: `python backend/scripts/generate_greenfield_coverage.py` → [`backend/postgres_init/GREENFIELD_COVERAGE.md`](backend/postgres_init/GREENFIELD_COVERAGE.md).
+- If the script reports category **D** (table in migration not found in `01` and not `\ir`'d from a wrapper), fix it before merging: update `01`, a wrapper, or justify brownfield **C**.
+- Update [`docs/postgres-init.md`](docs/postgres-init.md) greenfield closure table when you add a wrapper or change what `01` owns.
+
+## Never for bundled greenfield init
+
+Do not `\ir` [`049_agent_factory_ux_cleanup.sql`](backend/postgres_init/migrations/049_agent_factory_ux_cleanup.sql) (drops `agent_skills`) or brownfield rename-only migrations (e.g. **101**) into numbered init wrappers.

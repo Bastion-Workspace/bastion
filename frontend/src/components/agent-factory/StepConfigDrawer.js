@@ -1248,6 +1248,10 @@ export default function StepConfigDrawer({
               actions={actions}
               stepPaletteTools={Array.isArray(step.available_tools) ? step.available_tools : []}
               readOnly={readOnly}
+              upstreamSteps={upstreamSteps}
+              playbookInputs={playbookInputs}
+              actionsByName={actionsByName}
+              drawerStepResetKey={drawerStepResetKey}
             />
             <TextField
               fullWidth
