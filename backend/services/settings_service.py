@@ -17,6 +17,9 @@ logger = logging.getLogger(__name__)
 # user_settings key: UUID of non-built-in agent_profiles row used when chat has no @mention / sticky profile
 DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY = "default_chat_agent_profile_id"
 
+# Built-in "Professional" style persona (01_init.sql / migration 073); used when user has no default_persona_id
+BUILTIN_PERSONA_PROFESSIONAL_ID = "b1b2c3d4-0001-4000-8000-000000000001"
+
 
 class SettingsService:
     """Service for managing persistent application settings"""
@@ -727,7 +730,7 @@ class SettingsService:
             return False
 
     async def get_default_persona(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Get the user's default persona. If none set, optionally migrate from prompt_* settings or return first built-in Professional."""
+        """Get the user's default persona. If none set, optionally migrate from prompt_* settings, else built-in Professional."""
         try:
             row = await fetch_one("SELECT value FROM user_settings WHERE user_id = $1 AND key = $2", user_id, "default_persona_id")
             if row and row.get("value"):
@@ -738,8 +741,16 @@ class SettingsService:
             persona = await self._migrate_default_persona_from_prompt_settings(user_id)
             if persona:
                 return persona
+            # Prefer built-in Professional (do not use ORDER BY name: "Abraham Lincoln" sorts first)
+            prof = await fetch_one(
+                "SELECT id FROM personas WHERE id = $1::uuid AND is_builtin = true",
+                BUILTIN_PERSONA_PROFESSIONAL_ID,
+            )
+            if prof and prof.get("id"):
+                return await self.get_persona_by_id(str(prof["id"]), user_id)
+            # Legacy DBs missing fixed UUID: any built-in
             first_builtin = await fetch_one(
-                "SELECT id FROM personas WHERE is_builtin = true ORDER BY name LIMIT 1"
+                "SELECT id FROM personas WHERE is_builtin = true AND name = 'Professional' LIMIT 1"
             )
             if first_builtin and first_builtin.get("id"):
                 return await self.get_persona_by_id(str(first_builtin["id"]), user_id)

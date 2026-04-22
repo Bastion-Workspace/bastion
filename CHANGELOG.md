@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: **Default persona** when the user has not set **`default_persona_id`** is **Professional** (built-in UUID `b1b2c3d4-…000001`), not the first row by alphabetic name (which was **Abraham Lincoln**). **`get_default_persona`** in **`settings_service.py`**.
 - Change: **Default Agent Playbook** (`...000001`) — `max_iterations` 20; step `prompt_template` includes `{query}`, optional `{history}` and `{editor}` (conditional blocks) for a better general-assistant default. Brownfield: migration **`158_default_playbook_prompt_and_iterations.sql`**; **`run_migration.py`** alias **`158`** / **`default_playbook_prompt`**.
 - Change: **build-and-push** manual runs use a single **image** dropdown (all, postgres_only, or one service) instead of **build scope** + free-text **build targets**.
 - Change: **Agent Factory** — greenfield and app startup only seed the **Bastion Assistant** built-in profile; **RSS Manager**, **DevOps Advisor**, and the **Deep research** / **RSS Manager** built-in playbooks are no longer pre-seeded. Brownfield: **`157_remove_rss_and_deep_research_builtin_playbooks.sql`**, included from **`09_greenfield_extensions.sql`**, removes prior rows. **`run_migration.py`** alias **`157`** / **`remove_rss_deep_research_playbooks`**.
