@@ -4,7 +4,7 @@ PostgreSQL schema initialization and incremental migrations for Bastion. This di
 
 ## Docker `docker-entrypoint-initdb.d`
 
-Files are copied by [`postgres/Dockerfile`](../postgres/Dockerfile). The entrypoint runs each top-level `.sql` file in a **new** `psql` session, defaulting to **`POSTGRES_DB`** (often `postgres`). [`01_init.sql`](../backend/postgres_init/01_init.sql) connects to **`bastion_knowledge_base`** with `\c`; the wrappers [`02_document_sharing.sql`](../backend/postgres_init/02_document_sharing.sql) through [`07_messaging_improvements.sql`](../backend/postgres_init/07_messaging_improvements.sql) also `\c bastion_knowledge_base` before `\ir` so migrations run against the app database.
+Files are copied by [`postgres/Dockerfile`](../postgres/Dockerfile). The entrypoint runs each top-level `.sql` file in a **new** `psql` session, defaulting to **`POSTGRES_DB`** (often `postgres`). [`01_init.sql`](../backend/postgres_init/01_init.sql) connects to **`bastion_knowledge_base`** with `\c`; the wrappers [`02_document_sharing.sql`](../backend/postgres_init/02_document_sharing.sql) through [`08_user_llm_providers.sql`](../backend/postgres_init/08_user_llm_providers.sql) also `\c bastion_knowledge_base` before `\ir` so migrations run against the app database.
 
 **If init failed once** (errors in logs, then restarts show *Skipping initialization*): remove the Postgres named data volume (e.g. `docker compose down` then `docker volume rm <project>_bastion_postgres_data`), deploy an image that includes the fixed SQL, and start again so init runs cleanly.
 
@@ -19,10 +19,11 @@ backend/postgres_init/
 ├── 05_federation_phases.sql # \c + \ir migrations/143–147 (+146)
 ├── 06_learning_and_message_branching.sql  # \c + \ir migrations/031, 112
 ├── 07_messaging_improvements.sql          # \c + \ir migrations/130
+├── 08_user_llm_providers.sql             # \c + \ir migrations/055, 080
 └── migrations/            # Incremental SQL (run_migration.py, \ir from wrappers)
 ```
 
-Early numbered files under `migrations/` that duplicated `01_init.sql` (roughly `004`–`041`, except `010_add_hierarchical_exemption.sql` and `031_add_learning_progress.sql`) were **removed from the repo**; new databases rely on `01_init.sql` plus the `02`–`07` wrappers. For legacy databases that still lack those objects, restore the old files from git history or rebuild from a fresh volume.
+Early numbered files under `migrations/` that duplicated `01_init.sql` (roughly `004`–`041`, except `010_add_hierarchical_exemption.sql` and `031_add_learning_progress.sql`) were **removed from the repo**; new databases rely on `01_init.sql` plus the `02`–`08` wrappers. For legacy databases that still lack those objects, restore the old files from git history or rebuild from a fresh volume.
 
 ## Greenfield closure (default `docker compose`)
 
@@ -37,22 +38,23 @@ After a successful first boot (empty data volume), **no extra migration run** is
 | Federation peers/outbox/users/messaging parity | `05` → `143`–`147`, `146` |
 | Learning progress (`learning_progress`); message branching (`conversation_branches`, branch columns) | `06` → `031`, `112` |
 | Messaging: bot users (`users.is_bot`, `agent_profiles.bot_user_id`); reply-to / edit on `chat_messages` | `07` → `130` |
+| User LLM providers and enabled models (`user_llm_providers`, `user_enabled_models`; Groq in CHECK) | `08` → `055`, `080` |
 | Agent skills + connection types + execution metrics + promotion recs (068, **126**, 131–136, 133) | `01_init.sql` |
 | `document_chunks.qdrant_point_id`; `kg_write_backlog`; `vector_embed_backlog` | `01_init.sql` |
 | Per-document encryption metadata on `document_metadata` (141) | `01_init.sql` |
 | `user_home_dashboards`; `oregon_trail_saves` | `01_init.sql` |
 
-Other files under `migrations/` remain for **brownfield** upgrades, data repairs, seeds, or legacy-only alters. If you add a feature whose DDL is only in a migration file and not in `01` or `02`–`07`, default greenfield will **not** pick it up until you merge it or add another wrapper.
+Other files under `migrations/` remain for **brownfield** upgrades, data repairs, seeds, or legacy-only alters. If you add a feature whose DDL is only in a migration file and not in `01` or `02`–`08`, default greenfield will **not** pick it up until you merge it or add another wrapper.
 
 ## Single unified init script (greenfield)
 
-**Most** schema for a new install lives in `01_init.sql`. Wrappers `02`–`07` pull focused migration files that are kept separate for review and reuse on existing databases.
+**Most** schema for a new install lives in `01_init.sql`. Wrappers `02`–`08` pull focused migration files that are kept separate for review and reuse on existing databases.
 
 ## How it works
 
 ### Automatic initialization
 
-On first container start, the Postgres image runs numbered `.sql` files in `/docker-entrypoint-initdb.d/` (each in a new `psql` session). In order: `01_init.sql`, then `02`–`07` as above.
+On first container start, the Postgres image runs numbered `.sql` files in `/docker-entrypoint-initdb.d/` (each in a new `psql` session). In order: `01_init.sql`, then `02`–`08` as above.
 
 ### Fresh database setup
 

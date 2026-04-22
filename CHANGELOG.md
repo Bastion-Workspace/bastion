@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: Greenfield main DB — add **`08_user_llm_providers.sql`** so **`user_llm_providers`** and **`user_enabled_models`** exist (migrations **055**, **080**); fixes Settings → Models and **`/api/user/llm-providers`** on fresh volumes. Existing volumes: run **`055`** then **`080`** via **`run_migration.py`** or recreate the Postgres data volume after pulling the image.
 - Fix: **data-service** — on pool startup, if **`public.data_workspaces`** is missing (common when **`postgres-data`** reused a volume and Docker skipped **`docker-entrypoint-initdb.d`**), apply bundled **`sql/01_init.sql`** via **`psql`** (`postgresql-client` added to the data-service image). Complements the **`postgres-data`** init script for greenfield and volume-upgrade cases.
 - Fix: Messaging WebSocket — register **`/api/messaging/ws/user`** before **`/api/messaging/ws/{room_id}`** so the user notification socket is not captured as **`room_id="user"`**. **`update_user_presence`** skips inserts when **`users`** has no matching **`user_id`** (avoids FK errors from stale JWTs after DB resets).
 - Fix: **`agent_lines.handle`** (and partial unique index) in **`01_init.sql`** for greenfield — matches migration **093** after **101** rename so **`/api/agent-factory/handles`** queries succeed.
