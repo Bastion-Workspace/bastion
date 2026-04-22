@@ -1,5 +1,6 @@
 -- MCP servers for user-configured external tools (Agent Factory).
 -- Safe to run on existing databases; mirrors 01_init.sql definition.
+-- Renamed from 080_add_mcp_servers.sql (080 is reserved for Groq provider_type in run_migration / init 08).
 
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id BIGSERIAL PRIMARY KEY,

@@ -4981,12 +4981,16 @@ CREATE TABLE IF NOT EXISTS agent_lines (
     governance_policy JSONB DEFAULT '{}',
     governance_mode VARCHAR(30) NOT NULL DEFAULT 'hierarchical'
         CHECK (governance_mode IN ('hierarchical', 'committee', 'round_robin', 'consensus')),
+    reference_config JSONB DEFAULT '{}',
+    data_workspace_config JSONB DEFAULT '{}',
     next_beat_at TIMESTAMPTZ,
     last_beat_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 ALTER TABLE agent_lines ADD COLUMN IF NOT EXISTS handle VARCHAR(100);
+ALTER TABLE agent_lines ADD COLUMN IF NOT EXISTS reference_config JSONB DEFAULT '{}';
+ALTER TABLE agent_lines ADD COLUMN IF NOT EXISTS data_workspace_config JSONB DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_agent_lines_user ON agent_lines(user_id);
 CREATE INDEX IF NOT EXISTS idx_agent_lines_status ON agent_lines(status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_lines_handle
