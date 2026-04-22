@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: **POST `/api/settings/default-chat-agent-profile`** returned 404 (no matching profile) for valid custom agents: **`agent_profiles`** is RLS-protected but Settings handlers did not set `app.current_user_id`, so the visibility check saw zero rows. Pass **`rls_context`** in **`get_default_chat_agent_profile_detail`** and **`set_default_chat_agent_profile_id`**.
 - Fix: **Default persona** when the user has not set **`default_persona_id`** is **Professional** (built-in UUID `b1b2c3d4-…000001`), not the first row by alphabetic name (which was **Abraham Lincoln**). **`get_default_persona`** in **`settings_service.py`**.
 - Change: **Default Agent Playbook** (`...000001`) — `max_iterations` 20; step `prompt_template` includes `{query}`, optional `{history}` and `{editor}` (conditional blocks) for a better general-assistant default. Brownfield: migration **`158_default_playbook_prompt_and_iterations.sql`**; **`run_migration.py`** alias **`158`** / **`default_playbook_prompt`**.
 - Change: **build-and-push** manual runs use a single **image** dropdown (all, postgres_only, or one service) instead of **build scope** + free-text **build targets**.

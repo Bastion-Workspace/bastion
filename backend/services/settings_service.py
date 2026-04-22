@@ -21,6 +21,11 @@ DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY = "default_chat_agent_profile_id"
 BUILTIN_PERSONA_PROFESSIONAL_ID = "b1b2c3d4-0001-4000-8000-000000000001"
 
 
+def _user_rls_context(user_id: str) -> Dict[str, str]:
+    """RLS GUCs for queries against user-scoped tables (e.g. agent_profiles). Settings API does not set http_request_rls_context (unlike /api/agent-factory)."""
+    return {"user_id": user_id, "user_role": "user"}
+
+
 class SettingsService:
     """Service for managing persistent application settings"""
     
@@ -845,6 +850,7 @@ class SettingsService:
                 """,
                 pid,
                 user_id,
+                rls_context=_user_rls_context(user_id),
             )
             if not row:
                 await execute(
@@ -892,6 +898,7 @@ class SettingsService:
                 """,
                 profile_id,
                 user_id,
+                rls_context=_user_rls_context(user_id),
             )
             if not row:
                 return False
