@@ -17,7 +17,7 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 - **A**: 41
 - **B**: 20
 - **C**: 18
-- **R**: 80
+- **R**: 81
 
 ## Per-file classification
 
@@ -182,6 +182,7 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 | `156_greenfield_agent_line_watches_workspace.sql` | B | included via \ir from 02-09 wrapper |
 | `157_remove_rss_and_deep_research_builtin_playbooks.sql` | B | included via \ir from 02-09 wrapper |
 | `158_default_playbook_prompt_and_iterations.sql` | R | UPDATE/seed — brownfield data fix unless seed required |
+| `159_fix_document_folders_global_update_rls.sql` | R | no CREATE TABLE parsed — manual review |
 
 ## Wrapper `\ir` targets (02-09)
 

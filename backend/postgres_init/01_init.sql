@@ -3318,8 +3318,10 @@ CREATE POLICY document_folders_update_policy ON document_folders
             WHERE user_id = current_setting('app.current_user_id', true)::varchar
             AND role = 'admin'
         ))
-        -- System admins can update user folders (but NOT team folders unless they're team admins)
+        -- System admins can update user-owned top-level folders (user_id set, not team)
         OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        -- Global root rows (user_id NULL): required for INSERT...ON CONFLICT DO UPDATE with admin session
+        OR (collection_type = 'global' AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
     )
     WITH CHECK (
         -- Users can update their own folders (same as USING)
@@ -3330,8 +3332,9 @@ CREATE POLICY document_folders_update_policy ON document_folders
             WHERE user_id = current_setting('app.current_user_id', true)::varchar
             AND role = 'admin'
         ))
-        -- System admins can update user folders (but NOT team folders unless they're team admins)
+        -- System admins can update user-owned top-level folders
         OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        OR (collection_type = 'global' AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
     );
 
 CREATE POLICY document_folders_delete_policy ON document_folders
