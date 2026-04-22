@@ -41,9 +41,15 @@ The workflow (`build-and-push.yml`) runs when:
 1. You push a git tag matching `v*`, or  
 2. You use **workflow_dispatch** (and satisfy the branch rules above).
 
-### Manual run: Postgres-only (fast)
+### Manual run: one image or the full matrix
 
-In **Actions → Build and Push Docker Images → Run workflow**, set **build scope** to **`postgres_only`** to build and push only **`bastion-postgres`** and **`bastion-postgres-data`** (useful for a first CI run or when only SQL/images changed). Leave **build scope** on **`all`** (default) for the full matrix, or use a **`v*`** tag push (always builds everything).
+In **Actions → Build and Push Docker Images → Run workflow**, use the **image** dropdown:
+
+- **`all`** (default) — build and push every image.  
+- **`postgres_only`** — only **`bastion-postgres`** and **`bastion-postgres-data`** (e.g. SQL init changes).  
+- Any other option — a **single** service (e.g. **postgres** for the main DB image only).
+
+Pushing a **`v*`** tag still builds the full matrix (no menu).
 
 ## Version Management
 

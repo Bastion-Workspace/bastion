@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Change: **build-and-push** manual runs use a single **image** dropdown (all, postgres_only, or one service) instead of **build scope** + free-text **build targets**.
 - Change: **Agent Factory** — greenfield and app startup only seed the **Bastion Assistant** built-in profile; **RSS Manager**, **DevOps Advisor**, and the **Deep research** / **RSS Manager** built-in playbooks are no longer pre-seeded. Brownfield: **`157_remove_rss_and_deep_research_builtin_playbooks.sql`**, included from **`09_greenfield_extensions.sql`**, removes prior rows. **`run_migration.py`** alias **`157`** / **`remove_rss_deep_research_playbooks`**.
 
 ## [0.70.5] - 2026-04-22
