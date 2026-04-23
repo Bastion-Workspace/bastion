@@ -28,34 +28,41 @@ export function persistedUserEditorPreferenceLocalKey(userId) {
 }
 
 /**
- * Read scoped value; if missing, copy legacy global key into scoped key once and remove legacy.
+ * Read scoped value; if missing, fall back to legacy global read-only (do not copy into scoped —
+ * copying would assign the previous user's global value to the next account on shared browsers).
  */
-function readScopedWithLegacyMigrate(scopedKey, legacyKey) {
+function readScopedOrLegacyReadonly(scopedKey, legacyKey) {
   if (!scopedKey) return '';
   try {
-    let v = localStorage.getItem(scopedKey);
+    const v = localStorage.getItem(scopedKey);
     if (v != null && v !== '' && v !== 'null') return v;
     const leg = localStorage.getItem(legacyKey);
-    if (leg != null && leg !== '' && leg !== 'null') {
-      localStorage.setItem(scopedKey, leg);
-      localStorage.removeItem(legacyKey);
-      return leg;
-    }
+    if (leg != null && leg !== '' && leg !== 'null') return leg;
     return '';
   } catch {
     return '';
   }
 }
 
+/** Remove pre–per-user global keys so a new session cannot inherit another account's values. */
+export function clearLegacyGlobalChatPreferenceKeys() {
+  try {
+    localStorage.removeItem(LEGACY_CHAT_MODEL_STORAGE_KEY);
+    localStorage.removeItem(LEGACY_USER_EDITOR_PREF_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function readPersistedChatModelForUser(userId) {
   const k = persistedChatModelLocalKey(userId);
-  const v = readScopedWithLegacyMigrate(k, LEGACY_CHAT_MODEL_STORAGE_KEY);
+  const v = readScopedOrLegacyReadonly(k, LEGACY_CHAT_MODEL_STORAGE_KEY);
   return v && v !== 'null' ? v : '';
 }
 
 export function readPersistedUserEditorPreferenceForUser(userId) {
   const k = persistedUserEditorPreferenceLocalKey(userId);
-  const v = readScopedWithLegacyMigrate(k, LEGACY_USER_EDITOR_PREF_STORAGE_KEY);
+  const v = readScopedOrLegacyReadonly(k, LEGACY_USER_EDITOR_PREF_STORAGE_KEY);
   if (!v || v === 'null') return 'prefer';
   return v;
 }

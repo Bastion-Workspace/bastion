@@ -3,6 +3,7 @@ import React, {
   useContext,
   useState,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useCallback,
   useReducer,
@@ -27,6 +28,7 @@ import {
   readPersistedUserEditorPreferenceForUser,
   writePersistedChatModelForUser,
   writePersistedUserEditorPreferenceForUser,
+  clearLegacyGlobalChatPreferenceKeys,
 } from '../utils/chatSelectionStorage';
 
 // Format agent type to display name
@@ -412,42 +414,66 @@ export const ChatSidebarProvider = ({ children }) => {
   }, [clearConversationWorkspace, forgetPersistedActiveThreadForUser, user?.user_id]);
 
   const authChatSessionRef = useRef(null);
-  useEffect(() => {
+  // Layout: reset session on logout/switch and hydrate model/editor before child useEffects run
+  // (avoids ChatInputArea keeping the previous user's model when it is still in the enabled list).
+  useLayoutEffect(() => {
     if (authLoading) return;
     const snapshot = {
       authed: !!(isAuthenticated && user?.user_id),
       userId: user?.user_id ?? null,
     };
     const prev = authChatSessionRef.current;
-    if (prev == null) {
-      authChatSessionRef.current = snapshot;
-      return;
-    }
-    const hadUser = prev.authed && prev.userId;
-    const hasUser = snapshot.authed && snapshot.userId;
-    const loggedOut = hadUser && !hasUser;
-    const switchedUser = hadUser && hasUser && prev.userId !== snapshot.userId;
-    if (loggedOut || switchedUser) {
-      if (prev.userId) {
-        try {
-          const sk = activeConversationSessionStorageKey(prev.userId);
-          if (sk) sessionStorage.removeItem(sk);
-        } catch (_) {
-          /* ignore */
+    if (prev != null) {
+      const hadUser = prev.authed && prev.userId;
+      const hasUser = snapshot.authed && snapshot.userId;
+      const loggedOut = hadUser && !hasUser;
+      const switchedUser = hadUser && hasUser && prev.userId !== snapshot.userId;
+      if (loggedOut || switchedUser) {
+        if (prev.userId) {
+          try {
+            const sk = activeConversationSessionStorageKey(prev.userId);
+            if (sk) sessionStorage.removeItem(sk);
+          } catch (_) {
+            /* ignore */
+          }
         }
+        clearLegacyGlobalChatPreferenceKeys();
+        lastRestoreAttemptUserRef.current = null;
+        lastHydratedChatPrefsUserRef.current = null;
+        clearConversationWorkspace();
+        dispatchArtifactDrawer({ type: 'close' });
+        setReplyToMessage(null);
+        setActiveLineRouting(null);
+        setSelectedModel('');
+        setUserEditorPreference('prefer');
+        setEditorPreference(location.pathname.startsWith('/documents') ? 'prefer' : 'ignore');
       }
-      lastRestoreAttemptUserRef.current = null;
-      lastHydratedChatPrefsUserRef.current = null;
-      clearConversationWorkspace();
-      dispatchArtifactDrawer({ type: 'close' });
-      setReplyToMessage(null);
-      setActiveLineRouting(null);
-      setSelectedModel('');
-      setUserEditorPreference('prefer');
-      setEditorPreference(location.pathname.startsWith('/documents') ? 'prefer' : 'ignore');
     }
     authChatSessionRef.current = snapshot;
-  }, [authLoading, isAuthenticated, user?.user_id, clearConversationWorkspace, location.pathname]);
+
+    const uid = user?.user_id;
+    if (!uid) return;
+
+    const ed = readPersistedUserEditorPreferenceForUser(uid);
+    const onDocuments = location.pathname.startsWith('/documents');
+
+    if (lastHydratedChatPrefsUserRef.current !== uid) {
+      lastHydratedChatPrefsUserRef.current = uid;
+      const model = readPersistedChatModelForUser(uid);
+      setSelectedModel(model);
+      if (model) {
+        apiService.selectModel(model).catch(() => {});
+      }
+      setUserEditorPreference(ed);
+    }
+    setEditorPreference(onDocuments ? ed : 'ignore');
+  }, [
+    authLoading,
+    isAuthenticated,
+    user?.user_id,
+    clearConversationWorkspace,
+    location.pathname,
+  ]);
 
   useEffect(() => {
     if (authLoading || !isAuthenticated || !user?.user_id) return;
@@ -475,24 +501,6 @@ export const ChatSidebarProvider = ({ children }) => {
       setCurrentConversationId(saved);
     }
   }, [authLoading, isAuthenticated, user?.user_id, currentConversationId]);
-
-  useEffect(() => {
-    if (authLoading || !user?.user_id) return;
-    const uid = user.user_id;
-    if (lastHydratedChatPrefsUserRef.current === uid) return;
-    lastHydratedChatPrefsUserRef.current = uid;
-
-    const model = readPersistedChatModelForUser(uid);
-    setSelectedModel(model);
-    if (model) {
-      apiService.selectModel(model).catch(() => {});
-    }
-
-    const ed = readPersistedUserEditorPreferenceForUser(uid);
-    setUserEditorPreference(ed);
-    const onDocuments = location.pathname.startsWith('/documents');
-    setEditorPreference(onDocuments ? ed : 'ignore');
-  }, [authLoading, user?.user_id, location.pathname]);
 
   // Preference update function for saving to conversation metadata
   const updateConversationPreference = React.useCallback(async (key, value) => {

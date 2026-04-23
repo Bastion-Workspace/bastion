@@ -28,6 +28,7 @@ import {
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
+import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { ACCENT_PALETTES } from '../../theme/themeConfig';
 import apiService from '../../services/apiService';
@@ -36,6 +37,7 @@ import agentFactoryService, { AGENT_HANDLES_QUERY_KEY } from '../../services/age
 import ConversationService from '../../services/conversation/ConversationService';
 
 const ChatInputArea = () => {
+  const { authLoading, user } = useAuth();
   const {
     query,
     setQuery,
@@ -149,6 +151,7 @@ const ChatInputArea = () => {
 
   // Set default model when data loads (catalog-verified list excludes orphans and image-gen model)
   useEffect(() => {
+    if (authLoading || !user?.user_id) return;
     const list = getSelectableChatModels(enabledModelsData);
     if (list.length === 0) return;
     const validSelection = list.includes(selectedModel);
@@ -157,7 +160,7 @@ const ChatInputArea = () => {
       setSelectedModel(defaultModel);
       selectModelMutation.mutate(defaultModel);
     }
-  }, [enabledModelsData, selectedModel]);
+  }, [authLoading, user?.user_id, enabledModelsData, selectedModel]);
 
   // Handle model selection change
   const handleModelChange = (newModel) => {
