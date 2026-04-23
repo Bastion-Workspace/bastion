@@ -17,6 +17,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from config.settings import settings
 from orchestrator.engines.pipeline_executor import _extract_usage_metadata
 from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
+from orchestrator.engines.deep_agent_output_selection import resolve_deep_agent_formatted_output
 from orchestrator.engines.tool_resolution import (
     inject_skill_manifest_effective,
     max_runtime_skill_acquisitions_from_step,
@@ -25,6 +26,34 @@ from orchestrator.engines.tool_resolution import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TOKEN_USAGE = {"input_tokens": 0, "output_tokens": 0}
+
+
+async def _emit_deep_phase_progress(
+    phase: Dict[str, Any],
+    ptype: str,
+    state: Dict[str, Any],
+    graph_metadata: Optional[Dict[str, Any]],
+) -> None:
+    """INFO log + optional chat UI progress (registry token / queue via playbook_ui_progress).
+
+    Prefer graph_metadata (the runner's request metadata with playbook_progress_registry_token).
+    Inner deep-agent LangGraph merges often omit ``metadata`` from per-node return dicts, so
+    ``state["metadata"]`` can disappear after the first phase — do not rely on it alone.
+    """
+    pname = (phase.get("name") or "").strip() or "(unnamed)"
+    logger.info("Deep agent phase start: name=%r type=%s", pname, ptype)
+    meta = graph_metadata if isinstance(graph_metadata, dict) else state.get("metadata")
+    if not isinstance(meta, dict):
+        return
+    from orchestrator.engines.playbook_ui_progress import emit_playbook_ui_progress
+
+    await emit_playbook_ui_progress(
+        meta,
+        {
+            "deep_phase_name": pname,
+            "deep_phase_type": ptype,
+        },
+    )
 
 
 def _merge_token_usage(state: Dict[str, Any], response: Any) -> Dict[str, int]:
@@ -67,17 +96,42 @@ def _build_phase_results_for_namespace(phase_results: Dict[str, Dict[str, Any]])
     return out
 
 
+def _merge_deep_agent_node_return(state: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Preserve iteration_counts on every node return so evaluate max_retries can cap qc/refine loops."""
+    out = {**payload}
+    if "iteration_counts" not in out:
+        ic = state.get("iteration_counts")
+        out["iteration_counts"] = dict(ic) if isinstance(ic, dict) else {}
+    return out
+
+
+def _deep_graph_recursion_limit(phases: List[Dict[str, Any]]) -> int:
+    """LangGraph default recursion_limit is 25; deep_agent qc/refine loops need more headroom."""
+    n_named = sum(1 for p in phases if isinstance(p, dict) and (p.get("name") or "").strip())
+    max_eval_retries = 2
+    for p in phases or []:
+        if isinstance(p, dict) and str(p.get("type") or "").strip().lower() == "evaluate":
+            try:
+                max_eval_retries = max(max_eval_retries, int(p.get("max_retries", 2)))
+            except (TypeError, ValueError):
+                pass
+    # Linear phases + qc/refine cycles (~2 supersteps per cycle) + margin
+    return min(400, max(64, n_named + (max_eval_retries + 4) * 6 + 32))
+
+
 async def _run_reason_node(
     phase: Dict[str, Any],
     state: Dict[str, Any],
     llm: Any,
     resolve_fn: Callable[[str, Dict[str, Any]], str],
     system_msg: Optional[SystemMessage],
+    graph_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Single LLM call, no tools. Store result in phase_results[phase.name]."""
     from datetime import datetime, timezone
     started = datetime.now(timezone.utc)
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "reason", state, graph_metadata)
     template = (phase.get("prompt") or "").strip() or "Analyze the context and respond."
     phase_results = state.get("phase_results") or {}
     namespace = _build_phase_results_for_namespace(phase_results)
@@ -105,7 +159,10 @@ async def _run_reason_node(
     duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     trace.append({"phase": phase_name, "type": "reason", "status": "completed", "duration_ms": duration_ms})
     token_usage = _merge_token_usage(state, response) if response else (state.get("_token_usage") or _DEFAULT_TOKEN_USAGE).copy()
-    return {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage}
+    return _merge_deep_agent_node_return(
+        state,
+        {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage},
+    )
 
 
 async def _run_search_node(
@@ -124,6 +181,7 @@ async def _run_search_node(
     from datetime import datetime, timezone
     started = datetime.now(timezone.utc)
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "search", state, metadata)
     tool_names = _ensure_list(phase.get("search_tools")) or _ensure_list(phase.get("available_tools"))
     if not tool_names and step_palette_tools:
         tool_names = [t for t in step_palette_tools if t in tools_map]
@@ -200,7 +258,10 @@ async def _run_search_node(
     duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     trace.append({"phase": phase_name, "type": "search", "status": "completed", "duration_ms": duration_ms})
     token_usage = state.get("_token_usage") or _DEFAULT_TOKEN_USAGE.copy()
-    return {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage}
+    return _merge_deep_agent_node_return(
+        state,
+        {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage},
+    )
 
 
 async def _run_rerank_node(
@@ -228,6 +289,7 @@ async def _run_rerank_node(
     from datetime import datetime, timezone
     started = datetime.now(timezone.utc)
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "rerank", state, metadata)
     source_phase_name = (phase.get("source_phase") or "").strip()
     top_n = max(1, int(phase.get("top_n") or 10))
 
@@ -255,7 +317,10 @@ async def _run_rerank_node(
         new_results[phase_name] = {"output": passthrough_output, "raw_results": raw_results}
         duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         trace.append({"phase": phase_name, "type": "rerank", "status": "degraded", "reason": reason, "duration_ms": duration_ms})
-        return {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage}
+        return _merge_deep_agent_node_return(
+            state,
+            {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage},
+        )
 
     if not raw_results:
         return _degrade("no raw_results in source phase")
@@ -325,7 +390,10 @@ async def _run_rerank_node(
         "output_count": len(reranked_raw),
         "duration_ms": duration_ms,
     })
-    return {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage}
+    return _merge_deep_agent_node_return(
+        state,
+        {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage},
+    )
 
 
 async def _run_evaluate_node(
@@ -334,9 +402,11 @@ async def _run_evaluate_node(
     llm: Any,
     resolve_fn: Callable[[str, Dict[str, Any]], str],
     system_msg: Optional[SystemMessage],
+    graph_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """LLM evaluates; return score, pass, feedback. Store in phase_results and set routing."""
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "evaluate", state, graph_metadata)
     criteria = (phase.get("criteria") or "").strip() or "Evaluate quality and completeness."
     threshold = float(phase.get("pass_threshold", 0.7))
     max_retries = max(0, int(phase.get("max_retries", 2)))
@@ -420,11 +490,13 @@ async def _run_synthesize_node(
     llm: Any,
     resolve_fn: Callable[[str, Dict[str, Any]], str],
     system_msg: Optional[SystemMessage],
+    graph_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Single LLM call to combine context; store in phase_results[phase.name]."""
     from datetime import datetime, timezone
     started = datetime.now(timezone.utc)
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "synthesize", state, graph_metadata)
     template = (phase.get("prompt") or "").strip() or "Synthesize the information above."
     phase_results = state.get("phase_results") or {}
     namespace = _build_phase_results_for_namespace(phase_results)
@@ -449,7 +521,10 @@ async def _run_synthesize_node(
     new_results = dict(phase_results)
     new_results[phase_name] = {"output": content}
     token_usage = _merge_token_usage(state, response) if response else (state.get("_token_usage") or _DEFAULT_TOKEN_USAGE).copy()
-    return {"phase_results": new_results, "phase_trace": state.get("phase_trace", []), "_token_usage": token_usage}
+    return _merge_deep_agent_node_return(
+        state,
+        {"phase_results": new_results, "phase_trace": state.get("phase_trace", []), "_token_usage": token_usage},
+    )
 
 
 async def _run_refine_node(
@@ -458,11 +533,13 @@ async def _run_refine_node(
     llm: Any,
     resolve_fn: Callable[[str, Dict[str, Any]], str],
     system_msg: Optional[SystemMessage],
+    graph_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """LLM revises target phase output using feedback; store in phase_results[phase.name]."""
     from datetime import datetime, timezone
     started = datetime.now(timezone.utc)
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "refine", state, graph_metadata)
     template = (phase.get("prompt") or "").strip() or "Revise the content based on feedback."
     phase_results = state.get("phase_results") or {}
     namespace = _build_phase_results_for_namespace(phase_results)
@@ -490,7 +567,10 @@ async def _run_refine_node(
     duration_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
     trace.append({"phase": phase_name, "type": "refine", "status": "completed", "duration_ms": duration_ms})
     token_usage = _merge_token_usage(state, response) if response else (state.get("_token_usage") or _DEFAULT_TOKEN_USAGE).copy()
-    return {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage}
+    return _merge_deep_agent_node_return(
+        state,
+        {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage},
+    )
 
 
 async def _run_act_node(
@@ -508,6 +588,7 @@ async def _run_act_node(
 ) -> Dict[str, Any]:
     """Run a mini ReACT loop using available_tools via passed execute_llm_agent_step_fn."""
     phase_name = (phase.get("name") or "").strip()
+    await _emit_deep_phase_progress(phase, "act", state, metadata)
     template = (phase.get("prompt") or "").strip() or "Use the available tools to complete the task."
     phase_results = state.get("phase_results") or {}
     playbook_state = dict(state.get("playbook_state") or {})
@@ -573,7 +654,10 @@ async def _run_act_node(
             "input_tokens": token_usage.get("input_tokens", 0) + step_usage.get("input_tokens", 0),
             "output_tokens": token_usage.get("output_tokens", 0) + step_usage.get("output_tokens", 0),
         }
-    return {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage}
+    return _merge_deep_agent_node_return(
+        state,
+        {"phase_results": new_results, "phase_trace": trace, "_token_usage": token_usage},
+    )
 
 
 def build_deep_agent_graph(
@@ -625,24 +709,24 @@ def build_deep_agent_graph(
         ptype = (phase.get("type") or "").strip().lower()
 
         if ptype == "reason":
-            async def _reason(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg):
-                return await _run_reason_node(_p, s, _llm, _res, _sys)
+            async def _reason(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg, _md=metadata):
+                return await _run_reason_node(_p, s, _llm, _res, _sys, _md)
             node_handlers[pname] = _reason
         elif ptype == "search":
             async def _search(s, _p=phase, _t=tools_map, _res=resolve_fn, _uid=user_id, _meta=metadata, _palette=step_palette_tools):
                 return await _run_search_node(_p, s, _t, _res, _uid, _meta, _palette)
             node_handlers[pname] = _search
         elif ptype == "evaluate":
-            async def _evaluate(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg):
-                return await _run_evaluate_node(_p, s, _llm, _res, _sys)
+            async def _evaluate(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg, _md=metadata):
+                return await _run_evaluate_node(_p, s, _llm, _res, _sys, _md)
             node_handlers[pname] = _evaluate
         elif ptype == "synthesize":
-            async def _synthesize(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg):
-                return await _run_synthesize_node(_p, s, _llm, _res, _sys)
+            async def _synthesize(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg, _md=metadata):
+                return await _run_synthesize_node(_p, s, _llm, _res, _sys, _md)
             node_handlers[pname] = _synthesize
         elif ptype == "refine":
-            async def _refine(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg):
-                return await _run_refine_node(_p, s, _llm, _res, _sys)
+            async def _refine(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg, _md=metadata):
+                return await _run_refine_node(_p, s, _llm, _res, _sys, _md)
             node_handlers[pname] = _refine
         elif ptype == "rerank":
             async def _rerank(s, _p=phase, _t=tools_map, _res=resolve_fn, _uid=user_id, _meta=metadata):
@@ -667,8 +751,8 @@ def build_deep_agent_graph(
                 )
             node_handlers[pname] = _act
         else:
-            async def _fallback(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg):
-                return await _run_reason_node(_p, s, _llm, _res, _sys)
+            async def _fallback(s, _p=phase, _llm=llm, _res=resolve_fn, _sys=system_msg, _md=metadata):
+                return await _run_reason_node(_p, s, _llm, _res, _sys, _md)
             node_handlers[pname] = _fallback
 
     for name, handler in node_handlers.items():
@@ -740,10 +824,14 @@ async def run_deep_agent(
     system_msg: Optional[SystemMessage] = None,
     step_palette_tools: Optional[List[str]] = None,
     parent_step_for_policy: Optional[Dict[str, Any]] = None,
+    output_phase: Optional[str] = None,
+    output_template: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build the deep agent graph, run it, and return {formatted, phase_trace, raw, ...}.
-    The last phase that produces output (synthesize or refine) provides 'formatted'.
+
+    Visible output uses output_template, else output_phase, else the last non-evaluate phase
+    with output (then legacy: any phase including evaluate).
     """
     graph, initial_state = build_deep_agent_graph(
         phases=phases,
@@ -759,9 +847,20 @@ async def run_deep_agent(
         step_palette_tools=step_palette_tools,
         parent_step_for_policy=parent_step_for_policy,
     )
+    phase_plan = ", ".join(
+        f"{(p.get('name') or '').strip() or '?'}:{(p.get('type') or '').strip() or '?'}"
+        for p in phases
+    ) or "(empty)"
+    logger.info(
+        "Deep agent graph invoking: %d phase(s) [%s]; tool_palette=%d",
+        len(phases),
+        phase_plan,
+        len(tools_map),
+    )
+    invoke_cfg = {"recursion_limit": _deep_graph_recursion_limit(phases)}
     try:
         final = await invoke_with_optional_timeout(
-            graph.ainvoke(initial_state),
+            graph.ainvoke(initial_state, config=invoke_cfg),
             settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
         )
     except asyncio.TimeoutError:
@@ -775,17 +874,42 @@ async def run_deep_agent(
             "_token_usage": _DEFAULT_TOKEN_USAGE.copy(),
             "_error": "graph_invoke_timeout",
         }
+    except Exception as e:
+        # LangGraph raises when superstep count exceeds recursion_limit (e.g. runaway qc/refine).
+        _ename = type(e).__name__
+        _emsg = str(e) or ""
+        if _ename == "GraphRecursionError" or "Recursion limit" in _emsg:
+            logger.error("Deep agent graph recursion limit exceeded: %s", e)
+            return {
+                "formatted": (
+                    "The deep-agent workflow stopped because it hit the graph recursion safety limit "
+                    "(usually a qc/refine loop that did not converge). Check evaluate `max_retries`, "
+                    "`on_fail` / refine `next` wiring, or raise the step's complexity. "
+                    f"Detail: {_emsg}"
+                ),
+                "raw": "",
+                "phase_trace": [],
+                "phase_results": {},
+                "_token_usage": _DEFAULT_TOKEN_USAGE.copy(),
+                "_error": "graph_recursion_limit",
+            }
+        raise
     phase_results = final.get("phase_results") or {}
     phase_trace = final.get("phase_trace") or []
-    phase_names_list = [(p.get("name") or "").strip() for p in phases if (p.get("name") or "").strip()]
-    formatted = ""
-    raw = ""
-    for name in reversed(phase_names_list):
-        pr = phase_results.get(name) or {}
-        if isinstance(pr, dict) and pr.get("output"):
-            formatted = pr["output"]
-            raw = pr["output"]
-            break
+    _tu = final.get("_token_usage") or _DEFAULT_TOKEN_USAGE.copy()
+    logger.info(
+        "Deep agent graph completed: trace_entries=%d input_tokens=%s output_tokens=%s",
+        len(phase_trace),
+        _tu.get("input_tokens"),
+        _tu.get("output_tokens"),
+    )
+    formatted, raw = resolve_deep_agent_formatted_output(
+        phases,
+        phase_results,
+        resolve_fn,
+        output_phase=output_phase,
+        output_template=output_template,
+    )
     return {
         "formatted": formatted,
         "raw": raw,

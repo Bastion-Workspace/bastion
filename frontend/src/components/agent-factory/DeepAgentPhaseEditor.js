@@ -24,9 +24,11 @@ import {
   FormControlLabel,
   Checkbox,
 } from '@mui/material';
+import { alpha, useTheme } from '@mui/material/styles';
 import { Add, Delete, ExpandMore, DragIndicator } from '@mui/icons-material';
 import CollapsibleToolPicker from './CollapsibleToolPicker';
 import IsolatedPromptTemplateField from './IsolatedPromptTemplateField';
+import { STEP_DRAWER_SELECT_MENU_PROPS } from './stepDrawerSelectMenuProps';
 
 /** phase_results keys exposed for {phaseName.field} template autocomplete (see deep_agent_executor). */
 const SISTER_PHASE_RESULT_FIELDS = ['output', 'feedback', 'score', 'pass'];
@@ -89,8 +91,25 @@ export default function DeepAgentPhaseEditor({
   actionsByName = {},
   drawerStepResetKey = '',
 }) {
+  const theme = useTheme();
   const phases = Array.isArray(step?.phases) ? step.phases : [];
   const [expandedPhase, setExpandedPhase] = useState(null);
+
+  /** SVG fill/stroke do not reliably resolve MUI CSS variables; use palette + alpha for light/dark. */
+  const phaseFlowPalette = useMemo(() => {
+    const { primary, text, divider, mode } = theme.palette;
+    const idleFillAlpha = mode === 'dark' ? 0.24 : 0.14;
+    return {
+      nodeIdleFill: alpha(primary.main, idleFillAlpha),
+      nodeIdleStroke: primary.main,
+      nodeSelectedFill: primary.main,
+      nodeSelectedStroke: primary.main,
+      textOnIdle: text.primary,
+      textOnSelected: primary.contrastText,
+      textAnnotation: text.secondary,
+      connector: divider,
+    };
+  }, [theme]);
 
   const phasesFingerprint = useMemo(
     () => phases.map((p) => (p?.name ?? '').trim()).join('\0'),
@@ -122,13 +141,16 @@ export default function DeepAgentPhaseEditor({
   const handleTemplateChange = (templateValue) => {
     if (!templateValue) return;
     const t = STARTER_TEMPLATES.find((x) => x.value === templateValue);
-    if (t?.phases) {
-      setPhases(t.phases.map((p) => ({ ...p })));
+    if (!t?.phases) return;
+    const phasesCopy = t.phases.map((p) => ({ ...p }));
+    setStep((s) => {
+      const next = { ...s, phases: phasesCopy };
       if (Array.isArray(t.available_tools) && t.available_tools.length > 0) {
-        setStep((s) => ({ ...s, available_tools: t.available_tools }));
+        next.available_tools = t.available_tools;
       }
-      setExpandedPhase(0);
-    }
+      return next;
+    });
+    setExpandedPhase(0);
   };
 
   const setPhases = (next) => {
@@ -173,6 +195,7 @@ export default function DeepAgentPhaseEditor({
             label="Start from template"
             onChange={(e) => handleTemplateChange(e.target.value)}
             disabled={readOnly}
+            MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
           >
             {STARTER_TEMPLATES.map((opt) => (
               <MenuItem key={opt.value || 'none'} value={opt.value || ''}>
@@ -216,7 +239,14 @@ export default function DeepAgentPhaseEditor({
               return (
                 <g key={nodeId}>
                   {idx > 0 && (
-                    <line x1={x + w / 2} y1={y - 26} x2={x + w / 2} y2={y - 14} stroke="var(--mui-palette-divider)" strokeWidth={1} />
+                    <line
+                      x1={x + w / 2}
+                      y1={y - 26}
+                      x2={x + w / 2}
+                      y2={y - 14}
+                      stroke={phaseFlowPalette.connector}
+                      strokeWidth={1}
+                    />
                   )}
                   <rect
                     x={x}
@@ -224,8 +254,8 @@ export default function DeepAgentPhaseEditor({
                     width={w}
                     height={28}
                     rx={4}
-                    fill={expandedPhase === idx ? 'var(--mui-palette-primary-main)' : 'var(--mui-palette-background-paper)'}
-                    stroke="var(--mui-palette-primary-main)"
+                    fill={expandedPhase === idx ? phaseFlowPalette.nodeSelectedFill : phaseFlowPalette.nodeIdleFill}
+                    stroke={expandedPhase === idx ? phaseFlowPalette.nodeSelectedStroke : phaseFlowPalette.nodeIdleStroke}
                     strokeWidth={expandedPhase === idx ? 2 : 1}
                     style={{ cursor: 'pointer' }}
                     onClick={() => handleFlowNodeClick(idx)}
@@ -235,24 +265,31 @@ export default function DeepAgentPhaseEditor({
                     y={y + 2}
                     textAnchor="middle"
                     fontSize={11}
-                    fill={expandedPhase === idx ? 'var(--mui-palette-primary-contrastText)' : 'var(--mui-palette-text-primary)'}
+                    fill={expandedPhase === idx ? phaseFlowPalette.textOnSelected : phaseFlowPalette.textOnIdle}
                     style={{ pointerEvents: 'none', cursor: 'pointer' }}
                     onClick={() => handleFlowNodeClick(idx)}
                   >
                     {pname} ({ptype})
                   </text>
                   {isEvaluate && idx < phases.length - 1 && (
-                    <text x={x + w + 6} y={y + 2} fontSize={9} fill="var(--mui-palette-text-secondary)">
+                    <text x={x + w + 6} y={y + 2} fontSize={9} fill={phaseFlowPalette.textAnnotation}>
                       pass→{phase?.on_pass || 'end'} / fail→{phase?.on_fail || 'end'}
                     </text>
                   )}
                   {isRefine && phase?.target && (
-                    <text x={x + w + 6} y={y + 2} fontSize={9} fill="var(--mui-palette-text-secondary)">
+                    <text x={x + w + 6} y={y + 2} fontSize={9} fill={phaseFlowPalette.textAnnotation}>
                       → {phase.target}
                     </text>
                   )}
                   {idx < phases.length - 1 && !isEvaluate && (
-                    <line x1={x + w / 2} y1={y + 14} x2={x + w / 2} y2={y + 38} stroke="var(--mui-palette-divider)" strokeWidth={1} />
+                    <line
+                      x1={x + w / 2}
+                      y1={y + 14}
+                      x2={x + w / 2}
+                      y2={y + 38}
+                      stroke={phaseFlowPalette.connector}
+                      strokeWidth={1}
+                    />
                   )}
                 </g>
               );
@@ -296,6 +333,7 @@ export default function DeepAgentPhaseEditor({
                 label="Phase type"
                 onChange={(e) => updatePhase(idx, { type: e.target.value })}
                 disabled={readOnly}
+                MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
               >
                 {PHASE_TYPES.map((opt) => (
                   <MenuItem key={opt.value} value={opt.value}>
@@ -364,6 +402,7 @@ export default function DeepAgentPhaseEditor({
                     label="On pass"
                     onChange={(e) => updatePhase(idx, { on_pass: e.target.value })}
                     disabled={readOnly}
+                    MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                   >
                     <MenuItem value="end">End</MenuItem>
                     {phaseNames.filter((n) => n !== (phase?.name || '').trim()).map((n) => (
@@ -378,6 +417,7 @@ export default function DeepAgentPhaseEditor({
                     label="On fail"
                     onChange={(e) => updatePhase(idx, { on_fail: e.target.value })}
                     disabled={readOnly}
+                    MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                   >
                     <MenuItem value="">End</MenuItem>
                     {phaseNames.map((n) => (
@@ -406,6 +446,7 @@ export default function DeepAgentPhaseEditor({
                     label="Target phase"
                     onChange={(e) => updatePhase(idx, { target: e.target.value })}
                     disabled={readOnly}
+                    MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                   >
                     {phaseNames.filter((n) => n !== (phase?.name || '').trim()).map((n) => (
                       <MenuItem key={n} value={n}>{n}</MenuItem>
@@ -419,6 +460,7 @@ export default function DeepAgentPhaseEditor({
                     label="Next phase"
                     onChange={(e) => updatePhase(idx, { next: e.target.value })}
                     disabled={readOnly}
+                    MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                   >
                     {phaseNames.map((n) => (
                       <MenuItem key={n} value={n}>{n}</MenuItem>
@@ -483,6 +525,7 @@ export default function DeepAgentPhaseEditor({
                     label="Strategy"
                     onChange={(e) => updatePhase(idx, { strategy: e.target.value })}
                     disabled={readOnly}
+                    MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
                   >
                     <MenuItem value="parallel">Parallel</MenuItem>
                     <MenuItem value="sequential">Sequential</MenuItem>
@@ -554,6 +597,76 @@ export default function DeepAgentPhaseEditor({
           Add phase
         </Button>
       )}
+
+      <Box sx={{ mt: 2, pt: 2, borderTop: 1, borderColor: 'divider' }}>
+        <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+          Step output
+        </Typography>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+          What becomes this step&apos;s main result for chat and downstream <code>{'{step.formatted}'}</code>. If both
+          template and phase are set, the template wins.
+        </Typography>
+        <FormControl size="small" fullWidth sx={{ mb: 1.5 }}>
+          <InputLabel>Return output from phase</InputLabel>
+          <Select
+            value={step?.output_phase ?? ''}
+            label="Return output from phase"
+            onChange={(e) => {
+              const v = e.target.value;
+              setStep((s) => {
+                const next = { ...s };
+                if (v) {
+                  next.output_phase = v;
+                } else {
+                  delete next.output_phase;
+                }
+                return next;
+              });
+            }}
+            disabled={readOnly}
+            displayEmpty
+            MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
+          >
+            <MenuItem value="">
+              <em>Auto (last non-evaluate phase)</em>
+            </MenuItem>
+            {phaseNames.map((n) => (
+              <MenuItem key={n} value={n}>
+                {n}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+          Output template (optional)
+        </Typography>
+        <IsolatedPromptTemplateField
+          resetKey={`${drawerStepResetKey}|deep-output-template|${phasesFingerprint}`}
+          seedPrompt={step?.output_template ?? ''}
+          onCommit={(val) =>
+            setStep((s) => {
+              const next = { ...s };
+              if (val && String(val).trim()) {
+                next.output_template = val;
+              } else {
+                delete next.output_template;
+              }
+              return next;
+            })
+          }
+          readOnly={readOnly}
+          label="Output template"
+          minLines={2}
+          upstreamSteps={upstreamSteps}
+          playbookInputs={playbookInputs}
+          actionsByName={actionsByName}
+          extraRefCompletions={phaseNames.map((name) => ({
+            prefix: name,
+            fields: SISTER_PHASE_RESULT_FIELDS,
+          }))}
+          placeholder="Leave empty to use the phase above. Example: {draft.output}\n\n---\n\n{qc.feedback}"
+        />
+      </Box>
     </Box>
   );
 }

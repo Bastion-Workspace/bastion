@@ -2542,6 +2542,15 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           isEncrypted: false,
           encryptionSessionActive: false,
         });
+        // Avoid sending a prior tab's manuscript as active_editor (e.g. PDF/DOCX while text
+        // is still extracting, scanned PDF with no text, preview mode for non-md, empty txt).
+        if (!document?.is_encrypted && document?.document_id) {
+          try {
+            localStorage.removeItem('editor_ctx_cache');
+          } catch (e) {
+            console.error('Failed to clear editor_ctx_cache from DocumentViewer:', e);
+          }
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2559,11 +2568,9 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   ]);
 
   // Clear React editor state when this tab unmounts (e.g. user switched to another tab).
-  // Do NOT clear localStorage editor_ctx_cache here: chat sends messages with the last
-  // open document context, and we only have one cache. Clearing on unmount caused
-  // has_active_editor=false after switching tabs (e.g. outline open, switch to RSS, send
-  // from chat). Cache is cleared when leaving /documents (App.js) so Chat page doesn't
-  // send stale context. Diffs persist in documentDiffStore for when the tab reopens.
+  // Do not removeItem editor_ctx_cache here: the next active DocumentViewer or
+  // TabbedContentManager (non-document tab) updates or clears localStorage so chat does
+  // not see a gap during document↔document switches. Diffs persist in documentDiffStore.
   useEffect(() => {
     return () => {
       setEditorState({

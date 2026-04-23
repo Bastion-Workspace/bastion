@@ -23,7 +23,13 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 from config import settings
-from services.database_manager.database_helpers import execute, fetch_all, fetch_one, fetch_value
+from services.database_manager.database_helpers import (
+    execute,
+    execute_transaction,
+    fetch_all,
+    fetch_one,
+    fetch_value,
+)
 from utils import federation_crypto
 
 logger = logging.getLogger(__name__)
@@ -669,6 +675,85 @@ class FederationService:
             rls=ctx,
         )
         return {"ok": True, "peer_id": peer_id, "status": new_status}
+
+    async def delete_revoked_peer(
+        self,
+        peer_id: str,
+        admin_user_id: str,
+        rls: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Permanently remove a revoked peer row so peer_url can be re-used.
+        Clears chat_messages.federated_sender_id for federated users of this peer
+        so CASCADE deletes are not blocked by FK.
+        """
+        ctx = rls or ADMIN_RLS
+        removed: Dict[str, str] = {}
+
+        async def _tx(conn: Any) -> None:
+            uid = "" if admin_user_id is None else str(admin_user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", uid)
+            await conn.execute("SELECT set_config('app.current_user_role', $1, false)", "admin")
+
+            row = await conn.fetchrow(
+                """
+                SELECT peer_id, status, peer_url FROM federation_peers
+                WHERE peer_id = $1::uuid FOR UPDATE
+                """,
+                peer_id,
+            )
+            if not row:
+                raise ValueError("Peer not found")
+            if (row.get("status") or "") != "revoked":
+                raise ValueError("Only revoked peers can be removed")
+
+            await conn.execute(
+                """
+                UPDATE chat_messages SET federated_sender_id = NULL
+                WHERE federated_sender_id IN (
+                    SELECT federated_user_id FROM federated_users WHERE peer_id = $1::uuid
+                )
+                """,
+                peer_id,
+            )
+            deleted = await conn.fetchrow(
+                """
+                DELETE FROM federation_peers
+                WHERE peer_id = $1::uuid AND status = 'revoked'
+                RETURNING peer_url
+                """,
+                peer_id,
+            )
+            if not deleted:
+                raise ValueError("Peer could not be removed")
+            removed["peer_url"] = str(deleted.get("peer_url") or "")
+
+        try:
+            await execute_transaction([_tx])
+        except Exception as e:
+            prefix = "Database transaction failed: "
+            msg = str(e)
+            if msg.startswith(prefix):
+                inner = msg[len(prefix) :].strip()
+                if inner in (
+                    "Peer not found",
+                    "Only revoked peers can be removed",
+                    "Peer could not be removed",
+                ):
+                    raise ValueError(inner) from e
+            raise
+
+        await self.log_federation_audit(
+            action="federation.peer_removed",
+            record_id=str(peer_id),
+            new_values={
+                "peer_id": str(peer_id),
+                "peer_url": removed.get("peer_url", ""),
+            },
+            user_id=str(admin_user_id) if admin_user_id else None,
+            rls=ctx,
+        )
+        return {"ok": True, "peer_id": str(peer_id), "peer_url": removed.get("peer_url", "")}
 
     def check_inbound_federation_rate_limit(self, peer_url_key: str) -> Tuple[bool, int]:
         """

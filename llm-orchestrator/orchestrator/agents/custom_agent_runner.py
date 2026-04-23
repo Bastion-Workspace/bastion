@@ -987,7 +987,6 @@ class CustomAgentRunner(BaseAgent):
             inputs["document_context"] = ""
             inputs["pinned_document_id"] = ""
 
-        import json
         ltr = state.get("shared_memory", {}).get("last_tool_results")
         inputs["last_tool_results"] = json.dumps(ltr, indent=2, default=str) if ltr else ""
 

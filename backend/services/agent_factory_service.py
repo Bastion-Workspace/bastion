@@ -845,6 +845,7 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
             else:
                 valid_phase_types = {"reason", "act", "search", "evaluate", "synthesize", "refine"}
                 seen_phase_names: set = set()
+                phase_name_to_type: Dict[str, str] = {}
                 for pj, phase in enumerate(phases):
                     if not isinstance(phase, dict):
                         warnings.append(f"step {i} ({name_str or '?'}): phase {pj} must be an object")
@@ -867,6 +868,36 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
                             warnings.append(f"step {i} ({name_str or '?'}): phase {pj} (refine) requires 'target' (phase name)")
                     if pname:
                         seen_phase_names.add(pname)
+                        phase_name_to_type[pname] = ptype
+                _out_ph = step.get("output_phase")
+                if _out_ph is not None:
+                    if not isinstance(_out_ph, str) or not _out_ph.strip():
+                        warnings.append(
+                            f"step {i} ({name_str or '?'}): output_phase must be a non-empty string when set "
+                            "(use the Composer default to clear it)"
+                        )
+                    else:
+                        _opn = _out_ph.strip()
+                        if _opn not in seen_phase_names:
+                            warnings.append(
+                                f"step {i} ({name_str or '?'}): output_phase {_opn!r} does not match any defined phase name"
+                            )
+                        elif phase_name_to_type.get(_opn) == "evaluate":
+                            warnings.append(
+                                f"step {i} ({name_str or '?'}): output_phase points at evaluate phase {_opn!r} — "
+                                "that phase's output is usually JSON gate text; prefer synthesize, refine, or reason"
+                            )
+                _out_tpl = step.get("output_template")
+                if _out_tpl is not None and not isinstance(_out_tpl, str):
+                    warnings.append(
+                        f"step {i} ({name_str or '?'}): output_template must be a string when set"
+                    )
+                _op_set = isinstance(_out_ph, str) and bool(_out_ph.strip())
+                _tpl_set = isinstance(_out_tpl, str) and bool(str(_out_tpl).strip())
+                if _op_set and _tpl_set:
+                    warnings.append(
+                        f"step {i} ({name_str or '?'}): note — output_template takes precedence over output_phase at runtime"
+                    )
         skill_refs = step.get("skill_ids") or step.get("skills")
         if skill_refs is not None and not isinstance(skill_refs, list):
             warnings.append(f"step {i} ({name_str or '?'}): skill_ids/skills must be a list")

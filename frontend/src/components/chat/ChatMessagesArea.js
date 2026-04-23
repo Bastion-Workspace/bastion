@@ -1215,32 +1215,62 @@ ${message.content}
                 const lastMessage = messages[messages.length - 1];
                 const displayName = lastMessage?.metadata?.agent_display_name;
                 const agentType = lastMessage?.metadata?.agent_type || lastMessage?.agent_type;
+                const meta = lastMessage?.metadata || {};
+                const activitySub = (meta.activity_detail || '').trim();
+                const detailBlock = activitySub ? (
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: 'text.secondary',
+                      fontSize: '0.6rem',
+                      display: 'block',
+                      mt: 0.25,
+                      whiteSpace: 'normal',
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {activitySub}
+                  </Typography>
+                ) : null;
+                const wrapSx = { maxWidth: 'min(420px, 78vw)' };
                 if (activeLineRouting?.id) {
                   return (
-                    <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
-                      Agent line
-                      {activeLineRouting.name ? ` (${activeLineRouting.name})` : ''} is working...
-                    </Typography>
+                    <Box sx={wrapSx}>
+                      <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600, display: 'block' }}>
+                        Agent line
+                        {activeLineRouting.name ? ` (${activeLineRouting.name})` : ''} is working...
+                      </Typography>
+                      {detailBlock}
+                    </Box>
                   );
                 }
                 if (displayName) {
                   return (
-                    <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
-                      {displayName} is chewing on it...
-                    </Typography>
+                    <Box sx={wrapSx}>
+                      <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600, display: 'block' }}>
+                        {displayName} is chewing on it...
+                      </Typography>
+                      {detailBlock}
+                    </Box>
                   );
                 }
                 if (agentType) {
                   return (
-                    <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
-                      {agentType.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')} is chewing on it...
-                    </Typography>
+                    <Box sx={wrapSx}>
+                      <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600, display: 'block' }}>
+                        {agentType.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')} is chewing on it...
+                      </Typography>
+                      {detailBlock}
+                    </Box>
                   );
                 }
                 return (
-                  <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.65rem' }}>
-                    Chewing on it...
-                  </Typography>
+                  <Box sx={wrapSx}>
+                    <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.65rem', display: 'block' }}>
+                      Chewing on it...
+                    </Typography>
+                    {detailBlock}
+                  </Box>
                 );
               })()}
             </Box>

@@ -30,12 +30,28 @@ from orchestrator.engines.pipeline_executor import (
     _resolve_inputs,
 )
 from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
+from orchestrator.engines.playbook_ui_progress import emit_playbook_ui_progress
 
 logger = logging.getLogger(__name__)
 
 # Normalize step type: playbook definitions may use "type" or "step_type"
 def _step_type(step: Dict[str, Any]) -> str:
     return (step.get("step_type") or step.get("type") or "tool") or "tool"
+
+
+def _deep_phases_plan_for_ui(step: Dict[str, Any]) -> str:
+    """Compact phase flow for chat status (deep_agent steps)."""
+    phases = step.get("phases") or []
+    if not isinstance(phases, list) or not phases:
+        return ""
+    bits: List[str] = []
+    for p in phases:
+        if not isinstance(p, dict):
+            continue
+        n = (p.get("name") or "").strip() or "?"
+        t = (p.get("type") or "").strip() or "?"
+        bits.append(f"{n}:{t}")
+    return " → ".join(bits) if bits else ""
 
 
 _ITEM_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -376,6 +392,20 @@ def _wrap_with_tracing(
         inputs_snapshot = _resolve_inputs(step.get("inputs") or {}, ps, inputs)
         started_at = datetime.now(timezone.utc).isoformat()
         trace = list(state.get("execution_trace") or [])
+
+        meta = state.get("metadata")
+        if isinstance(meta, dict):
+            prog_payload: Dict[str, Any] = {
+                "playbook_activity_step": step_name,
+                "playbook_activity_type": step_type,
+            }
+            if step_type == "deep_agent":
+                plan = _deep_phases_plan_for_ui(step)
+                if plan:
+                    prog_payload["deep_phases_plan"] = plan
+                prog_payload["deep_phase_name"] = ""
+                prog_payload["deep_phase_type"] = ""
+            await emit_playbook_ui_progress(meta, prog_payload)
 
         try:
             result = await node_impl(state)

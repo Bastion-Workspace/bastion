@@ -7,6 +7,7 @@ All requests flow through this: discover route -> CustomAgentRunner -> yield Cha
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -29,6 +30,41 @@ def _persona_ai_name_metadata(result: Dict[str, Any], request_metadata: Dict[str
     if name:
         return {"persona_ai_name": name}
     return {}
+
+
+def _custom_agent_persona_ai_name_for_ui(
+    profile: Optional[Dict[str, Any]], request_metadata: Dict[str, Any]
+) -> Optional[str]:
+    """
+    Assistant label for streaming status, aligned with CustomAgentRunner._load_profile_node
+    persona resolution so the UI does not show the request default and then switch.
+    """
+    if not profile or not isinstance(profile, dict):
+        return None
+    mode = profile.get("persona_mode") or "none"
+    req = request_metadata.get("persona") or {}
+    if not isinstance(req, dict):
+        req = {}
+
+    def _user_ai_name() -> str:
+        return (req.get("ai_name") or "").strip()
+
+    if mode == "specific":
+        emb = profile.get("persona")
+        if isinstance(emb, dict):
+            n = (emb.get("ai_name") or "").strip()
+            if n:
+                return n
+        u = _user_ai_name()
+        if u:
+            return u
+        return "Alex"
+    if mode == "default":
+        u = _user_ai_name()
+        if u:
+            return u
+        return "Alex"
+    return None
 
 
 def _ensure_routes_loaded() -> None:
@@ -60,6 +96,7 @@ class UnifiedDispatcher:
         agent_name = "custom_agent"
 
         agent_display_name = None
+        profile: Optional[Dict[str, Any]] = None
         try:
             from orchestrator.backend_tool_client import get_backend_tool_client
             client = await get_backend_tool_client()
@@ -69,9 +106,12 @@ class UnifiedDispatcher:
         except Exception as e:
             logger.warning("Failed to fetch profile name for display: %s", e)
 
-        status_metadata = {}
+        status_metadata: Dict[str, str] = {}
         if agent_display_name:
             status_metadata["agent_display_name"] = agent_display_name
+        preview_persona = _custom_agent_persona_ai_name_for_ui(profile, metadata)
+        if preview_persona:
+            status_metadata["persona_ai_name"] = preview_persona
         yield orchestrator_pb2.ChatChunk(
             type="status",
             message="Loading custom agent profile...",
@@ -80,34 +120,86 @@ class UnifiedDispatcher:
             metadata=status_metadata if status_metadata else None,
         )
 
-        runner_metadata = {**metadata, "agent_profile_id": agent_profile_id}
+        from orchestrator.engines.playbook_ui_progress import (
+            register_playbook_progress_queue,
+            unregister_playbook_progress_queue,
+        )
+
+        progress_queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        progress_token = str(uuid.uuid4())
+        register_playbook_progress_queue(progress_token, progress_queue)
+        runner_metadata = {
+            **metadata,
+            "agent_profile_id": agent_profile_id,
+            "playbook_progress_registry_token": progress_token,
+        }
         from orchestrator.agents.custom_agent_runner import CustomAgentRunner
         runner = CustomAgentRunner()
 
-        try:
-            result = await runner.process(
+        def _chunk_from_progress_evt(evt: Dict[str, str]) -> orchestrator_pb2.ChatChunk:
+            msg = (evt.get("message") or evt.get("activity_detail") or "").strip() or "Working…"
+            merged_md = dict(status_metadata)
+            for k, v in evt.items():
+                if k == "message":
+                    continue
+                if v is not None and str(v).strip() != "":
+                    merged_md[str(k)] = str(v)
+            return orchestrator_pb2.ChatChunk(
+                type="status",
+                message=msg,
+                timestamp=datetime.now().isoformat(),
+                agent_name=agent_name,
+                metadata=merged_md if merged_md else None,
+            )
+
+        run_task = asyncio.create_task(
+            runner.process(
                 query=query,
                 metadata=runner_metadata,
                 messages=messages,
                 cancellation_token=cancellation_token,
             )
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("Custom agent failed: %s", e)
-            yield orchestrator_pb2.ChatChunk(
-                type="content",
-                message=f"Custom agent error: {str(e)}",
-                timestamp=datetime.now().isoformat(),
-                agent_name=agent_name,
-            )
-            yield orchestrator_pb2.ChatChunk(
-                type="complete",
-                message="Complete",
-                timestamp=datetime.now().isoformat(),
-                agent_name="system",
-            )
-            return
+        )
+
+        try:
+            try:
+                while not run_task.done():
+                    try:
+                        evt = await asyncio.wait_for(progress_queue.get(), timeout=0.35)
+                        yield _chunk_from_progress_evt(evt)
+                    except asyncio.TimeoutError:
+                        continue
+                while True:
+                    try:
+                        evt = progress_queue.get_nowait()
+                        yield _chunk_from_progress_evt(evt)
+                    except asyncio.QueueEmpty:
+                        break
+                result = run_task.result()
+            except asyncio.CancelledError:
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    pass
+                raise
+            except Exception as e:
+                logger.exception("Custom agent failed: %s", e)
+                yield orchestrator_pb2.ChatChunk(
+                    type="content",
+                    message=f"Custom agent error: {str(e)}",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name=agent_name,
+                )
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message="Complete",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system",
+                )
+                return
+        finally:
+            unregister_playbook_progress_queue(progress_token)
 
         profile_name_from_result = result.get("agent_profile_name")
         if profile_name_from_result:

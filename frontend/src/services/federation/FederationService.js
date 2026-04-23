@@ -16,6 +16,9 @@ class FederationService extends ApiServiceBase {
   patchPeer = (peerId, status) =>
     this.patch(`/api/federation/peers/${encodeURIComponent(peerId)}`, { status });
 
+  deletePeer = (peerId) =>
+    this.delete(`/api/federation/peers/${encodeURIComponent(peerId)}`);
+
   syncOutbox = () => this.post('/api/federation/sync', {});
 
   createFederatedRoom = (body) => this.post('/api/federation/rooms', body);

@@ -120,6 +120,16 @@ You define **phases** in order and wire them with **next** (e.g. after “synthe
 
 Use **deep_agent** when you want a **fixed multi-step structure** (plan → gather → synthesize → evaluate → maybe revise) with clear phases and optional retry loops, rather than a single free-form ReAct loop. Use **llm_agent** when the agent should fully decide the sequence; use **deep_agent** when you want to design the phases yourself.
 
+### Step output (what the user sees)
+
+The step’s main result (for example `{output_key.formatted}` in chat and for downstream wiring) is chosen in this order:
+
+1. **Output template** — If set, the template is resolved the same way as phase prompts: `{phase_name.output}`, `{phase_name.feedback}`, `{query}`, `{editor}`, and other playbook variables. Use this to concatenate a synthesis plus evaluator margin notes, or to pick between `{refine.output}` and `{draft.output}` in prose.
+2. **Output phase** — If set to a phase **name**, that phase’s **output** string becomes the step result. Leave unset (**Auto (last non-evaluate phase)** in the Composer) to use the rule below.
+3. **Auto default** — The runtime walks phases in **reverse definition order** and picks the first phase with non-empty **output** whose type is **not** **evaluate** (so quality-gate JSON is not shown as the main answer). If no non-evaluate phase produced text, it falls back to the previous behavior: the last phase with any output, **including** evaluate, so older playbooks do not end up empty.
+
+If both **output template** and **output phase** are set, the **template wins** (validation may note this).
+
 **Subagents** on a deep agent step use the same delegation modes and tool-description fields (**Role**, **Accepts**, **Returns**) as on an LLM agent step. For **parallel** / **sequential** pre-dispatch, see **Subagents** above: the task string is query + early phase prompts/criteria, not the single prompt template used by LLM agent steps.
 
 ---

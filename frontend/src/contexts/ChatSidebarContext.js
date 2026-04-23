@@ -636,12 +636,17 @@ export const ChatSidebarProvider = ({ children }) => {
   }, [user?.user_id, userEditorPreference]);
 
   // After enabled-models catalog loads, ensure selectedModel is in the selectable set (single source of truth for coercion).
+  // Prefer per-user localStorage when React state is still empty or stale (avoids racing the persist effect that would clear storage).
   useEffect(() => {
     if (authLoading || !user?.user_id) return;
+    const uid = user.user_id;
     const list = getSelectableChatModels(enabledModelsCatalog);
     if (!enabledModelsCatalog || list.length === 0) return;
     if (!selectedModel || !list.includes(selectedModel)) {
-      setSelectedModel(list[0]);
+      const persisted = readPersistedChatModelForUser(uid);
+      const next =
+        persisted && list.includes(persisted) ? persisted : list[0];
+      setSelectedModel(next);
     }
   }, [authLoading, user?.user_id, enabledModelsCatalog, selectedModel]);
 
@@ -687,7 +692,8 @@ export const ChatSidebarProvider = ({ children }) => {
         });
     } else if (uid && !selectedModel) {
       lastServerSyncedModelKeyRef.current = '';
-      writePersistedChatModelForUser(uid, '');
+      // Do not write '' to localStorage here: selectedModel can be transiently empty on refresh
+      // before layout hydration runs, which would erase the per-user persisted model.
     }
   }, [
     selectedModel,
@@ -1604,7 +1610,8 @@ export const ChatSidebarProvider = ({ children }) => {
                   setMessages(prev => prev.map(msg => {
                     if (msg.id === streamingMessage.id) {
                       const currentMetadata = msg.metadata || {};
-                      const updateData = { content: `${data.message}` };
+                      const statusLine = data.message || data.content || '';
+                      const updateData = { content: `${statusLine}` };
                       const agentType = data.agent_type || data.agent || data.node;
                       if (agentType) {
                         updateData.metadata = { ...currentMetadata, agent_type: agentType };
@@ -1617,6 +1624,25 @@ export const ChatSidebarProvider = ({ children }) => {
                           ...(updateData.metadata || currentMetadata),
                           persona_ai_name: data.persona_ai_name,
                         };
+                      }
+                      const playbookProgressKeys = [
+                        'playbook_activity_step',
+                        'playbook_activity_type',
+                        'playbook_step_key',
+                        'playbook_step_type',
+                        'deep_phase_name',
+                        'deep_phase_type',
+                        'deep_phases_plan',
+                        'activity_detail',
+                      ];
+                      const metaPatch = {};
+                      playbookProgressKeys.forEach((k) => {
+                        if (data[k] != null && String(data[k]).trim() !== '') {
+                          metaPatch[k] = String(data[k]);
+                        }
+                      });
+                      if (Object.keys(metaPatch).length > 0) {
+                        updateData.metadata = { ...(updateData.metadata || currentMetadata), ...metaPatch };
                       }
                       return { ...msg, ...updateData };
                     }

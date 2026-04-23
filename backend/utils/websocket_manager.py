@@ -8,6 +8,7 @@ import logging
 from typing import List, Dict, Any, Tuple
 from datetime import datetime
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 logger = logging.getLogger(__name__)
 
@@ -471,7 +472,10 @@ class WebSocketManager:
             user_id: User ID of the connected user
         """
         try:
-            await websocket.accept()
+            # User-level WS accepts in the endpoint before joining multiple rooms;
+            # room-only WS accepts here. ASGI forbids a second accept().
+            if websocket.client_state == WebSocketState.CONNECTING:
+                await websocket.accept()
             self.active_connections.append(websocket)
             
             # Track by room_id with user context

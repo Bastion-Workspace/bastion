@@ -262,15 +262,19 @@ async def stream_from_grpc_orchestrator(
                     if chunk.type == "status":
                         status_sse = {
                             "type": "status",
+                            "message": chunk.message,
                             "content": chunk.message,
                             "agent": chunk.agent_name,
                             "timestamp": chunk.timestamp,
                         }
-                        if chunk.metadata and chunk.metadata.get("agent_display_name"):
-                            status_sse["agent_display_name"] = chunk.metadata["agent_display_name"]
+                        if chunk.metadata:
+                            for mk, mv in chunk.metadata.items():
+                                if mv is None:
+                                    continue
+                                status_sse[str(mk)] = str(mv)
                         pan = (chunk.metadata or {}).get("persona_ai_name") if chunk.metadata else None
                         pan = (pan or "").strip() or None
-                        if not pan and request_persona_ai_name:
+                        if not pan and request_persona_ai_name and not is_custom_agent_request:
                             pan = request_persona_ai_name
                         if pan:
                             status_sse["persona_ai_name"] = pan
@@ -286,7 +290,7 @@ async def stream_from_grpc_orchestrator(
                             content_sse["agent_display_name"] = chunk.metadata["agent_display_name"]
                         pan_c = (chunk.metadata or {}).get("persona_ai_name") if chunk.metadata else None
                         pan_c = (pan_c or "").strip() or None
-                        if not pan_c and request_persona_ai_name:
+                        if not pan_c and request_persona_ai_name and not is_custom_agent_request:
                             pan_c = request_persona_ai_name
                         if pan_c:
                             content_sse["persona_ai_name"] = pan_c

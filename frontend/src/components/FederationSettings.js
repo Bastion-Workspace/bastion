@@ -43,6 +43,7 @@ export default function FederationSettings() {
   const [peerUrl, setPeerUrl] = useState('');
   const [probeResult, setProbeResult] = useState(null);
   const [regenOpen, setRegenOpen] = useState(false);
+  const [removePeerTarget, setRemovePeerTarget] = useState(null);
   const [copyOk, setCopyOk] = useState(false);
   const [fedPeerId, setFedPeerId] = useState('');
   const [fedRemoteAddr, setFedRemoteAddr] = useState('');
@@ -104,6 +105,17 @@ export default function FederationSettings() {
     ({ peerId, status }) => apiService.federation.patchPeer(peerId, status),
     {
       onSuccess: () => queryClient.invalidateQueries('federationPeers'),
+    }
+  );
+
+  const deletePeerMutation = useMutation(
+    (peerId) => apiService.federation.deletePeer(peerId),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('federationPeers');
+        queryClient.invalidateQueries('federationFederatedUsers');
+        setRemovePeerTarget(null);
+      },
     }
   );
 
@@ -609,6 +621,23 @@ export default function FederationSettings() {
                           </Button>
                         </>
                       )}
+                      {p.status === 'revoked' && (
+                        <Button
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                          onClick={() =>
+                            setRemovePeerTarget({
+                              peer_id: p.peer_id,
+                              peer_url: p.peer_url,
+                              display_name: p.display_name,
+                            })
+                          }
+                          disabled={deletePeerMutation.isLoading}
+                        >
+                          Remove
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -634,6 +663,49 @@ export default function FederationSettings() {
             disabled={regenMutation.isLoading}
           >
             Regenerate
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(removePeerTarget)}
+        onClose={() => !deletePeerMutation.isLoading && setRemovePeerTarget(null)}
+      >
+        <DialogTitle>Remove revoked peer?</DialogTitle>
+        <DialogContent>
+          <DialogContentText component="div">
+            <Typography variant="body2" paragraph>
+              This permanently deletes the peer record for{' '}
+              <strong>{removePeerTarget?.display_name || removePeerTarget?.peer_url || 'this peer'}</strong>.
+              The URL can be added again for a fresh pairing.
+            </Typography>
+            <Typography variant="body2" color="text.secondary" paragraph>
+              Historical federated messages may lose stored federated sender linkage for users tied
+              to this peer. Federated rooms may show incomplete federation metadata until you clean
+              up or re-pair.
+            </Typography>
+            {deletePeerMutation.isError && (
+              <Alert severity="error" sx={{ mt: 1 }}>
+                {deletePeerMutation.error?.response?.data?.detail ||
+                  deletePeerMutation.error?.message ||
+                  'Remove failed'}
+              </Alert>
+            )}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRemovePeerTarget(null)} disabled={deletePeerMutation.isLoading}>
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() =>
+              removePeerTarget?.peer_id && deletePeerMutation.mutate(removePeerTarget.peer_id)
+            }
+            disabled={deletePeerMutation.isLoading || !removePeerTarget?.peer_id}
+          >
+            {deletePeerMutation.isLoading ? 'Removing…' : 'Remove peer'}
           </Button>
         </DialogActions>
       </Dialog>

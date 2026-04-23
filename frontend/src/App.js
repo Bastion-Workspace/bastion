@@ -113,8 +113,8 @@ const MainContent = () => {
   const [journalOpen, setJournalOpen] = useState(false);
   
   // Clear editor context cache when navigating away from Documents so Chat (or other
-  // pages) don't send stale document context. On /documents we do not clear; tab switches
-  // also leave the cache so the last open document is still sent with chat (see DocumentViewer).
+  // pages) don't send stale document context. On /documents, TabbedContentManager and
+  // DocumentViewer keep or clear editor_ctx_cache based on the active tab and viewer state.
   useEffect(() => {
     if (!isDocumentsRoute) {
       try {

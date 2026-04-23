@@ -25,7 +25,6 @@ import {
   Description,
   Settings,
   Logout,
-  PersonAdd,
   LightMode,
   DarkMode,
   Menu as MenuIcon,
@@ -48,7 +47,6 @@ import {
   Tune,
   Apps,
   DragIndicator,
-  Hub,
 } from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import { useAuth } from '../contexts/AuthContext';
@@ -567,23 +565,6 @@ const Navigation = () => {
               </ListItemIcon>
               <ListItemText primary="Control Panes" primaryTypographyProps={{ fontSize: '0.875rem' }} />
             </MenuItem>
-            
-            {user?.role === 'admin' && (
-              <MenuItem onClick={() => { handleUserMenuClose(); navigate('/settings?tab=users'); }}>
-                <ListItemIcon sx={{ minWidth: 36 }}>
-                  <PersonAdd fontSize="small" />
-                </ListItemIcon>
-                <ListItemText primary="User Management" primaryTypographyProps={{ fontSize: '0.875rem' }} />
-              </MenuItem>
-            )}
-            {user?.role === 'admin' && (
-              <MenuItem onClick={() => { handleUserMenuClose(); navigate('/settings?tab=federation'); }}>
-                <ListItemIcon sx={{ minWidth: 36 }}>
-                  <Hub fontSize="small" />
-                </ListItemIcon>
-                <ListItemText primary="Federation" primaryTypographyProps={{ fontSize: '0.875rem' }} />
-              </MenuItem>
-            )}
             
             <MenuItem onClick={() => { handleUserMenuClose(); setHelpOpen(true); }}>
               <ListItemIcon sx={{ minWidth: 36 }}>

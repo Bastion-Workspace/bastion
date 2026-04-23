@@ -132,6 +132,25 @@ const TabbedContentManager = forwardRef((props, ref) => {
         onActiveDocumentIdChange(docId);
     }, [tabs, activeTabId, onActiveDocumentIdChange]);
 
+    // Chat reads editor_ctx_cache when sending messages. Clear it whenever the user is not
+    // on a real document tab so RSS/graph/etc. (or an empty tab bar) does not keep sending
+    // a previously open manuscript as active_editor.
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const active = activeTabId ? tabs.find((t) => t.id === activeTabId) : null;
+        const onDocumentTab =
+            !!active &&
+            active.type === 'document' &&
+            active.documentId != null &&
+            String(active.documentId).trim() !== '';
+        if (onDocumentTab) return;
+        try {
+            localStorage.removeItem('editor_ctx_cache');
+        } catch (_) {
+            /* ignore */
+        }
+    }, [tabs, activeTabId]);
+
     // Save active tab to localStorage whenever it changes
     useEffect(() => {
         if (activeTabId) {

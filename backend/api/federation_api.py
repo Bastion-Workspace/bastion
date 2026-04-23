@@ -256,6 +256,22 @@ async def patch_federation_peer(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+@router.delete("/api/federation/peers/{peer_id}")
+async def delete_federation_peer(
+    peer_id: str,
+    current_user: AuthenticatedUserResponse = Depends(require_admin()),
+):
+    """Permanently remove a revoked peer so its URL can be paired again."""
+    _require_federation()
+    rls = _admin_rls(current_user)
+    try:
+        return await federation_service.delete_revoked_peer(
+            peer_id, str(current_user.user_id), rls
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 @router.post("/api/federation/outbox/drain")
 async def federation_outbox_drain(request: Request):
     _require_federation()

@@ -942,6 +942,8 @@ async def _execute_llm_step(
     template = step.get("prompt_template") or step.get("prompt") or "Please analyze: {query}"
     step_inputs = step.get("inputs") or {}
     prompt = _resolve_prompt_template(template, playbook_state, inputs, step_inputs=step_inputs)
+    _ltask = step.get("name") or step.get("output_key") or "llm_task"
+    logger.info("LLM task step invoking: step=%r prompt_chars=%d", _ltask, len(prompt or ""))
     llm_messages: List[Any] = []
     system_msg = _build_system_message(metadata, step)
     if system_msg:
@@ -1145,6 +1147,13 @@ async def _execute_deep_agent_step(
         else:
             system_msg = SystemMessage(content=_dt_block)
 
+    logger.info(
+        "Deep agent step invoking: step=%r phases=%d resolved_tools=%d subagents=%d",
+        _deep_step_label,
+        len(phases),
+        len(tool_names),
+        len(subagents),
+    )
     result = await run_deep_agent(
         phases=phases,
         resolve_fn=_resolve_fn,
@@ -1158,6 +1167,16 @@ async def _execute_deep_agent_step(
         system_msg=system_msg,
         step_palette_tools=palette_names,
         parent_step_for_policy=step,
+        output_phase=(
+            str(step.get("output_phase")).strip()
+            if isinstance(step.get("output_phase"), str) and str(step.get("output_phase") or "").strip()
+            else None
+        ),
+        output_template=(
+            str(step.get("output_template")).strip()
+            if isinstance(step.get("output_template"), str) and str(step.get("output_template") or "").strip()
+            else None
+        ),
     )
     return result
 
@@ -1764,6 +1783,12 @@ async def _execute_llm_agent_step(
     _log_prompt_variable_sizes(step_name, inputs, playbook_state)
     prompt = _resolve_prompt_template(template, playbook_for_prompt, inputs, step_inputs=step_inputs)
     logger.debug("Resolved prompt (step=%s): %s chars", step_name, f"{len(prompt):,}")
+    logger.info(
+        "LLM agent step invoking: step=%r prompt_chars=%d declared_tools=%d",
+        step_name,
+        len(prompt or ""),
+        len(_ensure_list(step.get("available_tools"))),
+    )
     if subagents and delegation_mode in ("parallel", "sequential"):
         await _pre_dispatch_subagents(subagents, delegation_mode, prompt, user_id, metadata)
     _facts_pol = _effective_user_facts_policy(step, metadata)
@@ -2604,6 +2629,13 @@ async def execute_pipeline(
                 playbook_state[name] = {"_skipped": True}
             continue
 
+        logger.info(
+            "Playbook executing step: type=%s name=%r output_key=%r",
+            step_type,
+            name,
+            output_key,
+        )
+
         if step_type == "llm_task":
             result = await _execute_llm_step(step, playbook_state, inputs, user_id, metadata=metadata)
         elif step_type == "deep_agent":
@@ -2617,5 +2649,14 @@ async def execute_pipeline(
             playbook_state[output_key] = result
         if name:
             playbook_state[name] = result
+
+        _err = result.get("_error") if isinstance(result, dict) else None
+        logger.info(
+            "Playbook step finished: type=%s name=%r output_key=%r error=%s",
+            step_type,
+            name,
+            output_key,
+            _err or "",
+        )
 
     return playbook_state, None
