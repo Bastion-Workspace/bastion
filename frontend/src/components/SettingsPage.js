@@ -170,7 +170,7 @@ const SettingsPage = () => {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { user, updateUser } = useAuth();
+  const { user, updateUser, loading: authLoading } = useAuth();
   const {
     darkMode,
     accentId,
@@ -338,9 +338,10 @@ const SettingsPage = () => {
 
   // Fetch enabled models from backend
   const { data: enabledModelsData, isLoading: enabledModelsLoading } = useQuery(
-    'enabledModels',
+    ['enabledModels', user?.user_id],
     () => apiService.getEnabledModels(),
     {
+      enabled: !!(user?.user_id && !authLoading),
       onSuccess: (data) => {
         if (data?.enabled_models) {
           setEnabledModels(new Set(data.enabled_models));
@@ -351,10 +352,10 @@ const SettingsPage = () => {
 
   // Fetch available models - only after enabled models are loaded
   const { data: modelsData, isLoading: modelsLoading, refetch: refetchModels } = useQuery(
-    'availableModels',
+    ['availableModels', user?.user_id],
     () => apiService.getAvailableModels(),
     {
-      enabled: !enabledModelsLoading, // Wait for enabled models to load first
+      enabled: !!(user?.user_id && !authLoading && !enabledModelsLoading), // Wait for enabled models to load first
       onSuccess: (data) => {
         // Initialize with some popular models enabled by default if no enabled models exist
         if (data?.models && enabledModelsData && (!enabledModelsData?.enabled_models || enabledModelsData.enabled_models.length === 0)) {

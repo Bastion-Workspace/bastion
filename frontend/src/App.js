@@ -5,6 +5,7 @@ import { ChevronRight } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { QueryClient, QueryClientProvider, useQuery } from 'react-query';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import AuthQueryCacheBoundary from './components/AuthQueryCacheBoundary';
 import { VoiceAvailabilityProvider } from './contexts/VoiceAvailabilityContext';
 import { CapabilitiesProvider } from './contexts/CapabilitiesContext';
 import { EditorProvider } from './contexts/EditorContext';
@@ -338,7 +339,8 @@ const MainContent = () => {
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <AuthProvider>
+      <AuthProvider queryClient={queryClient}>
+        <AuthQueryCacheBoundary />
         <VoiceAvailabilityProvider>
         <CapabilitiesProvider>
         <ModelProvider>

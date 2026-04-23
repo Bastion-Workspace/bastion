@@ -30,6 +30,10 @@ import {
   writePersistedUserEditorPreferenceForUser,
   clearLegacyGlobalChatPreferenceKeys,
 } from '../utils/chatSelectionStorage';
+import {
+  getSelectableChatModels,
+  coerceChatModelToSelectable,
+} from '../utils/chatSelectableModels';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -246,7 +250,10 @@ export const ChatSidebarProvider = ({ children }) => {
   /** Assistant placeholder message id for the in-flight stream (Stop / abort UI). */
   const activeStreamMessageIdRef = React.useRef(null);
   const lastCreatedConversationIdRef = React.useRef(null); // Skip redundant refetch after creating new conversation
-  const isLoadingFromMetadataRef = React.useRef(false); // Track when we're loading preferences from metadata to prevent save loop
+  /** True while applying conversation metadata into UI state; blocks model save/select until flushed. */
+  const isLoadingFromMetadataRef = React.useRef(false);
+  /** Dedupes POST /api/models/select for the same user+model after a successful sync. */
+  const lastServerSyncedModelKeyRef = React.useRef('');
   const currentConversationIdRef = React.useRef(null);
   const lastRestoreAttemptUserRef = React.useRef(null);
   const lastHydratedChatPrefsUserRef = React.useRef(null);
@@ -371,6 +378,16 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const queryClient = useQueryClient();
 
+  const { data: enabledModelsCatalog } = useQuery(
+    ['enabledModels', user?.user_id],
+    () => apiService.getEnabledModels(),
+    {
+      enabled: !!(user?.user_id && !authLoading),
+      refetchOnWindowFocus: false,
+      staleTime: 300000,
+    }
+  );
+
   useEffect(() => {
     currentConversationIdRef.current = currentConversationId;
   }, [currentConversationId]);
@@ -429,6 +446,12 @@ export const ChatSidebarProvider = ({ children }) => {
       const loggedOut = hadUser && !hasUser;
       const switchedUser = hadUser && hasUser && prev.userId !== snapshot.userId;
       if (loggedOut || switchedUser) {
+        try {
+          queryClient.clear();
+        } catch (_) {
+          /* ignore */
+        }
+        lastServerSyncedModelKeyRef.current = '';
         if (prev.userId) {
           try {
             const sk = activeConversationSessionStorageKey(prev.userId);
@@ -461,9 +484,6 @@ export const ChatSidebarProvider = ({ children }) => {
       lastHydratedChatPrefsUserRef.current = uid;
       const model = readPersistedChatModelForUser(uid);
       setSelectedModel(model);
-      if (model) {
-        apiService.selectModel(model).catch(() => {});
-      }
       setUserEditorPreference(ed);
     }
     setEditorPreference(onDocuments ? ed : 'ignore');
@@ -473,6 +493,7 @@ export const ChatSidebarProvider = ({ children }) => {
     user?.user_id,
     clearConversationWorkspace,
     location.pathname,
+    queryClient,
   ]);
 
   useEffect(() => {
@@ -614,32 +635,68 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   }, [user?.user_id, userEditorPreference]);
 
-  // Save selected model to localStorage and conversation metadata
+  // After enabled-models catalog loads, ensure selectedModel is in the selectable set (single source of truth for coercion).
   useEffect(() => {
-    // Skip saving if we're currently loading from metadata (prevents circular updates)
+    if (authLoading || !user?.user_id) return;
+    const list = getSelectableChatModels(enabledModelsCatalog);
+    if (!enabledModelsCatalog || list.length === 0) return;
+    if (!selectedModel || !list.includes(selectedModel)) {
+      setSelectedModel(list[0]);
+    }
+  }, [authLoading, user?.user_id, enabledModelsCatalog, selectedModel]);
+
+  // Save selected model to localStorage and conversation metadata; single POST /api/models/select path with dedupe.
+  useEffect(() => {
     if (isLoadingFromMetadataRef.current) {
       return;
     }
-    
+
     const uid = user?.user_id;
+    if (!uid) return;
+
     if (uid && selectedModel) {
       writePersistedChatModelForUser(uid, selectedModel);
-      
-      // Also save to conversation metadata if we have a conversation
+
       if (currentConversationId) {
-        updateConversationPreference('user_chat_model', selectedModel).catch(err => {
+        updateConversationPreference('user_chat_model', selectedModel).catch((err) => {
           console.error('Failed to save model to conversation:', err);
         });
       }
-      
-      // Notify backend of model selection
-      apiService.selectModel(selectedModel).catch(err => {
-        console.error('Failed to notify backend of model selection:', err);
-      });
+
+      if (!enabledModelsCatalog) {
+        return;
+      }
+      const list = getSelectableChatModels(enabledModelsCatalog);
+      if (list.length === 0 || !list.includes(selectedModel)) {
+        return;
+      }
+
+      const syncKey = `${uid}::${selectedModel}`;
+      if (lastServerSyncedModelKeyRef.current === syncKey) {
+        return;
+      }
+      lastServerSyncedModelKeyRef.current = syncKey;
+      apiService
+        .selectModel(selectedModel)
+        .then(() => {
+          queryClient.invalidateQueries('currentModel');
+        })
+        .catch((err) => {
+          console.error('Failed to notify backend of model selection:', err);
+          lastServerSyncedModelKeyRef.current = '';
+        });
     } else if (uid && !selectedModel) {
+      lastServerSyncedModelKeyRef.current = '';
       writePersistedChatModelForUser(uid, '');
     }
-  }, [selectedModel, currentConversationId, updateConversationPreference, user?.user_id]);
+  }, [
+    selectedModel,
+    currentConversationId,
+    updateConversationPreference,
+    user?.user_id,
+    enabledModelsCatalog,
+    queryClient,
+  ]);
 
   // Per-user: last active thread survives logout/login on the same browser profile.
   useEffect(() => {
@@ -706,14 +763,18 @@ export const ChatSidebarProvider = ({ children }) => {
     if (!currentConversationId) {
       setActiveLineRouting(null);
       if (uid) {
-        setSelectedModel(readPersistedChatModelForUser(uid) || '');
+        const raw = readPersistedChatModelForUser(uid) || '';
+        setSelectedModel(
+          enabledModelsCatalog
+            ? coerceChatModelToSelectable(enabledModelsCatalog, raw)
+            : raw
+        );
       }
       return;
     }
-    
-    // Mark that we're loading from metadata to prevent save effect from running
+
     isLoadingFromMetadataRef.current = true;
-    
+
     if (conversationData?.metadata_json) {
       const metadata = conversationData.metadata_json;
 
@@ -725,20 +786,26 @@ export const ChatSidebarProvider = ({ children }) => {
       } else {
         setActiveLineRouting(null);
       }
-      
-      // Load model preference
+
       if (metadata.user_chat_model) {
         devLog('🔄 Loading conversation model preference:', metadata.user_chat_model, 'for conversation:', currentConversationId);
-        setSelectedModel(metadata.user_chat_model);
+        setSelectedModel(
+          enabledModelsCatalog
+            ? coerceChatModelToSelectable(enabledModelsCatalog, metadata.user_chat_model)
+            : metadata.user_chat_model
+        );
       } else if (uid) {
         const scopedModel = readPersistedChatModelForUser(uid);
         if (scopedModel) {
           devLog('🔄 No conversation model preference, using user default:', scopedModel);
-          setSelectedModel(scopedModel);
+          setSelectedModel(
+            enabledModelsCatalog
+              ? coerceChatModelToSelectable(enabledModelsCatalog, scopedModel)
+              : scopedModel
+          );
         }
       }
-      
-      // Load editor preference (only on documents page)
+
       if (metadata.editor_preference && location.pathname.startsWith('/documents')) {
         devLog('🔄 Loading conversation editor preference:', metadata.editor_preference);
         setEditorPreference(metadata.editor_preference);
@@ -753,19 +820,30 @@ export const ChatSidebarProvider = ({ children }) => {
       devLog('🔄 Conversation loaded but no metadata, using user defaults');
       if (uid) {
         const scopedModel = readPersistedChatModelForUser(uid);
-        if (scopedModel) setSelectedModel(scopedModel);
+        if (scopedModel) {
+          setSelectedModel(
+            enabledModelsCatalog
+              ? coerceChatModelToSelectable(enabledModelsCatalog, scopedModel)
+              : scopedModel
+          );
+        }
         const scopedEditor = readPersistedUserEditorPreferenceForUser(uid);
         if (location.pathname.startsWith('/documents')) {
           setEditorPreference(scopedEditor);
         }
       }
     }
-    
-    // Reset the flag after a short delay to allow state updates to complete
-    setTimeout(() => {
+
+    queueMicrotask(() => {
       isLoadingFromMetadataRef.current = false;
-    }, 100);
-  }, [conversationData, currentConversationId, location.pathname, user?.user_id]);
+    });
+  }, [
+    conversationData,
+    currentConversationId,
+    location.pathname,
+    user?.user_id,
+    enabledModelsCatalog,
+  ]);
 
   // PRIORITY: Load messages using unified chat service
   const { data: messagesData, isLoading: messagesLoading, refetch: refetchMessages } = useQuery(

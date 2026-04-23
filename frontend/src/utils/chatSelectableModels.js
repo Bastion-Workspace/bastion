@@ -16,3 +16,21 @@ export function getSelectableChatModels(enabledResponse) {
   }
   return (enabled_models || []).filter((m) => m !== img);
 }
+
+/** True if catalog is loaded and modelId is in the chat-selectable list. */
+export function isChatModelSelectable(enabledResponse, modelId) {
+  if (!modelId) return false;
+  const list = getSelectableChatModels(enabledResponse);
+  return list.includes(modelId);
+}
+
+/**
+ * If modelId is in the selectable list, return it; otherwise first selectable.
+ * If catalog missing or selectable list empty, returns modelId unchanged (caller should not POST select yet).
+ */
+export function coerceChatModelToSelectable(enabledResponse, modelId) {
+  const list = getSelectableChatModels(enabledResponse);
+  if (!enabledResponse || list.length === 0) return modelId || '';
+  if (modelId && list.includes(modelId)) return modelId;
+  return list[0];
+}

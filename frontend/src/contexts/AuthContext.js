@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import apiService from '../services/apiService';
 import { lockAllRegistered } from '../services/encryptionSessionRegistry';
 
@@ -12,10 +12,12 @@ export const useAuth = () => {
   return context;
 };
 
-export const AuthProvider = ({ children }) => {
+export const AuthProvider = ({ children, queryClient }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const userRef = useRef(null);
+  userRef.current = user;
 
   // Initialize auth state from localStorage
   useEffect(() => {
@@ -51,6 +53,16 @@ export const AuthProvider = ({ children }) => {
       // Store token
       localStorage.setItem('auth_token', response.access_token);
 
+      const prevId = userRef.current?.user_id;
+      const nextId = response.user?.user_id;
+      if (queryClient && prevId && nextId && prevId !== nextId) {
+        try {
+          queryClient.clear();
+        } catch {
+          /* ignore */
+        }
+      }
+
       // Set user state
       setUser(response.user);
       setIsAuthenticated(true);
@@ -76,6 +88,11 @@ export const AuthProvider = ({ children }) => {
         await lockAllRegistered();
       } catch {
         /* best-effort */
+      }
+      try {
+        queryClient?.clear();
+      } catch {
+        /* ignore */
       }
       // Clear local state regardless of API call success
       localStorage.removeItem('auth_token');

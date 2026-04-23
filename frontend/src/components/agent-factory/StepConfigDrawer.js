@@ -47,6 +47,7 @@ import IsolatedPromptTemplateField from './IsolatedPromptTemplateField';
 import IsolatedDebouncedPlainPromptField from './IsolatedDebouncedPlainPromptField';
 import { getCompatibleUpstreamOptions, getGroupedWireOptions, indexActionsByName, extractPromptPlaceholders } from '../../utils/agentFactoryTypeWiring';
 import apiService from '../../services/apiService';
+import { useAuth } from '../../contexts/AuthContext';
 import { getSelectableChatModels } from '../../utils/chatSelectableModels';
 import agentFactoryService, { AGENT_HANDLES_QUERY_KEY } from '../../services/agentFactoryService';
 import ResizableDrawer from './ResizableDrawer';
@@ -122,8 +123,17 @@ function fieldsToSchemaProperties(fields) {
 }
 
 function LLMTaskModelOverride({ step, setStep }) {
-  const { data: enabledData } = useQuery('enabledModels', () => apiService.getEnabledModels(), { staleTime: 300000 });
-  const { data: availableData } = useQuery('availableModels', () => apiService.getAvailableModels(), { staleTime: 300000 });
+  const { user, loading: authLoading } = useAuth();
+  const { data: enabledData } = useQuery(
+    ['enabledModels', user?.user_id],
+    () => apiService.getEnabledModels(),
+    { staleTime: 300000, enabled: !!(user?.user_id && !authLoading) }
+  );
+  const { data: availableData } = useQuery(
+    ['availableModels', user?.user_id],
+    () => apiService.getAvailableModels(),
+    { staleTime: 300000, enabled: !!(user?.user_id && !authLoading) }
+  );
   const { data: userProviders = [] } = useQuery('userLlmProviders', () => apiService.getUserLlmProviders(), { staleTime: 300000 });
   const enabledModels = enabledData?.enabled_models || [];
   const chatModels = getSelectableChatModels(enabledData);

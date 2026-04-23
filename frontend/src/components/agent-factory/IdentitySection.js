@@ -21,6 +21,7 @@ import {
   Chip,
 } from '@mui/material';
 import apiService from '../../services/apiService';
+import { useAuth } from '../../contexts/AuthContext';
 import { getSelectableChatModels } from '../../utils/chatSelectableModels';
 
 export default function IdentitySection({
@@ -29,15 +30,16 @@ export default function IdentitySection({
   onChange,
   readOnly = false,
 }) {
+  const { user, loading: authLoading } = useAuth();
   const { data: enabledData } = useQuery(
-    'enabledModels',
+    ['enabledModels', user?.user_id],
     () => apiService.getEnabledModels(),
-    { staleTime: 300000 }
+    { staleTime: 300000, enabled: !!(user?.user_id && !authLoading) }
   );
   const { data: availableData } = useQuery(
-    'availableModels',
+    ['availableModels', user?.user_id],
     () => apiService.getAvailableModels(),
-    { staleTime: 300000 }
+    { staleTime: 300000, enabled: !!(user?.user_id && !authLoading) }
   );
   const { data: personasData } = useQuery(
     'personas',

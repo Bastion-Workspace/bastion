@@ -26,6 +26,7 @@ import {
 } from '@mui/material';
 import { SmartToy, PlayArrow, Storage, Build, Close, Group } from '@mui/icons-material';
 import { useMutation, useQuery, useQueryClient } from 'react-query';
+import { useAuth } from '../contexts/AuthContext';
 import apiService from '../services/apiService';
 import { invalidateAgentHandlesQuery } from '../services/agentFactoryService';
 import { getSelectableChatModels } from '../utils/chatSelectableModels';
@@ -58,6 +59,7 @@ function getTabUrl(type, entityId) {
 }
 
 export default function AgentFactoryPage() {
+  const { user, loading: authLoading } = useAuth();
   const { id: selectedId, skillId: selectedSkillId } = useParams();
   const selectedIdResolved = selectedSkillId ?? selectedId;
   const { pathname } = useLocation();
@@ -148,14 +150,14 @@ export default function AgentFactoryPage() {
   );
 
   const { data: enabledData } = useQuery(
-    'enabledModels',
+    ['enabledModels', user?.user_id],
     () => apiService.getEnabledModels(),
-    { staleTime: 300000 }
+    { staleTime: 300000, enabled: !!(user?.user_id && !authLoading) }
   );
   const { data: availableData } = useQuery(
-    'availableModels',
+    ['availableModels', user?.user_id],
     () => apiService.getAvailableModels(),
-    { staleTime: 300000 }
+    { staleTime: 300000, enabled: !!(user?.user_id && !authLoading) }
   );
 
   const chatModels = getSelectableChatModels(enabledData);

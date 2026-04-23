@@ -267,7 +267,8 @@ const agentFactoryService = new AgentFactoryService();
 export const AGENT_HANDLES_QUERY_KEY = ['agentHandles'];
 
 export function invalidateAgentHandlesQuery(queryClient) {
-  return queryClient.invalidateQueries({ queryKey: AGENT_HANDLES_QUERY_KEY });
+  // Keys may be ['agentHandles', userId]; invalidate all variants.
+  return queryClient.invalidateQueries({ queryKey: ['agentHandles'], exact: false });
 }
 
 export default agentFactoryService;

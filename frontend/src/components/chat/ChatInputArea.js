@@ -26,7 +26,7 @@ import {
   AutoMode,
   Groups,
 } from '@mui/icons-material';
-import { useQuery, useMutation, useQueryClient } from 'react-query';
+import { useQuery } from 'react-query';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
@@ -37,7 +37,7 @@ import agentFactoryService, { AGENT_HANDLES_QUERY_KEY } from '../../services/age
 import ConversationService from '../../services/conversation/ConversationService';
 
 const ChatInputArea = () => {
-  const { authLoading, user } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const {
     query,
     setQuery,
@@ -61,7 +61,6 @@ const ChatInputArea = () => {
   const textFieldRef = useRef(null);
   // Use local input state to avoid global context updates on each keystroke
   const [inputValue, setInputValue] = useState(query || '');
-  const queryClient = useQueryClient();
   const [isRecording, setIsRecording] = useState(false);
   const mediaRecorderRef = useRef(null);
   const recordedChunksRef = useRef([]);
@@ -81,9 +80,12 @@ const ChatInputArea = () => {
   // @mention autocomplete for Agent Factory
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const { data: agentHandles = [] } = useQuery(
-    AGENT_HANDLES_QUERY_KEY,
+    [...AGENT_HANDLES_QUERY_KEY, user?.user_id],
     () => agentFactoryService.fetchAgentHandles(),
-    { staleTime: 60000 }
+    {
+      staleTime: 60000,
+      enabled: !!user?.user_id && !authLoading,
+    }
   );
   const allMentionOptions = [
     { handle: 'auto', name: 'Auto-route (clear agent lock)', isAuto: true },
@@ -108,37 +110,25 @@ const ChatInputArea = () => {
     if (mentionOpen) setSelectedMentionIndex(0);
   }, [mentionFilter, mentionOpen]);
 
-  // Model selection mutation to notify backend
-  const selectModelMutation = useMutation(
-    (modelName) => apiService.selectModel(modelName),
-    {
-      onSuccess: (data) => {
-        console.log('✅ Model selected successfully:', data);
-        queryClient.invalidateQueries('currentModel');
-      },
-      onError: (error) => {
-        console.error('❌ Failed to select model:', error);
-      },
-    }
-  );
-
-  // Fetch enabled models
+  // Fetch enabled models (user-scoped query key; deduped with ChatSidebarContext)
   const { data: enabledModelsData } = useQuery(
-    ['enabledModels'],
+    ['enabledModels', user?.user_id],
     () => apiService.getEnabledModels(),
     {
       refetchOnWindowFocus: false,
-      staleTime: 300000, // 5 minutes
+      staleTime: 300000,
+      enabled: !!user?.user_id && !authLoading,
     }
   );
 
   // Fetch available models
   const { data: availableModelsData } = useQuery(
-    ['availableModels'],
+    ['availableModels', user?.user_id],
     () => apiService.getAvailableModels(),
     {
       refetchOnWindowFocus: false,
-      staleTime: 300000, // 5 minutes
+      staleTime: 300000,
+      enabled: !!user?.user_id && !authLoading,
     }
   );
 
@@ -149,25 +139,12 @@ const ChatInputArea = () => {
 
   const chatModels = getSelectableChatModels(enabledModelsData);
 
-  // Set default model when data loads (catalog-verified list excludes orphans and image-gen model)
-  useEffect(() => {
-    if (authLoading || !user?.user_id) return;
-    const list = getSelectableChatModels(enabledModelsData);
-    if (list.length === 0) return;
-    const validSelection = list.includes(selectedModel);
-    if (!selectedModel || !validSelection) {
-      const defaultModel = list[0];
-      setSelectedModel(defaultModel);
-      selectModelMutation.mutate(defaultModel);
-    }
-  }, [authLoading, user?.user_id, enabledModelsData, selectedModel]);
+  // Model default + backend sync live in ChatSidebarContext (catalog coercion + single selectModel path).
 
   // Handle model selection change
   const handleModelChange = (newModel) => {
     console.log('🎯 User selected model:', newModel);
     setSelectedModel(newModel);
-    // Notify backend of the model change
-    selectModelMutation.mutate(newModel);
   };
 
   const handleSendMessage = async () => {
