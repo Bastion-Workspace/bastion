@@ -299,7 +299,15 @@ def worker_ready_handler(sender=None, **kwargs):
     """Called when Celery worker is ready to receive tasks"""
     # Set environment variable to indicate we're in a Celery worker
     os.environ['CELERY_WORKER_RUNNING'] = 'true'
-    logger.info("🚀 CELERY WORKER: Ready to process orchestrator tasks")
+    raw = os.environ.get("FEDERATION_ENABLED")
+    role = "beat" if sender is not None and getattr(sender, "schedule", None) else "worker"
+    logger.info(
+        "Celery %s ready; FEDERATION_ENABLED=%s (raw env %r). "
+        "If federation tasks skip, align this service's env with the API (docker-compose / k8s).",
+        role,
+        getattr(settings, "FEDERATION_ENABLED", None),
+        raw,
+    )
 
 @worker_shutdown.connect  
 def worker_shutdown_handler(sender=None, **kwargs):
