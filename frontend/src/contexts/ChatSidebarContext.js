@@ -23,6 +23,10 @@ import {
   LEGACY_CHAT_CONVERSATION_STORAGE_KEY,
   persistedActiveConversationLocalKey,
   activeConversationSessionStorageKey,
+  readPersistedChatModelForUser,
+  readPersistedUserEditorPreferenceForUser,
+  writePersistedChatModelForUser,
+  writePersistedUserEditorPreferenceForUser,
 } from '../utils/chatSelectionStorage';
 
 // Format agent type to display name
@@ -142,14 +146,7 @@ export const ChatSidebarProvider = ({ children }) => {
   const [currentNodeId, setCurrentNodeId] = useState(null);
   const [query, setQuery] = useState('');
   const [replyToMessage, setReplyToMessage] = useState(null); // Message being replied to
-  const [selectedModel, setSelectedModel] = useState(() => {
-    try {
-      const saved = localStorage.getItem('chatSidebarSelectedModel');
-      return saved && saved !== 'null' ? saved : '';
-    } catch {
-      return '';
-    }
-  });
+  const [selectedModel, setSelectedModel] = useState('');
   const [backgroundJobService, setBackgroundJobService] = useState(null);
   /** When set, chat follow-ups route to this agent line (CEO) until @auto */
   const [activeLineRouting, setActiveLineRouting] = useState(null);
@@ -250,6 +247,7 @@ export const ChatSidebarProvider = ({ children }) => {
   const isLoadingFromMetadataRef = React.useRef(false); // Track when we're loading preferences from metadata to prevent save loop
   const currentConversationIdRef = React.useRef(null);
   const lastRestoreAttemptUserRef = React.useRef(null);
+  const lastHydratedChatPrefsUserRef = React.useRef(null);
 
   // **CONVERSATION-SCOPED ACTIVITY STATE**: Isolate loading indicators, job IDs, and executing plans per conversation
   // Map<conversationId, { isLoading, currentJobId, executingPlans }>
@@ -293,18 +291,13 @@ export const ChatSidebarProvider = ({ children }) => {
   
   // **ROOSEVELT'S PREFERENCE MANAGEMENT**: Store user preferences separately from what gets sent to backend
   // User preference: what the user actually toggled (persists across navigation)
-  const [userEditorPreference, setUserEditorPreference] = useState(() => {
-    try { return localStorage.getItem('userEditorPreference') || 'prefer'; } catch { return 'prefer'; }
-  });
-  
+  const [userEditorPreference, setUserEditorPreference] = useState('prefer');
+
   // Active preference: what actually gets sent to the backend (context-aware)
-  // Initialize based on current location - if on documents page, use user preference, otherwise 'ignore'
   const [editorPreference, setEditorPreference] = useState(() => {
-    // Use location from useLocation hook (available in component)
     try {
       const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
-      const onDocumentsPage = pathname.startsWith('/documents');
-      return onDocumentsPage ? (localStorage.getItem('userEditorPreference') || 'prefer') : 'ignore';
+      return pathname.startsWith('/documents') ? 'prefer' : 'ignore';
     } catch {
       return 'ignore';
     }
@@ -444,10 +437,17 @@ export const ChatSidebarProvider = ({ children }) => {
         }
       }
       lastRestoreAttemptUserRef.current = null;
+      lastHydratedChatPrefsUserRef.current = null;
       clearConversationWorkspace();
+      dispatchArtifactDrawer({ type: 'close' });
+      setReplyToMessage(null);
+      setActiveLineRouting(null);
+      setSelectedModel('');
+      setUserEditorPreference('prefer');
+      setEditorPreference(location.pathname.startsWith('/documents') ? 'prefer' : 'ignore');
     }
     authChatSessionRef.current = snapshot;
-  }, [authLoading, isAuthenticated, user?.user_id, clearConversationWorkspace]);
+  }, [authLoading, isAuthenticated, user?.user_id, clearConversationWorkspace, location.pathname]);
 
   useEffect(() => {
     if (authLoading || !isAuthenticated || !user?.user_id) return;
@@ -475,6 +475,24 @@ export const ChatSidebarProvider = ({ children }) => {
       setCurrentConversationId(saved);
     }
   }, [authLoading, isAuthenticated, user?.user_id, currentConversationId]);
+
+  useEffect(() => {
+    if (authLoading || !user?.user_id) return;
+    const uid = user.user_id;
+    if (lastHydratedChatPrefsUserRef.current === uid) return;
+    lastHydratedChatPrefsUserRef.current = uid;
+
+    const model = readPersistedChatModelForUser(uid);
+    setSelectedModel(model);
+    if (model) {
+      apiService.selectModel(model).catch(() => {});
+    }
+
+    const ed = readPersistedUserEditorPreferenceForUser(uid);
+    setUserEditorPreference(ed);
+    const onDocuments = location.pathname.startsWith('/documents');
+    setEditorPreference(onDocuments ? ed : 'ignore');
+  }, [authLoading, user?.user_id, location.pathname]);
 
   // Preference update function for saving to conversation metadata
   const updateConversationPreference = React.useCallback(async (key, value) => {
@@ -504,7 +522,9 @@ export const ChatSidebarProvider = ({ children }) => {
   const handleEditorPreferenceChange = React.useCallback(async (newPreference) => {
     // Update user preference (persists across navigation)
     setUserEditorPreference(newPreference);
-    localStorage.setItem('userEditorPreference', newPreference);
+    if (user?.user_id) {
+      writePersistedUserEditorPreferenceForUser(user.user_id, newPreference);
+    }
     
     // Update active preference (context-aware)
     if (location.pathname.startsWith('/documents')) {
@@ -515,7 +535,7 @@ export const ChatSidebarProvider = ({ children }) => {
         await updateConversationPreference('editor_preference', newPreference);
       }
     }
-  }, [currentConversationId, updateConversationPreference, location.pathname]);
+  }, [currentConversationId, updateConversationPreference, location.pathname, user?.user_id]);
 
   // Initialize background job service
   useEffect(() => {
@@ -537,11 +557,10 @@ export const ChatSidebarProvider = ({ children }) => {
     devLog('🔄 ChatSidebarContext: currentConversationId changed to:', currentConversationId);
   }, [currentConversationId]);
 
-  // Load sidebar preferences and model selection from localStorage
+  // Load sidebar layout from localStorage (device-level). Model/editor hydrate per user after auth.
   useEffect(() => {
     const savedCollapsed = localStorage.getItem('chatSidebarCollapsed');
     const savedWidth = localStorage.getItem('chatSidebarWidth');
-    const savedModel = localStorage.getItem('chatSidebarSelectedModel');
     const savedFullWidth = localStorage.getItem('chatSidebarFullWidth');
     
     if (savedCollapsed !== null) {
@@ -550,15 +569,6 @@ export const ChatSidebarProvider = ({ children }) => {
     
     if (savedWidth !== null) {
       setSidebarWidth(JSON.parse(savedWidth));
-    }
-    
-    if (savedModel !== null) {
-      setSelectedModel(savedModel);
-      // Immediately notify backend of the saved model selection
-      devLog('🔄 App loaded - notifying backend of saved model:', savedModel);
-      apiService.selectModel(savedModel).catch(error => {
-        console.warn('⚠️ Failed to notify backend of saved model on app load:', error);
-      });
     }
     
     if (savedFullWidth !== null) {
@@ -586,10 +596,15 @@ export const ChatSidebarProvider = ({ children }) => {
     localStorage.setItem('chatSidebarFullWidth', JSON.stringify(isFullWidth));
   }, [isFullWidth]);
 
-  // **ROOSEVELT**: Save USER preferences to localStorage (these persist across navigation)
   useEffect(() => {
-    try { localStorage.setItem('userEditorPreference', userEditorPreference); } catch {}
-  }, [userEditorPreference]);
+    const uid = user?.user_id;
+    if (!uid) return;
+    try {
+      writePersistedUserEditorPreferenceForUser(uid, userEditorPreference);
+    } catch (_) {
+      /* ignore */
+    }
+  }, [user?.user_id, userEditorPreference]);
 
   // Save selected model to localStorage and conversation metadata
   useEffect(() => {
@@ -598,8 +613,9 @@ export const ChatSidebarProvider = ({ children }) => {
       return;
     }
     
-    if (selectedModel) {
-      localStorage.setItem('chatSidebarSelectedModel', selectedModel);
+    const uid = user?.user_id;
+    if (uid && selectedModel) {
+      writePersistedChatModelForUser(uid, selectedModel);
       
       // Also save to conversation metadata if we have a conversation
       if (currentConversationId) {
@@ -612,8 +628,10 @@ export const ChatSidebarProvider = ({ children }) => {
       apiService.selectModel(selectedModel).catch(err => {
         console.error('Failed to notify backend of model selection:', err);
       });
+    } else if (uid && !selectedModel) {
+      writePersistedChatModelForUser(uid, '');
     }
-  }, [selectedModel, currentConversationId, updateConversationPreference]);
+  }, [selectedModel, currentConversationId, updateConversationPreference, user?.user_id]);
 
   // Per-user: last active thread survives logout/login on the same browser profile.
   useEffect(() => {
@@ -676,11 +694,12 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // Load conversation-specific preferences from metadata
   useEffect(() => {
+    const uid = user?.user_id;
     if (!currentConversationId) {
       setActiveLineRouting(null);
-      // No conversation - use global preferences
-      const globalModel = localStorage.getItem('chatSidebarSelectedModel');
-      if (globalModel) setSelectedModel(globalModel);
+      if (uid) {
+        setSelectedModel(readPersistedChatModelForUser(uid) || '');
+      }
       return;
     }
     
@@ -703,12 +722,11 @@ export const ChatSidebarProvider = ({ children }) => {
       if (metadata.user_chat_model) {
         devLog('🔄 Loading conversation model preference:', metadata.user_chat_model, 'for conversation:', currentConversationId);
         setSelectedModel(metadata.user_chat_model);
-      } else {
-        // Fall back to global preference
-        const globalModel = localStorage.getItem('chatSidebarSelectedModel');
-        if (globalModel) {
-          devLog('🔄 No conversation model preference, using global:', globalModel);
-          setSelectedModel(globalModel);
+      } else if (uid) {
+        const scopedModel = readPersistedChatModelForUser(uid);
+        if (scopedModel) {
+          devLog('🔄 No conversation model preference, using user default:', scopedModel);
+          setSelectedModel(scopedModel);
         }
       }
       
@@ -716,23 +734,22 @@ export const ChatSidebarProvider = ({ children }) => {
       if (metadata.editor_preference && location.pathname.startsWith('/documents')) {
         devLog('🔄 Loading conversation editor preference:', metadata.editor_preference);
         setEditorPreference(metadata.editor_preference);
-      } else {
-        // Fall back to global user preference
-        const globalEditorPref = localStorage.getItem('userEditorPreference') || 'prefer';
+      } else if (uid) {
+        const scopedEditor = readPersistedUserEditorPreferenceForUser(uid);
         if (location.pathname.startsWith('/documents')) {
-          setEditorPreference(globalEditorPref);
+          setEditorPreference(scopedEditor);
         }
       }
     } else if (conversationData) {
       setActiveLineRouting(null);
-      // Conversation loaded but no metadata yet - use global preferences
-      devLog('🔄 Conversation loaded but no metadata, using global preferences');
-      const globalModel = localStorage.getItem('chatSidebarSelectedModel');
-      if (globalModel) setSelectedModel(globalModel);
-      
-      const globalEditorPref = localStorage.getItem('userEditorPreference') || 'prefer';
-      if (location.pathname.startsWith('/documents')) {
-        setEditorPreference(globalEditorPref);
+      devLog('🔄 Conversation loaded but no metadata, using user defaults');
+      if (uid) {
+        const scopedModel = readPersistedChatModelForUser(uid);
+        if (scopedModel) setSelectedModel(scopedModel);
+        const scopedEditor = readPersistedUserEditorPreferenceForUser(uid);
+        if (location.pathname.startsWith('/documents')) {
+          setEditorPreference(scopedEditor);
+        }
       }
     }
     
@@ -740,7 +757,7 @@ export const ChatSidebarProvider = ({ children }) => {
     setTimeout(() => {
       isLoadingFromMetadataRef.current = false;
     }, 100);
-  }, [conversationData, currentConversationId, location.pathname]);
+  }, [conversationData, currentConversationId, location.pathname, user?.user_id]);
 
   // PRIORITY: Load messages using unified chat service
   const { data: messagesData, isLoading: messagesLoading, refetch: refetchMessages } = useQuery(

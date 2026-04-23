@@ -83,7 +83,6 @@ import UserManagement from './UserManagement';
 import ClassificationModelSelector from './ClassificationModelSelector';
 import ImageGenerationModelSelector from './ImageGenerationModelSelector';
 import TextCompletionModelSelector from './TextCompletionModelSelector';
-import { useModel } from '../contexts/ModelContext';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
 import MediaSettingsTab from './music/MediaSettingsTab';
 import ExternalConnectionsSettings from './ExternalConnectionsSettings';
