@@ -203,6 +203,7 @@ const PROCESSING_STATUSES = new Set([
 ]);
 
 const FILE_TREE_TOAST_STYLE_ID = 'bastion-filetree-toast-keyframes';
+const FILE_TREE_TOAST_HOST_ID = 'bastion-file-tree-toast-host';
 const FOLDER_WS_CONTENTS_DEBOUNCE_MS = 400;
 const FILE_TREE_TOAST_BATCH_MS = 450;
 
@@ -218,6 +219,32 @@ function ensureFileTreeToastKeyframes() {
     }
   `;
   document.head.appendChild(style);
+}
+
+/** Fixed column so multiple toasts stack top-to-bottom instead of overlapping. */
+function ensureFileTreeToastHost() {
+  if (typeof document === 'undefined') return null;
+  let host = document.getElementById(FILE_TREE_TOAST_HOST_ID);
+  if (!host) {
+    host = document.createElement('div');
+    host.id = FILE_TREE_TOAST_HOST_ID;
+    host.setAttribute('aria-live', 'polite');
+    host.setAttribute('aria-relevant', 'additions text');
+    host.style.cssText = [
+      'position:fixed',
+      'top:20px',
+      'right:20px',
+      'z-index:9999',
+      'display:flex',
+      'flex-direction:column',
+      'align-items:flex-end',
+      'gap:8px',
+      'pointer-events:none',
+      'max-width:min(420px, calc(100vw - 40px))',
+    ].join(';');
+    document.body.appendChild(host);
+  }
+  return host;
 }
 
 const FileTreeSidebar = ({ 
@@ -345,31 +372,35 @@ const FileTreeSidebar = ({
     }
   }, [expandedFolders]);
 
-  // Toast notification function
   const showToast = useCallback((message, type = 'info') => {
     ensureFileTreeToastKeyframes();
+    const host = ensureFileTreeToastHost();
+    if (!host) return;
+
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
     toast.textContent = message;
     toast.style.cssText = `
-      position: fixed;
-      top: 20px;
-      right: 20px;
+      pointer-events: auto;
+      max-width: 100%;
       background: ${type === 'success' ? '#4caf50' : type === 'error' ? '#f44336' : '#2196f3'};
       color: white;
       padding: 12px 20px;
       border-radius: 4px;
-      z-index: 9999;
       font-size: 14px;
       box-shadow: 0 2px 8px rgba(0,0,0,0.2);
       animation: bastionFileTreeToastSlideIn 0.3s ease-out;
+      word-wrap: break-word;
     `;
 
-    document.body.appendChild(toast);
+    host.appendChild(toast);
 
     setTimeout(() => {
-      if (document.body.contains(toast)) {
-        document.body.removeChild(toast);
+      if (toast.parentNode) {
+        toast.parentNode.removeChild(toast);
+      }
+      if (host.childNodes.length === 0 && host.parentNode) {
+        host.parentNode.removeChild(host);
       }
     }, 4000);
   }, []);
@@ -1149,9 +1180,44 @@ const FileTreeSidebar = ({
             } else if (update.action === 'file_created') {
               const filename = update.filename || 'File';
               queueFileUploadedBurstToast(filename);
-              
-              // Refresh folder contents to show the new file
               queryClient.invalidateQueries(['folders', 'contents', update.folder_id]);
+              if (update.folder_id) {
+                Promise.all([
+                  apiService.getFolderContents(update.folder_id),
+                  queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]),
+                ])
+                  .then(([contents]) => {
+                    const docs = filterMetadataFiles(contents?.documents || []);
+                    const subs = Array.isArray(contents?.subfolders) ? contents.subfolders : [];
+                    setFolderContents((prev) => {
+                      const existing = prev[update.folder_id];
+                      if (
+                        existing &&
+                        (existing.documents?.length > 0 || existing.subfolders?.length > 0) &&
+                        docs.length === 0 &&
+                        subs.length === 0
+                      ) {
+                        return prev;
+                      }
+                      return {
+                        ...prev,
+                        [update.folder_id]: {
+                          ...contents,
+                          documents: docs.map((doc) => ({
+                            ...doc,
+                            status: doc.status || doc.processing_status || null,
+                            processing_status: doc.processing_status || doc.status || null,
+                          })),
+                          subfolders: subs,
+                        },
+                      };
+                    });
+                    if (filename.toLowerCase().endsWith('.org')) {
+                      setHasOrgFiles(true);
+                    }
+                  })
+                  .catch((err) => console.error('Failed to refresh folder after file_created:', err));
+              }
               devLog('✅ Refreshed folder contents due to file creation');
             }
             
@@ -2057,7 +2123,7 @@ const FileTreeSidebar = ({
   );
 
   const uploadMutation = useMutation(
-    ({ formData, isGlobal, filename }) => {
+    ({ formData, isGlobal, filename, folderId }) => {
       const endpoint = isGlobal ? '/api/documents/upload' : '/api/user/documents/upload';
       devLog(`📤 Using ${isGlobal ? 'admin' : 'user'} upload endpoint: ${endpoint}`);
       
@@ -2071,20 +2137,15 @@ const FileTreeSidebar = ({
       onSuccess: (result, variables) => {
         devLog('✅ File uploaded successfully:', result);
         
-        // **ROOSEVELT STATUS-AWARE PROCESSING INDICATOR!**
-        // Check if file is already completed (e.g., org files are instant)
         const isAlreadyComplete = result.status === 'completed';
         
         if (isAlreadyComplete) {
-          // File processed instantly - no spinner needed!
           devLog(`"${variables.filename}" processed instantly (${result.status})`);
           showToast(`✅ "${variables.filename}" uploaded and ready!`, 'success');
         } else {
-          // File still processing - show spinner
           devLog(`🔄 "${variables.filename}" processing in background (${result.status})`);
           showToast(`✅ "${variables.filename}" uploaded successfully! Processing in background...`, 'success');
           
-          // Add file to processing list
           setProcessingFiles(prev => [...prev, {
             filename: variables.filename,
             documentId: result.document_id,
@@ -2092,7 +2153,6 @@ const FileTreeSidebar = ({
             status: result.status
           }]);
           
-          // **ROOSEVELT FALLBACK POLLING!** If no WebSocket update in 30 seconds, check status
           setTimeout(() => {
             apiService.get(`/api/user/documents/${result.document_id}`)
               .then(doc => {
@@ -2102,15 +2162,13 @@ const FileTreeSidebar = ({
                 }
               })
               .catch(err => console.error('❌ Fallback status check failed:', err));
-          }, 30000); // 30 second safety net
+          }, 30000);
         }
         
-        // Close upload dialog immediately for better UX
         setUploadDialog(false);
         setUploadFiles([]);
         setUploadTargetFolder(null);
         
-        // Utility: find path of ancestor IDs from root to target folder
         const getFolderPathIds = (treeData, targetId) => {
           const stack = [];
           const nodes = Array.isArray(treeData) ? treeData : (treeData?.folders || []);
@@ -2127,8 +2185,8 @@ const FileTreeSidebar = ({
           return dfs(nodes, []) || [];
         };
         
-        // Get the target folder ID
-        const targetFolderId = contextMenuTarget?.folder_id || uploadTargetFolder?.folder_id;
+        const targetFolderId =
+          variables.folderId || contextMenuTarget?.folder_id || uploadTargetFolder?.folder_id;
         devLog('🎯 Upload success - target folder:', targetFolderId);
         
         if (targetFolderId) {
@@ -2146,15 +2204,22 @@ const FileTreeSidebar = ({
           // Ensure folder selected so its files render
           try { onFolderSelect?.(targetFolderId); } catch {}
           
-          // Refresh the specific folder contents to show the uploaded file
           apiService.getFolderContents(targetFolderId)
-            .then(contents => {
-              setFolderContents(prev => ({
+            .then((contents) => {
+              const docs = filterMetadataFiles(contents?.documents || []);
+              const subfolders = Array.isArray(contents?.subfolders) ? contents.subfolders : [];
+              setFolderContents((prev) => ({
                 ...prev,
-                [targetFolderId]: contents
+                [targetFolderId]: {
+                  ...contents,
+                  documents: docs.map((doc) => ({
+                    ...doc,
+                    status: doc.status || doc.processing_status || null,
+                    processing_status: doc.processing_status || doc.status || null,
+                  })),
+                  subfolders,
+                },
               }));
-              
-              // Scroll folder into view after layout updates
               setTimeout(() => {
                 const el = document.querySelector(`[data-folder-id="${targetFolderId}"]`);
                 if (el && typeof el.scrollIntoView === 'function') {
@@ -2162,7 +2227,7 @@ const FileTreeSidebar = ({
                 }
               }, 50);
             })
-            .catch(error => {
+            .catch((error) => {
               console.error('Failed to reload folder contents:', error);
             });
         } else {
@@ -2585,7 +2650,7 @@ const FileTreeSidebar = ({
       devLog(`📁 Upload to ${isGlobal ? 'global' : 'user'} folder:`, targetFolder?.name, `(${targetFolder?.collection_type})`);
       devLog(`📋 Metadata - category: ${uploadCategory}, tags: ${uploadTags.join(', ')}`);
       
-      uploadMutation.mutate({ formData, isGlobal, filename: file.name });
+      uploadMutation.mutate({ formData, isGlobal, filename: file.name, folderId: targetFolderId });
     });
     
     // Reset metadata fields after upload
