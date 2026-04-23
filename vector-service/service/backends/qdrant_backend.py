@@ -530,16 +530,18 @@ class QdrantBackend:
                 )
                 search_results = qr.points
             else:
-                search_kwargs: Dict[str, Any] = {
+                # qdrant-client >=1.16: use query_points instead of removed client.search()
+                query_kwargs: Dict[str, Any] = {
                     "collection_name": collection_name,
-                    "query_vector": list(query_vector),
+                    "query": list(query_vector),
                     "limit": limit or 50,
                     "query_filter": query_filter,
                     "score_threshold": effective_threshold,
                 }
                 if schema in ("named_dense", "named_hybrid"):
-                    search_kwargs["using"] = "dense"
-                search_results = self._client.search(**search_kwargs)
+                    query_kwargs["using"] = "dense"
+                qr = self._client.query_points(**query_kwargs)
+                search_results = qr.points
         except UnexpectedResponse as e:
             if e.status_code == 404 or "doesn't exist" in str(e).lower() or "not found" in str(e).lower():
                 logger.info(
