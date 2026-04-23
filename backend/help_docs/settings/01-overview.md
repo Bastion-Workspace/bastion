@@ -17,10 +17,11 @@ Set your **display name**, **email**, **phone**, **birthday**, **timezone**, and
 
 ## Appearance
 
-- **Theme** — Switch between **light** and **dark** mode. The choice is saved and applied across the app.
+- **Theme** — Switch between **light**, **dark**, and **system** mode. The choice is saved and applied across the app.
 - **Accent color** — Pick an accent color for buttons and highlights. Works with both themes.
+- **Wallpaper** — Optional background for the web app and separate options for the **BBS** text UI.
 
-You can also toggle theme from the user menu (light/dark icon) without opening Settings.
+You can also toggle theme from the user menu (light/dark icon) without opening Settings when not using system theme.
 
 ---
 
@@ -36,9 +37,9 @@ Choose which models power chat, fast replies, image generation, and image analys
 
 ---
 
-## News
+## RSS Feeds
 
-Configure **news synthesis** and display: which model is used to summarize headlines, minimum sources, recency, and diversity. This tab is relevant if your instance has the News feature enabled (e.g. for admins or users with the news capability).
+Add and manage **RSS and Atom feeds**, refresh intervals, and how articles are imported or shown. Feeds can be tagged for organization. RSS tools in agents use this data.
 
 ---
 
@@ -82,6 +83,12 @@ Available only to **admins**. Options may include clearing document caches, rese
 ## User Management (admin only)
 
 Available only to **admins**. Create, edit, and delete **users**, assign **roles** and **capabilities**, and manage access. Controls who can log in and what features they can use.
+
+---
+
+## Federation (admin only)
+
+Available only to **admins** when federation is enabled on the server. Configure instance identity, trusted peers, and related options for Bastion-to-Bastion federation.
 
 ---
 

@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Update: **Settings** — remove unused **News** tab; merge **Wallpaper** into **Appearance**; legacy **`?tab=wallpaper`** / **`?tab=news`** redirect to **`appearance`** / **`rss-feeds`**.
 - Fix: **document-service file watcher** — entertainment KG import pointed at non-existent `ds_services.entertainment_kg_extractor`; use **`shims.services.entertainment_kg_extractor`** (stub) so re-process logs are clean on greenfield.
 - Fix: **`document_folders` RLS** — `UPDATE` policy required `user_id IS NOT NULL` for the admin branch, so **global** rows (`user_id` NULL) could not be updated; `INSERT ... ON CONFLICT DO UPDATE` on global root therefore failed on greenfield. Migration **`159_fix_document_folders_global_update_rls.sql`**; **`01_init.sql`**; **`run_migration.py`** alias **`159`** / **`document_folders_global_update_rls`**. Recreate the Postgres data volume or run **`159`** on existing DBs.
 - Fix: **User document reprocess** — chunk-ineligible types (e.g. **`.org`**) are outside Qdrant primary indexing policy; the pipeline used to return success without running the v2 path, leaving the row stuck in **processing** after the API cleared vectors. Reprocess now resolves the file on disk, runs **metadata-only** processing via v2, and **force** re-queues on the parallel processor can replace a stuck in-flight slot.

@@ -55,7 +55,6 @@ import {
   Person,
   Add,
   Edit as EditIcon,
-  Description as DescriptionIcon,
   ListAlt,
   FolderOpen,
   MusicNote,
@@ -69,7 +68,7 @@ import {
   Lock,
   Palette,
   BrightnessAuto,
-  Wallpaper,
+  Hub,
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -86,6 +85,7 @@ import TextCompletionModelSelector from './TextCompletionModelSelector';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
 import MediaSettingsTab from './music/MediaSettingsTab';
 import ExternalConnectionsSettings from './ExternalConnectionsSettings';
+import FederationSettings from './FederationSettings';
 import UserLLMProviders from './UserLLMProviders';
 import UserVoiceProviders from './UserVoiceProviders';
 import BrowserSessionManagement from './agent-factory/BrowserSessionManagement';
@@ -798,20 +798,6 @@ const SettingsPage = () => {
       },
       onError: (error) => {
         console.error('Failed to fetch prompt settings:', error);
-      }
-    }
-  );
-
-  // Fetch system settings
-  const { data: systemSettings, isLoading: systemSettingsLoading } = useQuery(
-    'systemSettings',
-    () => apiService.getSettings(),
-    {
-      onSuccess: (data) => {
-        console.log('System settings loaded:', data);
-      },
-      onError: (error) => {
-        console.error('Failed to load system settings:', error);
       }
     }
   );
@@ -1727,11 +1713,9 @@ const SettingsPage = () => {
 
   const tabs = [
     { id: 'profile', label: 'User Profile', icon: <Person /> },
-    { id: 'wallpaper', label: 'Wallpaper', icon: <Wallpaper /> },
     { id: 'appearance', label: 'Appearance', icon: <Palette /> },
     { id: 'personas', label: 'Personas', icon: <Psychology /> },
     { id: 'models', label: 'Models', icon: <Settings /> },
-    { id: 'news', label: 'News', icon: <DescriptionIcon /> },
     { id: 'rss-feeds', label: 'RSS Feeds', icon: <RssFeedIcon /> },
     { id: 'ebooks-opds', label: 'Ebooks (OPDS)', icon: <MenuBook /> },
     { id: 'org', label: 'Org-Mode', icon: <ListAlt /> },
@@ -1740,7 +1724,8 @@ const SettingsPage = () => {
     { id: 'sessions', label: 'Browser Sessions', icon: <Lock /> },
     ...(user?.role === 'admin' ? [
       { id: 'database', label: 'Database', icon: <DeleteSweep /> },
-      { id: 'users', label: 'User Management', icon: <Security /> }
+      { id: 'users', label: 'User Management', icon: <Security /> },
+      { id: 'federation', label: 'Federation', icon: <Hub /> },
     ] : [])
   ];
 
@@ -1751,11 +1736,23 @@ const SettingsPage = () => {
       navigate('/control-panes', { replace: true });
       return;
     }
+    if (tabId === 'wallpaper' || tabId === 'news') {
+      const next = tabId === 'wallpaper' ? 'appearance' : 'rss-feeds';
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          params.set('tab', next);
+          return params;
+        },
+        { replace: true }
+      );
+      return;
+    }
     if (tabId) {
       const idx = tabs.findIndex(t => t.id === tabId);
       if (idx >= 0) setCurrentTab(idx);
     }
-  }, [searchParams, tabs, navigate]);
+  }, [searchParams, tabs, navigate, setSearchParams]);
 
   const handleTabSelect = (newIndex) => {
     setCurrentTab(newIndex);
@@ -2513,20 +2510,6 @@ const SettingsPage = () => {
       {currentTab === 1 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
-            <UiWallpaperSettingsSection />
-          </Grid>
-          <Grid item xs={12}>
-            <Divider sx={{ my: 1 }} />
-          </Grid>
-          <Grid item xs={12}>
-            <BbsWallpaperSettingsTab />
-          </Grid>
-        </Grid>
-      )}
-
-      {currentTab === 2 && (
-        <Grid container spacing={3}>
-          <Grid item xs={12}>
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -2539,7 +2522,8 @@ const SettingsPage = () => {
                     <Typography variant="h6">Appearance</Typography>
                   </Box>
                   <Typography variant="body2" color="text.secondary" paragraph>
-                    Choose theme mode and accent color. Changes apply immediately.
+                    Theme mode, accent color, and optional wallpapers for the web app and BBS. Changes apply
+                    immediately where applicable.
                   </Typography>
 
                   <Box mb={3}>
@@ -2613,10 +2597,22 @@ const SettingsPage = () => {
               </Card>
             </motion.div>
           </Grid>
+          <Grid item xs={12}>
+            <Divider sx={{ my: 1 }} />
+          </Grid>
+          <Grid item xs={12}>
+            <UiWallpaperSettingsSection />
+          </Grid>
+          <Grid item xs={12}>
+            <Divider sx={{ my: 1 }} />
+          </Grid>
+          <Grid item xs={12}>
+            <BbsWallpaperSettingsTab />
+          </Grid>
         </Grid>
       )}
 
-      {currentTab === 3 && (
+      {currentTab === 2 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
             <motion.div
@@ -2768,7 +2764,7 @@ const SettingsPage = () => {
         </DialogActions>
       </Dialog>
 
-      {currentTab === 4 && (
+      {currentTab === 3 && (
         <Grid container spacing={3}>
 
         {/* User-level LLM providers (toggle + own API keys / models) */}
@@ -3433,147 +3429,7 @@ const SettingsPage = () => {
       </Grid>
       )}
 
-      {/* News Settings Tab */}
-      {currentTab === 5 && (
-        <Grid container spacing={3}>
-          <Grid item xs={12}>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.05 }}
-            >
-              <Card>
-                <CardContent>
-                  <Box display="flex" alignItems="center" mb={3}>
-                    <DescriptionIcon sx={{ mr: 2, color: 'primary.main' }} />
-                    <Typography variant="h6">News Synthesis</Typography>
-                  </Box>
-
-                  <Alert severity="info" sx={{ mb: 2 }}>
-                    Configure how the News background agent synthesizes balanced articles from your RSS sources.
-                  </Alert>
-
-                  <Grid container spacing={2}>
-                    <Grid item xs={12} md={6}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>Synthesis Model</InputLabel>
-                        <Select
-                          label="Synthesis Model"
-                          value={systemSettings?.settings?.news?.synthesis_model?.value || ''}
-                          onChange={async (e) => {
-                            try {
-                              await apiService.setSetting('news.synthesis_model', { key: 'news.synthesis_model', value: e.target.value, category: 'news', description: 'Model used for news synthesis' });
-                              // Refresh settings
-                              try { window?.requestIdleCallback?.(() => {}); } catch {}
-                              // Using react-query client to invalidate
-                              // Note: queryClient is available in scope
-                              try { queryClient.invalidateQueries('systemSettings'); } catch {}
-                            } catch {}
-                          }}
-                        >
-                          {(modelsData?.models || []).filter(m => enabledModels.has(m.id)).map(m => (
-                            <MenuItem key={m.id} value={m.id}>{m.name} ({m.provider})</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                      <Typography variant="caption" color="text.secondary">Model used by the news agent to write balanced articles</Typography>
-                    </Grid>
-                    <Grid item xs={12} md={2}>
-                      <TextField
-                        fullWidth
-                        label="Min Sources"
-                        type="number"
-                        size="small"
-                        value={systemSettings?.settings?.news?.min_sources?.value ?? 3}
-                        onChange={async (e) => {
-                          const val = parseInt(e.target.value, 10);
-                          if (Number.isNaN(val)) return;
-                          try {
-                            await apiService.setSetting('news.min_sources', { key: 'news.min_sources', value: val, category: 'news', description: 'Minimum sources per cluster' });
-                            try { queryClient.invalidateQueries('systemSettings'); } catch {}
-                          } catch {}
-                        }}
-                        helperText="Cluster must include at least this many distinct outlets"
-                      />
-                    </Grid>
-                    <Grid item xs={12} md={2}>
-                      <TextField
-                        fullWidth
-                        label="Recency (min)"
-                        type="number"
-                        size="small"
-                        value={systemSettings?.settings?.news?.recency_minutes?.value ?? 60}
-                        onChange={async (e) => {
-                          const val = parseInt(e.target.value, 10);
-                          if (Number.isNaN(val)) return;
-                          try {
-                            await apiService.setSetting('news.recency_minutes', { key: 'news.recency_minutes', value: val, category: 'news', description: 'Recency window in minutes' });
-                            try { queryClient.invalidateQueries('systemSettings'); } catch {}
-                          } catch {}
-                        }}
-                        helperText="Time window for clustering fresh stories"
-                      />
-                    </Grid>
-                    <Grid item xs={12} md={2}>
-                      <TextField
-                        fullWidth
-                        label="Min Diversity (0-1)"
-                        type="number"
-                        size="small"
-                        inputProps={{ min: 0, max: 1, step: 0.1 }}
-                        value={systemSettings?.settings?.news?.min_diversity?.value ?? 0.4}
-                        onChange={async (e) => {
-                          const val = parseFloat(e.target.value);
-                          if (Number.isNaN(val)) return;
-                          try {
-                            await apiService.setSetting('news.min_diversity', { key: 'news.min_diversity', value: val, category: 'news', description: 'Required diversity score for synthesis' });
-                            try { queryClient.invalidateQueries('systemSettings'); } catch {}
-                          } catch {}
-                        }}
-                        helperText="Higher requires more outlet diversity"
-                      />
-                    </Grid>
-                    <Grid item xs={12}>
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={!!(systemSettings?.settings?.news?.notifications_enabled?.value)}
-                            onChange={(e) => apiService.setSetting('news.notifications_enabled', { key: 'news.notifications_enabled', value: e.target.checked, category: 'news', description: 'Enable desktop notifications for breaking/urgent' })}
-                          />
-                        }
-                        label="Enable browser notifications for breaking/urgent headlines"
-                      />
-                    </Grid>
-                  </Grid>
-                </CardContent>
-              </Card>
-            </motion.div>
-          </Grid>
-
-          <Grid item xs={12}>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.08 }}
-            >
-              <Card>
-                <CardContent>
-                  <Box display="flex" alignItems="center" mb={3}>
-                    <DescriptionIcon sx={{ mr: 2, color: 'primary.main' }} />
-                    <Typography variant="h6">RSS Sources for News</Typography>
-                  </Box>
-
-                  <Alert severity="info" sx={{ mb: 2 }}>
-                    Manage feeds in Settings → RSS Feeds. The news agent uses feeds tagged for News; toggle &quot;Include in News synthesis&quot; on a feed where supported.
-                  </Alert>
-                </CardContent>
-              </Card>
-            </motion.div>
-          </Grid>
-        </Grid>
-      )}
-
-      {currentTab === 6 && (
+      {currentTab === 4 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3583,7 +3439,7 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
-      {currentTab === 7 && (
+      {currentTab === 5 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3594,7 +3450,7 @@ const SettingsPage = () => {
       )}
 
       {/* Org-Mode Settings Tab */}
-      {currentTab === 8 && (
+      {currentTab === 6 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3605,7 +3461,7 @@ const SettingsPage = () => {
       )}
 
       {/* Media Settings Tab */}
-      {currentTab === 9 && (
+      {currentTab === 7 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3616,7 +3472,7 @@ const SettingsPage = () => {
       )}
 
       {/* Connections Tab */}
-      {currentTab === 10 && (
+      {currentTab === 8 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3627,7 +3483,7 @@ const SettingsPage = () => {
       )}
 
       {/* Browser Sessions Tab */}
-      {currentTab === 11 && (
+      {currentTab === 9 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3638,7 +3494,7 @@ const SettingsPage = () => {
       )}
 
       {/* Database Management Tab */}
-      {currentTab === 12 && user?.role === 'admin' && (
+      {currentTab === 10 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -3887,7 +3743,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 13 && user?.role === 'admin' && (
+      {currentTab === 11 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3897,6 +3753,15 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
+      {currentTab === 12 && user?.role === 'admin' && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <FederationSettings />
+        </motion.div>
+      )}
 
       {/* Confirmation Dialogs */}
       
