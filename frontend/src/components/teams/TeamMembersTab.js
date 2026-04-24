@@ -22,6 +22,11 @@ import {
 } from '@mui/icons-material';
 import { useTeam } from '../../contexts/TeamContext';
 import { useMessaging } from '../../contexts/MessagingContext';
+import PresenceIndicator from '../messaging/PresenceIndicator';
+import {
+  mergePresenceFromContextAndRest,
+  getEffectiveDisplayStatus,
+} from '../../utils/effectivePresence';
 import { useAuth } from '../../contexts/AuthContext';
 import TeamInviteDialog from './TeamInviteDialog';
 import teamService from '../../services/teams/TeamService';
@@ -36,7 +41,7 @@ const TeamMembersTab = ({ teamId }) => {
     updateMemberRole,
     isLoading
   } = useTeam();
-  const { createRoom, openRoom, loadRooms } = useMessaging();
+  const { createRoom, openRoom, loadRooms, presence, presenceTick } = useMessaging();
   const [anchorEl, setAnchorEl] = useState(null);
   const [selectedMember, setSelectedMember] = useState(null);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
@@ -149,18 +154,38 @@ const TeamMembersTab = ({ teamId }) => {
       
       <Grid container spacing={2}>
         {/* Active Members */}
-        {members.map((member) => (
+        {members.map((member) => {
+          void presenceTick;
+          const merged = mergePresenceFromContextAndRest(presence[member.user_id], member);
+          const displayStatus = getEffectiveDisplayStatus(merged);
+          return (
           <Grid item xs={12} sm={6} md={4} key={member.user_id}>
             <Card>
               <CardContent>
                 <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                  {member.avatar_url ? (
-                    <Avatar src={member.avatar_url} sx={{ width: 48, height: 48, mr: 2 }} />
-                  ) : (
-                    <Avatar sx={{ width: 48, height: 48, mr: 2, bgcolor: 'primary.main' }}>
-                      <Person />
-                    </Avatar>
-                  )}
+                  <Box sx={{ position: 'relative', mr: 2 }}>
+                    {member.avatar_url ? (
+                      <Avatar src={member.avatar_url} sx={{ width: 48, height: 48 }} />
+                    ) : (
+                      <Avatar sx={{ width: 48, height: 48, bgcolor: 'primary.main' }}>
+                        <Person />
+                      </Avatar>
+                    )}
+                    <Box
+                      sx={{
+                        position: 'absolute',
+                        bottom: 2,
+                        right: 2,
+                      }}
+                    >
+                      <PresenceIndicator
+                        status={displayStatus}
+                        lastSeenAt={merged.last_seen_at}
+                        statusMessage={merged.status_message}
+                        size="medium"
+                      />
+                    </Box>
+                  </Box>
                   <Box sx={{ flexGrow: 1 }}>
                     <Typography variant="h6">
                       {member.display_name || member.username}
@@ -171,16 +196,6 @@ const TeamMembersTab = ({ teamId }) => {
                         size="small"
                         color={member.role === 'admin' ? 'primary' : 'default'}
                       />
-                      {member.is_online && (
-                        <Box
-                          sx={{
-                            width: 8,
-                            height: 8,
-                            borderRadius: '50%',
-                            bgcolor: 'success.main'
-                          }}
-                        />
-                      )}
                     </Box>
                   </Box>
                   {isAdmin && member.user_id !== user?.user_id && (
@@ -205,7 +220,8 @@ const TeamMembersTab = ({ teamId }) => {
               </CardContent>
             </Card>
           </Grid>
-        ))}
+          );
+        })}
 
         {/* Pending Invitations */}
         {pendingInvitations.map((invitation) => (

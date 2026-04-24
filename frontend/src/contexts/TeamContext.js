@@ -253,10 +253,22 @@ export const TeamProvider = ({ children }) => {
   const loadTeamPosts = useCallback(async (teamId, limit = 20, beforePostId = null) => {
     try {
       const response = await teamService.getTeamPosts(teamId, limit, beforePostId);
-      setTeamPosts(prev => ({
-        ...prev,
-        [teamId]: response.posts || []
-      }));
+      const incoming = response.posts || [];
+      setTeamPosts(prev => {
+        if (!beforePostId) {
+          return { ...prev, [teamId]: incoming };
+        }
+        const existing = prev[teamId] || [];
+        const seen = new Set(existing.map(p => p.post_id));
+        const merged = [...existing];
+        for (const p of incoming) {
+          if (p?.post_id != null && !seen.has(p.post_id)) {
+            merged.push(p);
+            seen.add(p.post_id);
+          }
+        }
+        return { ...prev, [teamId]: merged };
+      });
       return response;
     } catch (error) {
       console.error('Failed to load team posts:', error);

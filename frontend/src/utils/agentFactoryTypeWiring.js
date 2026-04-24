@@ -196,8 +196,6 @@ export function indexActionsByName(actions) {
   return byName;
 }
 
-const REF_PATTERN = /\{([^}]+)\}/;
-
 /**
  * Extract {ref} placeholders from a prompt template (e.g. for LLM task steps).
  * @param {string} template - prompt template string
@@ -210,7 +208,20 @@ export function extractPromptPlaceholders(template) {
   return [...new Set(refs)];
 }
 
-const VALID_STEP_TYPES = new Set(['tool', 'llm_task', 'llm_agent', 'approval', 'loop', 'parallel', 'branch', 'deep_agent']);
+const VALID_STEP_TYPES = new Set([
+  'tool',
+  'llm_task',
+  'llm_agent',
+  'approval',
+  'loop',
+  'parallel',
+  'branch',
+  'deep_agent',
+  'browser_authenticate',
+]);
+
+/** Same-phase refs allowed in deep_agent prompts (mirrors backend DEEP_AGENT_SISTER_PHASE_OUTPUT_FIELDS). */
+const DEEP_SISTER_PHASE_FIELDS = new Set(['output', 'feedback', 'score', 'pass']);
 
 function stepHasNonemptyCondition(step) {
   const c = step?.condition;
@@ -280,6 +291,104 @@ export function validateExclusiveConditions(steps) {
 }
 
 /**
+ * @param {string} template
+ * @param {string} fieldLabel
+ * @param {Array<{ key: string, step: object }>} expandedUpstream
+ * @param {Record<string, object>} actionsByName
+ * @param {object} currentStep
+ * @param {Set<string> | null} sisterPhaseNames
+ * @param {boolean} checkToolInputTypes
+ * @param {string | null} toolInputKey
+ * @returns {Array<{ inputKey: string, message: string }>}
+ */
+function collectTemplateRefIssues(
+  template,
+  fieldLabel,
+  expandedUpstream,
+  actionsByName,
+  currentStep,
+  sisterPhaseNames,
+  checkToolInputTypes,
+  toolInputKey,
+) {
+  const issues = [];
+  if (typeof template !== 'string') return issues;
+  const re = /\{([^}]+)\}/g;
+  let m;
+  while ((m = re.exec(template)) !== null) {
+    const ref = m[1].trim();
+    const dot = ref.indexOf('.');
+    if (ref.startsWith('{')) {
+      const inner = ref.replace(/^\{+/, '').trim();
+      if (inner.startsWith('#') || inner.startsWith('/')) continue;
+      issues.push({
+        inputKey: fieldLabel,
+        message:
+          'Double braces detected — use single braces for references (exception: {{#var}}...{{/var}} blocks).',
+      });
+      continue;
+    }
+    if (dot === -1) {
+      if (isRuntimeVar(ref)) continue;
+      issues.push({
+        inputKey: fieldLabel,
+        message: `Invalid reference "{${ref}}": use {output_key.field_name} or a runtime variable.`,
+      });
+      continue;
+    }
+    const refStepKey = ref.slice(0, dot).trim();
+    const refField = ref.slice(dot + 1).trim();
+    const upstreamEntry = expandedUpstream.find((e) => e.key === refStepKey);
+    const upstream = upstreamEntry?.step;
+    if (upstream) {
+      const outputFields = getOutputFieldsForStep(upstream, actionsByName);
+      const outField = outputFields.find((f) => f.name === refField);
+      if (!outField) {
+        issues.push({
+          inputKey: fieldLabel,
+          message: `Upstream step "${refStepKey}" has no output "${refField}".`,
+        });
+        continue;
+      }
+      if (checkToolInputTypes && toolInputKey && currentStep?.step_type === 'tool') {
+        const currentAction = actionsByName[currentStep?.action];
+        const inputFields = currentAction?.input_fields || [];
+        const inField = inputFields.find((f) => f.name === toolInputKey);
+        const targetType = inField?.type || 'text';
+        if (!isTypeCompatible(outField.type || 'text', targetType)) {
+          issues.push({
+            inputKey: fieldLabel,
+            message: `Type mismatch: ${refStepKey}.${refField} is not compatible with ${toolInputKey} (${targetType})`,
+          });
+        }
+      }
+      continue;
+    }
+    if (sisterPhaseNames && sisterPhaseNames.has(refStepKey)) {
+      if (!DEEP_SISTER_PHASE_FIELDS.has(refField)) {
+        issues.push({
+          inputKey: fieldLabel,
+          message: `Unknown field "${refField}" for phase "${refStepKey}" in this deep_agent (use ${[...DEEP_SISTER_PHASE_FIELDS].sort().join(', ')}).`,
+        });
+      }
+      continue;
+    }
+    if (sisterPhaseNames) {
+      issues.push({
+        inputKey: fieldLabel,
+        message: `Unknown upstream step or phase "${refStepKey}" in ${fieldLabel}.`,
+      });
+    } else {
+      issues.push({
+        inputKey: fieldLabel,
+        message: `Unknown upstream step "${refStepKey}" in ${fieldLabel}.`,
+      });
+    }
+  }
+  return issues;
+}
+
+/**
  * Validate playbook step wirings: references must point to upstream steps and compatible output fields.
  * Also warns when a tool step has a required input with no value wired.
  * @param {Array<{ name?: string, action?: string, output_key?: string, inputs?: Record<string, string> }>} steps
@@ -289,6 +398,7 @@ export function validateExclusiveConditions(steps) {
 export function validatePlaybookWiring(steps, actionsByName) {
   const errors = [];
   if (!Array.isArray(steps) || !actionsByName) return errors;
+  const stepTypesHuman = [...VALID_STEP_TYPES].sort().join(', ');
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const stepName = step?.name || step?.output_key || step?.action || `Step ${i + 1}`;
@@ -300,17 +410,7 @@ export function validatePlaybookWiring(steps, actionsByName) {
         stepIndex: i,
         stepName,
         inputKey: 'step_type',
-        message: `Invalid step_type "${stepType}". Must be one of: tool, llm_task, llm_agent, approval, loop, parallel, branch, deep_agent.`,
-      });
-    }
-
-    if (stepType === 'llm_agent' && !(step?.available_tools?.length)) {
-      errors.push({
-        stepIndex: i,
-        stepName,
-        inputKey: 'available_tools',
-        message:
-          'llm_agent step has no available_tools. Fix: add available_tools list with action names (e.g. ["send_email", "list_todos"]).',
+        message: `Invalid step_type "${stepType}". Must be one of: ${stepTypesHuman}.`,
       });
     }
 
@@ -336,63 +436,71 @@ export function validatePlaybookWiring(steps, actionsByName) {
     const upstreamSteps = steps.slice(0, i);
     const expandedUpstream = [];
     for (const s of upstreamSteps) {
-      for (const { step } of getStepsWithOutputs(s)) {
-        const key = step.output_key || step.name || step.action;
-        if (key) expandedUpstream.push({ key, step });
+      for (const { step: innerStep } of getStepsWithOutputs(s)) {
+        const key = innerStep.output_key || innerStep.name || innerStep.action;
+        if (key) expandedUpstream.push({ key, step: innerStep });
       }
     }
+
+    let sisterPhaseNames = null;
+    if (stepType === 'deep_agent' && Array.isArray(step.phases)) {
+      sisterPhaseNames = new Set(step.phases.map((p) => (p?.name || '').trim()).filter(Boolean));
+    }
+
+    const pushTemplateIssues = (tpl, fld, sisters, checkTypes, toolIk) => {
+      const batch = collectTemplateRefIssues(
+        tpl,
+        fld,
+        expandedUpstream,
+        actionsByName,
+        step,
+        sisters,
+        checkTypes,
+        toolIk,
+      );
+      for (const iss of batch) {
+        errors.push({
+          stepIndex: i,
+          stepName,
+          inputKey: iss.inputKey,
+          message: iss.message,
+        });
+      }
+    };
+
     for (const [inputKey, value] of Object.entries(inputs)) {
       if (typeof value !== 'string') continue;
-      const match = value.match(REF_PATTERN);
-      if (!match) continue;
-      const ref = match[1].trim();
-      const dot = ref.indexOf('.');
-      if (dot === -1) {
-        if (isRuntimeVar(ref)) continue;
-        errors.push({
-          stepIndex: i,
-          stepName,
-          inputKey,
-          message: `Invalid reference "${value}": use {step_name.field_name}`,
+      pushTemplateIssues(
+        value,
+        inputKey,
+        stepType === 'deep_agent' ? sisterPhaseNames : null,
+        true,
+        inputKey,
+      );
+    }
+
+    if (stepType === 'llm_task' || stepType === 'llm_agent') {
+      const prompt = step.prompt || step.prompt_template || '';
+      pushTemplateIssues(prompt, 'prompt', null, false, null);
+    }
+
+    if (stepType === 'deep_agent') {
+      (step.phases || []).forEach((phase, pj) => {
+        if (!phase || typeof phase !== 'object') return;
+        const pname = (phase.name || '').trim() || `phase_${pj}`;
+        ['prompt', 'criteria'].forEach((key) => {
+          const val = phase[key];
+          if (typeof val === 'string') {
+            pushTemplateIssues(val, `phases[${pj}].${key} (${pname})`, sisterPhaseNames, false, null);
+          }
         });
-        continue;
-      }
-      const refStepKey = ref.slice(0, dot).trim();
-      const refField = ref.slice(dot + 1).trim();
-      const upstreamEntry = expandedUpstream.find((e) => e.key === refStepKey);
-      const upstream = upstreamEntry?.step;
-      if (!upstream) {
-        errors.push({
-          stepIndex: i,
-          stepName,
-          inputKey,
-          message: `Unknown upstream step "${refStepKey}" in ${value}`,
-        });
-        continue;
-      }
-      const outputFields = getOutputFieldsForStep(upstream, actionsByName);
-      const outField = outputFields.find((f) => f.name === refField);
-      if (!outField) {
-        errors.push({
-          stepIndex: i,
-          stepName,
-          inputKey,
-          message: `Upstream step "${refStepKey}" has no output "${refField}"`,
-        });
-        continue;
-      }
-      const currentAction = actionsByName[step?.action];
-      const inputFields = currentAction?.input_fields || [];
-      const inField = inputFields.find((f) => f.name === inputKey);
-      const targetType = inField?.type || 'text';
-      if (!isTypeCompatible(outField.type || 'text', targetType)) {
-        errors.push({
-          stepIndex: i,
-          stepName,
-          inputKey,
-          message: `Type mismatch: ${refStepKey}.${refField} (${outField.type || 'text'}) is not compatible with ${inputKey} (${targetType})`,
-        });
-      }
+      });
+      ['output_template', 'prompt', 'prompt_template'].forEach((tk) => {
+        const tv = step[tk];
+        if (typeof tv === 'string' && tv.trim()) {
+          pushTemplateIssues(tv, tk, sisterPhaseNames, false, null);
+        }
+      });
     }
   }
   return errors;

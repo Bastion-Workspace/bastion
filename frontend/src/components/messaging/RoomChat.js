@@ -19,6 +19,10 @@ import {
 import { ArrowBack, Search, Close, Hub } from '@mui/icons-material';
 import { useMessaging } from '../../contexts/MessagingContext';
 import PresenceIndicator from './PresenceIndicator';
+import {
+  getEffectiveDisplayStatus,
+  summarizeTeamPresence,
+} from '../../utils/effectivePresence';
 import messagingService from '../../services/messagingService';
 import apiService from '../../services/apiService';
 import TeamInvitationMessage from './TeamInvitationMessage';
@@ -37,6 +41,7 @@ const RoomChat = () => {
     editMessage,
     selectRoom,
     presence,
+    presenceTick,
     federatedPresenceByPeer,
     federatedAttachmentsByMessage,
     federatedReadReceiptByRoom,
@@ -210,6 +215,7 @@ const RoomChat = () => {
 
   if (!currentRoom) return null;
 
+  void presenceTick;
   const currentUserId = user?.user_id;
   const otherParticipants = currentRoom.participants?.filter(p => p.user_id !== currentUserId) || [];
   const peerSt = federationRoomStatus?.federation_peer_status;
@@ -237,6 +243,12 @@ const RoomChat = () => {
     ? federatedReadReceiptByRoom[currentRoom.room_id]
     : null;
 
+  const teamPresenceSummary =
+    currentRoom.team_id && currentRoom.room_type !== 'federated'
+      ? summarizeTeamPresence(currentRoom.participants, currentUserId, presence)
+      : null;
+  const teamHeaderOthers = teamPresenceSummary?.others?.slice(0, 4) || [];
+
   const mergeMessageAttachments = (messageId) => {
     const base = messageAttachments[messageId] || [];
     const extra = federatedAttachmentsByMessage[messageId] || [];
@@ -258,11 +270,45 @@ const RoomChat = () => {
             )}
           </Box>
           {!currentRoom.team_id && otherParticipants.length > 0 && currentRoom.room_type !== 'federated' && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <PresenceIndicator status={presence[otherParticipants[0].user_id]?.status || 'offline'} size="small" />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+              <PresenceIndicator
+                status={getEffectiveDisplayStatus(presence[otherParticipants[0].user_id])}
+                lastSeenAt={presence[otherParticipants[0].user_id]?.last_seen_at}
+                size="small"
+              />
               <Typography variant="caption" color="text.secondary">
-                {presence[otherParticipants[0].user_id]?.status || 'offline'}
+                {getEffectiveDisplayStatus(presence[otherParticipants[0].user_id])}
               </Typography>
+            </Box>
+          )}
+          {currentRoom.team_id && currentRoom.room_type !== 'federated' && teamPresenceSummary && teamPresenceSummary.memberCount > 0 && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mt: 0.5 }}>
+              <Typography variant="caption" color="text.secondary">
+                {teamPresenceSummary.memberCount} member{teamPresenceSummary.memberCount !== 1 ? 's' : ''}
+                {' · '}
+                {teamPresenceSummary.activeCount} active
+              </Typography>
+              {teamHeaderOthers.length > 0 && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                  {teamHeaderOthers.map((p, idx) => {
+                    const st = getEffectiveDisplayStatus(presence[p.user_id]);
+                    const initial = (p.display_name || p.username || '?').charAt(0).toUpperCase();
+                    return (
+                      <Box key={p.user_id || idx} sx={{ position: 'relative', display: 'inline-flex' }}>
+                        <Avatar sx={{ width: 28, height: 28, fontSize: 13 }}>{initial}</Avatar>
+                        <Box sx={{ position: 'absolute', bottom: 0, right: 0 }}>
+                          <PresenceIndicator
+                            status={st}
+                            lastSeenAt={presence[p.user_id]?.last_seen_at}
+                            size="small"
+                            showTooltip={false}
+                          />
+                        </Box>
+                      </Box>
+                    );
+                  })}
+                </Box>
+              )}
             </Box>
           )}
           {currentRoom.room_type === 'federated' && (

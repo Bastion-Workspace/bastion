@@ -1125,37 +1125,42 @@ class MessagingService:
             logger.error(f"❌ Failed to get room participant presence: {e}")
             return {}
     
-    async def cleanup_stale_presence(self) -> int:
+    async def cleanup_stale_presence(self) -> List[str]:
         """
-        Mark users as offline if they haven't updated presence recently
-        
+        Mark users as offline if they haven't updated presence recently.
+
         Returns:
-            Number of users marked offline
+            user_id values that were updated to offline (for WebSocket broadcast).
         """
         await self._ensure_initialized()
-        
+
         try:
             async with self.db_pool.acquire() as conn:
                 threshold = datetime.utcnow() - timedelta(seconds=settings.PRESENCE_OFFLINE_THRESHOLD_SECONDS)
-                
-                result = await conn.execute("""
+
+                rows = await conn.fetch(
+                    """
                     UPDATE user_presence
                     SET status = 'offline'
                     WHERE status != 'offline'
                     AND last_seen_at < $1
-                """, threshold)
-                
-                # Extract count from "UPDATE N" result
-                count = int(result.split()[-1]) if result.startswith("UPDATE") else 0
-                
-                if count > 0:
-                    logger.info(f"🧹 Marked {count} users as offline due to inactivity")
-                
-                return count
-        
+                    RETURNING user_id
+                    """,
+                    threshold,
+                )
+
+                user_ids = [str(r["user_id"]) for r in rows]
+                if user_ids:
+                    logger.info(
+                        "Marked %d users offline due to stale presence (threshold %ss)",
+                        len(user_ids),
+                        settings.PRESENCE_OFFLINE_THRESHOLD_SECONDS,
+                    )
+                return user_ids
+
         except Exception as e:
-            logger.error(f"❌ Failed to cleanup stale presence: {e}")
-            return 0
+            logger.error(f"Failed to cleanup stale presence: {e}")
+            return []
     
     async def get_unread_counts(self, user_id: str) -> Dict[str, int]:
         """

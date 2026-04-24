@@ -68,6 +68,13 @@ export const PROMPT_VARIABLES = [
   { key: 'last_tool_results', group: 'other', label: 'Last tool results', description: 'JSON of the most recent tool results from the conversation. Empty if none.', alwaysAvailable: false },
   { key: 'document_context', group: 'other', label: 'Pinned document content', description: 'Full content of the pinned document (when one is set). Empty if no pin.', alwaysAvailable: false },
   { key: 'pinned_document_id', group: 'other', label: 'Pinned document ID', description: 'Document ID of the pinned document. Empty if no pin.', alwaysAvailable: false },
+  {
+    key: 'current_item',
+    group: 'other',
+    label: 'Fan-out item',
+    description: 'Current list element when llm_agent/deep_agent uses fan_out (default item_variable).',
+    alwaysAvailable: false,
+  },
 ];
 
 const MANIFEST_KEYS = new Set(PROMPT_VARIABLES.map((v) => v.key));

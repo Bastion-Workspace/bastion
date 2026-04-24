@@ -103,15 +103,84 @@ async def _build_user_memory_for_prompt(user_id: str, grpc_request) -> str:
     return "\n\n".join(parts)
 
 
-async def _resolve_agent_handle(handle: str, user_id: str) -> Optional[str]:
-    """Resolve an @handle to an agent_profile_id. Returns None if not found."""
-    from services.database_manager.database_helpers import fetch_one
-    row = await fetch_one(
-        "SELECT id FROM agent_profiles WHERE user_id = $1 AND handle = $2 AND is_active = true",
-        user_id,
+class AmbiguousAgentMentionError(Exception):
+    """Raised when multiple owned/shared agent profiles share the same @handle for a user."""
+
+    def __init__(self, handle: str, candidate_ids: List[str]):
+        self.handle = handle
+        self.candidate_ids = list(candidate_ids)
+        preview = ", ".join(self.candidate_ids[:8])
+        suffix = "…" if len(self.candidate_ids) > 8 else ""
+        super().__init__(
+            f"Ambiguous @mention '{handle}': multiple agents match. "
+            f"Pick one from the @ menu (disambiguated by owner). IDs: {preview}{suffix}"
+        )
+
+
+async def _list_agent_profile_candidates_for_handle(handle: str, user_id: str) -> List[Dict[str, Any]]:
+    """Profiles the user may @mention: owned or shared (active, chat_visible, exact handle)."""
+    from services.database_manager.database_helpers import fetch_all
+
+    rows = await fetch_all(
+        """
+        SELECT p.id::text AS id, p.user_id::text AS owner_user_id
+        FROM agent_profiles p
+        WHERE p.handle = $1
+          AND p.is_active = true
+          AND COALESCE(p.chat_visible, true) = true
+          AND (
+            p.user_id = $2
+            OR EXISTS (
+              SELECT 1 FROM agent_artifact_shares sh
+              WHERE sh.artifact_type = 'agent_profile'
+                AND sh.artifact_id = p.id
+                AND sh.shared_with_user_id = $2
+            )
+          )
+        ORDER BY CASE WHEN p.user_id = $2 THEN 0 ELSE 1 END, p.id::text
+        """,
         handle,
+        user_id,
     )
-    return str(row["id"]) if row else None
+    return list(rows or [])
+
+
+async def _verify_user_can_use_agent_profile(profile_id: str, user_id: str) -> bool:
+    """True if user owns the profile or has a share grant (any transitive chain counts for use)."""
+    from services.database_manager.database_helpers import fetch_one
+
+    row = await fetch_one(
+        """
+        SELECT p.id FROM agent_profiles p
+        WHERE p.id = $1::uuid
+          AND (
+            p.user_id = $2
+            OR EXISTS (
+              SELECT 1 FROM agent_artifact_shares sh
+              WHERE sh.artifact_type = 'agent_profile'
+                AND sh.artifact_id = p.id
+                AND sh.shared_with_user_id = $2
+            )
+          )
+        LIMIT 1
+        """,
+        profile_id,
+        user_id,
+    )
+    return row is not None
+
+
+async def _resolve_agent_handle(handle: str, user_id: str) -> Optional[str]:
+    """Resolve an @handle to a single agent_profile_id, or None if not found.
+
+    Raises AmbiguousAgentMentionError if multiple profiles share the handle for this user.
+    """
+    rows = await _list_agent_profile_candidates_for_handle(handle, user_id)
+    if len(rows) == 1:
+        return str(rows[0]["id"])
+    if len(rows) > 1:
+        raise AmbiguousAgentMentionError(handle, [str(r["id"]) for r in rows])
+    return None
 
 
 async def _resolve_team_handle(handle: str, user_id: str) -> Optional[str]:
@@ -395,6 +464,29 @@ class GRPCContextGatherer:
                 _line = str(_line).strip()
                 request_context["line_id"] = _line
                 request_context["team_id"] = _line  # mirror for legacy metadata consumers
+
+            # Explicit Agent Factory routing from UI (disambiguated @mention): must be accessible (owned or shared).
+            _apid = (request_context.get("agent_profile_id") or "").strip()
+            if _apid:
+                if not await _verify_user_can_use_agent_profile(_apid, user_id):
+                    raise ValueError(f"Agent profile {_apid} not found or not accessible for this user")
+                try:
+                    from services.database_manager.database_helpers import fetch_one
+
+                    prow = await fetch_one(
+                        "SELECT handle FROM agent_profiles WHERE id = $1::uuid",
+                        _apid,
+                    )
+                    h = (prow or {}).get("handle") or ""
+                    if h:
+                        q0 = (grpc_request.query or "").strip()
+                        m_strip = re.match(rf"^@{re.escape(str(h))}\s+", q0, re.IGNORECASE)
+                        if m_strip:
+                            grpc_request.query = q0[m_strip.end() :].lstrip()
+                except ValueError:
+                    raise
+                except Exception as strip_err:
+                    logger.debug("Optional @strip for explicit agent_profile_id skipped: %s", strip_err)
 
             cw_id = (request_context.get("code_workspace_id") or "").strip()
             if cw_id:

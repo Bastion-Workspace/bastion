@@ -534,6 +534,8 @@ class MessagingService {
           this.roomUpdateHandlers.forEach(handler => handler(data));
         } else if (data.type === 'mention_notification') {
           this.roomUpdateHandlers.forEach(handler => handler(data));
+        } else if (data.type === 'agent_handles_changed') {
+          this.roomUpdateHandlers.forEach(handler => handler(data));
         }
       } catch (error) {
         console.error('❌ Failed to parse user WebSocket message:', error);

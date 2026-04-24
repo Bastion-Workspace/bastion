@@ -1164,9 +1164,11 @@ export const ChatSidebarProvider = ({ children }) => {
   // Poll task status for async orchestrator
   // pollTaskStatus removed - no longer needed since we removed async fallback
 
-  const sendMessage = async (executionMode = 'auto', overrideQuery = null) => {
+  const sendMessage = async (executionMode = 'auto', overrideQuery = null, sendOptions = null) => {
     // ROOSEVELT'S HITL SUPPORT: Allow override query for direct API calls without state dependency
     let actualQuery = overrideQuery || query.trim();
+    const agentProfileIdFromMention =
+      sendOptions && typeof sendOptions === 'object' ? sendOptions.agent_profile_id : null;
     
     // Handle reply: prepend quoted message if replying
     if (replyToMessage && !overrideQuery) {
@@ -1249,7 +1251,9 @@ export const ChatSidebarProvider = ({ children }) => {
         devLog('🌊 Using streaming for ALL queries');
         
         // Use streaming endpoint for ALL real-time responses
-        await handleStreamingResponse(currentQuery, conversationId, sessionId);
+        await handleStreamingResponse(currentQuery, conversationId, sessionId, {
+          agent_profile_id: agentProfileIdFromMention || undefined,
+        });
         
       } catch (error) {
         console.error('❌ LangGraph failed:', error);
@@ -1270,7 +1274,7 @@ export const ChatSidebarProvider = ({ children }) => {
 
   // Handle streaming response from orchestrator
   const handleStreamingResponse = async (query, conversationId, sessionId, streamOptions = {}) => {
-    const { isBranchResend, branchMessageId } = streamOptions;
+    const { isBranchResend, branchMessageId, agent_profile_id: streamAgentProfileId } = streamOptions;
     devLog('🌊 Starting streaming response for:', query);
     
     try {
@@ -1517,6 +1521,7 @@ export const ChatSidebarProvider = ({ children }) => {
           is_branch_resend: !!isBranchResend,
           branch_message_id: branchMessageId || undefined,
           code_workspace_id: codeWorkspaceIdPayload || undefined,
+          agent_profile_id: streamAgentProfileId || undefined,
         })
       });
 
@@ -2091,8 +2096,8 @@ export const ChatSidebarProvider = ({ children }) => {
   const stableCreateNewConversation = useCallback(() => {
     chatSidebarActionsRef.current.createNewConversation();
   }, []);
-  const stableSendMessage = useCallback((executionMode, overrideQuery) => {
-    return chatSidebarActionsRef.current.sendMessage(executionMode, overrideQuery);
+  const stableSendMessage = useCallback((executionMode, overrideQuery, sendOptions) => {
+    return chatSidebarActionsRef.current.sendMessage(executionMode, overrideQuery, sendOptions);
   }, []);
   const stableClearChat = useCallback(() => {
     chatSidebarActionsRef.current.clearChat();

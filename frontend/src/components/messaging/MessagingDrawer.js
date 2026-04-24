@@ -1,8 +1,5 @@
 /**
- * Roosevelt's Messaging Drawer
- * Collapsible drawer for user-to-user messaging
- * 
- * BULLY! The messaging cavalry interface!
+ * Collapsible drawer for user-to-user messaging.
  */
 
 import React, { useState } from 'react';
@@ -30,6 +27,10 @@ import {
 } from '@mui/icons-material';
 import { useMessaging } from '../../contexts/MessagingContext';
 import PresenceIndicator from './PresenceIndicator';
+import {
+  getEffectiveDisplayStatus,
+  summarizeTeamPresence,
+} from '../../utils/effectivePresence';
 import RoomChat from './RoomChat';
 import CreateRoomModal from './CreateRoomModal';
 import RoomContextMenu from './RoomContextMenu';
@@ -47,6 +48,7 @@ const MessagingDrawer = () => {
     selectRoom,
     currentRoomId,
     presence,
+    presenceTick,
     deleteRoom,
     isMessagingFullScreen,
     toggleFullScreen,
@@ -80,8 +82,12 @@ const MessagingDrawer = () => {
     }
   };
 
-  const getUserPresence = (userId) => {
-    return presence[userId]?.status || 'offline';
+  const getUserPresenceDisplay = (userId) => {
+    void presenceTick;
+    const raw = presence[userId];
+    const status = getEffectiveDisplayStatus(raw);
+    const lastSeenAt = raw?.last_seen_at ?? null;
+    return { status, lastSeenAt };
   };
 
   const handleContextMenu = (event, room) => {
@@ -180,15 +186,18 @@ const MessagingDrawer = () => {
             </ListItem>
           ) : (
             rooms.map((room) => {
-              // Find the other participant (the one who isn't the current user)
-              // We use user?.user_id for current user context, falling back to room.created_by if needed
+              void presenceTick;
               const currentUserId = user?.user_id;
               const otherUser = room.participants?.find(p => p.user_id !== currentUserId);
               const displayName = room.display_name || room.room_name || 'Unnamed Room';
-              const userStatus = otherUser ? getUserPresence(otherUser.user_id) : 'offline';
               const isTeamRoom = !!room.team_id;
               const isFederated = room.room_type === 'federated';
-              
+              const directDisplay = otherUser ? getUserPresenceDisplay(otherUser.user_id) : { status: 'offline', lastSeenAt: null };
+              const teamSummary = isTeamRoom
+                ? summarizeTeamPresence(room.participants, currentUserId, presence)
+                : null;
+              const teamAvatarOthers = teamSummary?.others?.slice(0, 4) || [];
+
               return (
                 <ListItemButton
                   key={room.room_id}
@@ -197,23 +206,65 @@ const MessagingDrawer = () => {
                   selected={currentRoomId === room.room_id}
                 >
                   <ListItemAvatar>
-                    <Box sx={{ position: 'relative' }}>
-                      <Avatar>
-                        {displayName.charAt(0).toUpperCase()}
-                      </Avatar>
-                      {!isTeamRoom && (
-                        <Box
-                          sx={{
-                            position: 'absolute',
-                            bottom: 0,
-                            right: 0,
-                          }}
-                        >
-                          <PresenceIndicator
-                            status={userStatus}
-                            size="small"
-                            showTooltip={false}
-                          />
+                    <Box sx={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                      {isTeamRoom && teamAvatarOthers.length > 0 ? (
+                        <Box sx={{ display: 'flex', alignItems: 'center', pl: 0.5 }}>
+                          {teamAvatarOthers.map((p, idx) => {
+                            const disp = getUserPresenceDisplay(p.user_id);
+                            const initial = (p.display_name || p.username || '?').charAt(0).toUpperCase();
+                            return (
+                              <Box
+                                key={p.user_id || idx}
+                                sx={{
+                                  position: 'relative',
+                                  ml: idx > 0 ? -1 : 0,
+                                  zIndex: teamAvatarOthers.length - idx,
+                                }}
+                              >
+                                <Avatar sx={{ width: 32, height: 32, fontSize: 14 }}>
+                                  {initial}
+                                </Avatar>
+                                <Box
+                                  sx={{
+                                    position: 'absolute',
+                                    bottom: 0,
+                                    right: 0,
+                                  }}
+                                >
+                                  <PresenceIndicator
+                                    status={disp.status}
+                                    lastSeenAt={disp.lastSeenAt}
+                                    size="small"
+                                    showTooltip={false}
+                                  />
+                                </Box>
+                              </Box>
+                            );
+                          })}
+                        </Box>
+                      ) : isTeamRoom ? (
+                        <Avatar>
+                          {displayName.charAt(0).toUpperCase()}
+                        </Avatar>
+                      ) : (
+                        <Box sx={{ position: 'relative' }}>
+                          <Avatar>
+                            {displayName.charAt(0).toUpperCase()}
+                          </Avatar>
+                          <Box
+                            sx={{
+                              position: 'absolute',
+                              bottom: 0,
+                              right: 0,
+                            }}
+                          >
+                            <PresenceIndicator
+                              status={directDisplay.status}
+                              lastSeenAt={directDisplay.lastSeenAt}
+                              size="small"
+                              showTooltip={false}
+                            />
+                          </Box>
                         </Box>
                       )}
                     </Box>
@@ -234,7 +285,20 @@ const MessagingDrawer = () => {
                         )}
                       </Box>
                     }
-                    secondary={formatLastMessage(room.last_message_at)}
+                    secondary={
+                      <Box component="span" sx={{ display: 'block' }}>
+                        <Typography variant="caption" color="text.secondary" component="span" display="block">
+                          {formatLastMessage(room.last_message_at)}
+                        </Typography>
+                        {isTeamRoom && teamSummary && teamSummary.memberCount > 0 && (
+                          <Typography variant="caption" color="text.secondary" component="span" display="block">
+                            {teamSummary.memberCount} member{teamSummary.memberCount !== 1 ? 's' : ''}
+                            {' · '}
+                            {teamSummary.activeCount} active
+                          </Typography>
+                        )}
+                      </Box>
+                    }
                   />
                 </ListItemButton>
               );

@@ -10,6 +10,7 @@ Format LLM Markdown for messaging platforms.
 """
 
 import re
+from typing import List, Optional, Tuple
 
 # Telegram allows: <b>, <strong>, <i>, <em>, <u>, <ins>, <s>, <strike>, <del>, <code>, <pre>.
 # We escape & < > in the whole string first, then add tags, so literal characters are safe.
@@ -54,6 +55,76 @@ def markdown_to_telegram_html(text: str) -> str:
     )
     # Strikethrough: ~~text~~
     out = re.sub(r"~~(.+?)~~", lambda m: "<s>" + m.group(1) + "</s>", out)
+    return out
+
+
+# Tags produced by markdown_to_telegram_html (Telegram HTML parse_mode).
+_TELEGRAM_BODY_TAG_RE = re.compile(r"<(/?)(b|i|code|pre|s)\b[^>]*>", re.I)
+
+
+def _telegram_html_fragment_tags_balanced(fragment: str) -> bool:
+    """True if fragment has no dangling <b>, <pre>, etc. (stack empty at end)."""
+    if not fragment:
+        return True
+    if re.search(r"<[^>]*$", fragment):
+        return False
+    stack: List[str] = []
+    for m in _TELEGRAM_BODY_TAG_RE.finditer(fragment):
+        is_close = m.group(1) == "/"
+        tag = m.group(2).lower()
+        if is_close:
+            if not stack or stack[-1] != tag:
+                return False
+            stack.pop()
+        else:
+            stack.append(tag)
+    return len(stack) == 0
+
+
+def _strip_telegram_html_to_plain(s: str) -> str:
+    """Remove formatting tags for parse_mode=None fallback (avoids entity parse errors)."""
+    t = _TELEGRAM_BODY_TAG_RE.sub("", s)
+    return t.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def split_telegram_html_for_sends(html: str, max_len: int = 4096) -> List[Tuple[str, Optional[str]]]:
+    """
+    Split Telegram HTML into chunks <= max_len without breaking tag boundaries.
+
+    Returns list of (text, parse_mode): parse_mode is \"HTML\" or None (plain text fallback
+    when no balanced prefix fits in max_len, e.g. an oversized <pre> block).
+    """
+    if not html:
+        return []
+    if len(html) <= max_len:
+        return [(html, "HTML")]
+    out: List[Tuple[str, Optional[str]]] = []
+    pos = 0
+    n = len(html)
+    while pos < n:
+        if pos + max_len >= n:
+            tail = html[pos:]
+            if _telegram_html_fragment_tags_balanced(tail):
+                out.append((tail, "HTML"))
+            else:
+                out.append((_strip_telegram_html_to_plain(tail), None))
+            break
+        end_limit = pos + max_len
+        cut: Optional[int] = None
+        for c in range(end_limit, pos, -1):
+            if _telegram_html_fragment_tags_balanced(html[pos:c]):
+                cut = c
+                break
+        if cut is not None:
+            out.append((html[pos:cut], "HTML"))
+            pos = cut
+        else:
+            frag = html[pos:end_limit]
+            if _telegram_html_fragment_tags_balanced(frag):
+                out.append((frag, "HTML"))
+            else:
+                out.append((_strip_telegram_html_to_plain(frag), None))
+            pos = end_limit
     return out
 
 

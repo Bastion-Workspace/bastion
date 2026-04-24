@@ -12,23 +12,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import asyncpg
 
+from services.playbook_contracts import VALID_DEEP_AGENT_PHASE_TYPES, VALID_PLAYBOOK_STEP_TYPES
+
 logger = logging.getLogger(__name__)
 
 VALID_USER_FACTS_POLICY_VALUES = frozenset({"inherit", "no_write", "isolated"})
 
-VALID_STEP_TYPES = frozenset(
-    {
-        "tool",
-        "llm_task",
-        "llm_agent",
-        "approval",
-        "loop",
-        "parallel",
-        "branch",
-        "deep_agent",
-        "browser_authenticate",
-    }
-)
+VALID_STEP_TYPES = VALID_PLAYBOOK_STEP_TYPES
 
 
 def _rls(user_id: Optional[str], role: str = "user") -> Dict[str, str]:
@@ -843,7 +833,7 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
             if not isinstance(phases, list):
                 warnings.append(f"step {i} ({name_str or '?'}): deep_agent step requires 'phases' (list)")
             else:
-                valid_phase_types = {"reason", "act", "search", "evaluate", "synthesize", "refine"}
+                valid_phase_types = VALID_DEEP_AGENT_PHASE_TYPES
                 seen_phase_names: set = set()
                 phase_name_to_type: Dict[str, str] = {}
                 for pj, phase in enumerate(phases):

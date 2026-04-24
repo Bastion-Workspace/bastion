@@ -181,27 +181,63 @@ class AgentProfileHandlersMixin:
             if not raw:
                 return tool_service_pb2.ResolveAgentHandleResponse(found=False)
 
-            # 1) Exact handle match
-            row = await fetch_one(
-                "SELECT id, name FROM agent_profiles WHERE user_id = $1 AND handle = $2 AND is_active = true",
-                user_id,
+            # 1) Exact handle match (owned or shared-with-user)
+            handle_rows = await fetch_all(
+                """
+                SELECT id, name FROM agent_profiles p
+                WHERE p.handle = $1 AND p.is_active = true
+                  AND COALESCE(p.chat_visible, true) = true
+                  AND (
+                    p.user_id = $2
+                    OR EXISTS (
+                      SELECT 1 FROM agent_artifact_shares sh
+                      WHERE sh.artifact_type = 'agent_profile'
+                        AND sh.artifact_id = p.id
+                        AND sh.shared_with_user_id = $2
+                    )
+                  )
+                ORDER BY CASE WHEN p.user_id = $2 THEN 0 ELSE 1 END, p.id::text
+                """,
                 raw,
+                user_id,
                 rls_context=ctx,
             )
-            if row:
+            if len(handle_rows) == 1:
+                row = handle_rows[0]
                 return tool_service_pb2.ResolveAgentHandleResponse(
                     agent_profile_id=str(row["id"]),
                     agent_name=row.get("name") or raw,
                     found=True,
                 )
+            if len(handle_rows) > 1:
+                logger.warning(
+                    "ResolveAgentHandle: ambiguous handle %r matches %s profiles for user_id=%s",
+                    raw[:80],
+                    len(handle_rows),
+                    user_id,
+                )
+                return tool_service_pb2.ResolveAgentHandleResponse(found=False)
 
             # 2) Agent profile UUID (workers sometimes paste ids from briefings)
             try:
                 uid = uuid.UUID(raw)
                 row = await fetch_one(
-                    "SELECT id, name FROM agent_profiles WHERE user_id = $1 AND id = $2 AND is_active = true",
-                    user_id,
+                    """
+                    SELECT id, name FROM agent_profiles p
+                    WHERE p.id = $1 AND p.is_active = true
+                      AND (
+                        p.user_id = $2
+                        OR EXISTS (
+                          SELECT 1 FROM agent_artifact_shares sh
+                          WHERE sh.artifact_type = 'agent_profile'
+                            AND sh.artifact_id = p.id
+                            AND sh.shared_with_user_id = $2
+                        )
+                      )
+                    LIMIT 1
+                    """,
                     uid,
+                    user_id,
                     rls_context=ctx,
                 )
                 if row:
@@ -216,9 +252,18 @@ class AgentProfileHandlersMixin:
             # 3) Unique display name (case-insensitive) — matches "send to your manager (Name)" style prompts
             rows = await fetch_all(
                 """
-                SELECT id, name FROM agent_profiles
-                WHERE user_id = $1 AND is_active = true
+                SELECT id, name FROM agent_profiles p
+                WHERE p.is_active = true
                   AND LOWER(TRIM(COALESCE(name, ''))) = LOWER(TRIM($2))
+                  AND (
+                    p.user_id = $1
+                    OR EXISTS (
+                      SELECT 1 FROM agent_artifact_shares sh
+                      WHERE sh.artifact_type = 'agent_profile'
+                        AND sh.artifact_id = p.id
+                        AND sh.shared_with_user_id = $1
+                    )
+                  )
                 """,
                 user_id,
                 raw,

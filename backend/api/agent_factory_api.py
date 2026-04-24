@@ -25,6 +25,20 @@ from services import agent_skills_service
 logger = logging.getLogger(__name__)
 
 
+async def _notify_agent_handles_for_profile(profile_id: str) -> None:
+    """Push user WebSocket hint so @mention menus refresh (owner + share recipients)."""
+    try:
+        from services.agent_handles_notify import (
+            collect_users_for_agent_profile_handle_notifications,
+            notify_agent_handles_changed,
+        )
+
+        uids = await collect_users_for_agent_profile_handle_notifications(str(profile_id))
+        await notify_agent_handles_changed(uids)
+    except Exception as e:
+        logger.warning("agent_handles_changed notify failed for profile %s: %s", profile_id, e)
+
+
 def _api_user_rls(user_id: str) -> Dict[str, str]:
     """RLS session context for Agent Factory HTTP handlers (matches database_manager GUC keys)."""
     return {"user_id": user_id, "user_role": "user"}
@@ -2034,17 +2048,73 @@ def _derive_profile_status(is_active: bool, last_execution_status: Optional[str]
 async def list_handles(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> JSONResponse:
-    """Lightweight list of agent and team handles for @mention autocomplete (handle, name, type)."""
+    """Lightweight list of agent and team handles for @mention autocomplete (handle, name, type).
+
+    Agents include owned profiles and profiles shared with the user (non-transitive shares only).
+    Each agent row includes id, ownership, and owner display fields for UI disambiguation.
+    """
     from services.database_manager.database_helpers import fetch_all
-    agent_rows = await fetch_all(
-        "SELECT handle, name FROM agent_profiles WHERE user_id = $1 AND is_active = true AND handle IS NOT NULL AND handle != '' AND chat_visible = true ORDER BY name",
+
+    owned_rows = await fetch_all(
+        """
+        SELECT p.id, p.handle, p.name, p.user_id::text AS owner_user_id,
+               u.username AS owner_username,
+               COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS owner_display_name,
+               'owned'::text AS ownership
+        FROM agent_profiles p
+        JOIN users u ON u.user_id = p.user_id
+        WHERE p.user_id = $1
+          AND p.is_active = true
+          AND p.handle IS NOT NULL AND TRIM(p.handle) <> ''
+          AND COALESCE(p.chat_visible, true) = true
+        """,
         current_user.user_id,
     )
+    shared_rows = await fetch_all(
+        """
+        SELECT p.id, p.handle, p.name, p.user_id::text AS owner_user_id,
+               u.username AS owner_username,
+               COALESCE(NULLIF(TRIM(u.display_name), ''), u.username) AS owner_display_name,
+               'shared'::text AS ownership
+        FROM agent_profiles p
+        JOIN agent_artifact_shares s
+          ON s.artifact_type = 'agent_profile'
+         AND s.artifact_id = p.id
+         AND s.shared_with_user_id = $1
+         AND COALESCE(s.is_transitive, false) = false
+        JOIN users u ON u.user_id = p.user_id
+        WHERE p.user_id <> $1
+          AND p.is_active = true
+          AND p.handle IS NOT NULL AND TRIM(p.handle) <> ''
+          AND COALESCE(p.chat_visible, true) = true
+        """,
+        current_user.user_id,
+    )
+    agent_rows = list(owned_rows or []) + list(shared_rows or [])
+    agent_rows.sort(
+        key=lambda r: (
+            (r.get("handle") or "").lower(),
+            0 if (r.get("ownership") or "") == "owned" else 1,
+            (r.get("owner_display_name") or r.get("owner_username") or "").lower(),
+        )
+    )
+    out = [
+        {
+            "handle": r["handle"],
+            "name": r.get("name"),
+            "type": "agent",
+            "id": str(r["id"]),
+            "ownership": r.get("ownership") or "owned",
+            "owner_user_id": r.get("owner_user_id"),
+            "owner_username": r.get("owner_username"),
+            "owner_display_name": r.get("owner_display_name"),
+        }
+        for r in agent_rows
+    ]
     line_rows = await fetch_all(
         "SELECT id, handle, name FROM agent_lines WHERE user_id = $1 AND handle IS NOT NULL AND handle != '' ORDER BY name",
         current_user.user_id,
     )
-    out = [{"handle": r["handle"], "name": r["name"], "type": "agent"} for r in agent_rows]
     out.extend([{"handle": r["handle"], "name": r["name"], "type": "line", "id": str(r["id"])} for r in line_rows])
     return JSONResponse(content=out)
 
@@ -2147,6 +2217,9 @@ async def create_profile(
             current_user.user_id,
             body.model_dump(),
         )
+        pid = out.get("id") if isinstance(out, dict) else None
+        if pid:
+            await _notify_agent_handles_for_profile(str(pid))
         return JSONResponse(content=out, status_code=201)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -2221,6 +2294,7 @@ async def update_profile(
             profile_id,
             updates,
         )
+        await _notify_agent_handles_for_profile(profile_id)
         return JSONResponse(content=out)
     except ValueError as e:
         msg = str(e)
@@ -2249,6 +2323,7 @@ async def pause_profile(
         current_user.user_id,
     )
     row = await fetch_one("SELECT * FROM agent_profiles WHERE id = $1", profile_id)
+    await _notify_agent_handles_for_profile(profile_id)
     return JSONResponse(content=_row_to_profile(row))
 
 
@@ -2272,6 +2347,7 @@ async def resume_profile(
         current_user.user_id,
     )
     row = await fetch_one("SELECT * FROM agent_profiles WHERE id = $1", profile_id)
+    await _notify_agent_handles_for_profile(profile_id)
     return JSONResponse(content=_row_to_profile(row))
 
 
@@ -2383,6 +2459,7 @@ async def delete_profile(
     await settings_service.clear_default_chat_agent_profile_if_matches(
         current_user.user_id, str(profile_id)
     )
+    await _notify_agent_handles_for_profile(profile_id)
     await execute("DELETE FROM agent_profiles WHERE id = $1 AND user_id = $2", profile_id, current_user.user_id)
     return JSONResponse(content={"deleted": True, "id": profile_id})
 
@@ -2398,6 +2475,7 @@ async def reset_profile_defaults(
             current_user.user_id,
             profile_id,
         )
+        await _notify_agent_handles_for_profile(profile_id)
         return JSONResponse(content=row)
     except ValueError as e:
         if "not found" in str(e).lower():
@@ -5177,6 +5255,11 @@ async def create_share(
         }, body.shared_with_user_id)
     except Exception as e:
         logger.warning("WebSocket share notification failed: %s", e)
+    if body.artifact_type == "agent_profile" and body.artifact_id:
+        try:
+            await _notify_agent_handles_for_profile(str(body.artifact_id))
+        except Exception as e:
+            logger.warning("agent_handles_changed after share failed: %s", e)
     return JSONResponse(content=result, status_code=201)
 
 
@@ -5187,7 +5270,20 @@ async def revoke_share(
 ) -> JSONResponse:
     """Revoke a share (owner only). Transitive child shares are auto-deleted."""
     from services import agent_artifact_sharing_service
+    from services.database_manager.database_helpers import fetch_one
+
+    pre = await fetch_one(
+        """
+        SELECT artifact_type, artifact_id::text AS artifact_id
+        FROM agent_artifact_shares
+        WHERE id = $1::uuid AND owner_user_id = $2
+        """,
+        share_id,
+        current_user.user_id,
+    )
     await agent_artifact_sharing_service.revoke_share(share_id, current_user.user_id)
+    if pre and pre.get("artifact_type") == "agent_profile" and pre.get("artifact_id"):
+        await _notify_agent_handles_for_profile(pre["artifact_id"])
     return JSONResponse(content={"revoked": True})
 
 
@@ -5278,5 +5374,8 @@ async def copy_shared_to_mine(
             "DELETE FROM agent_artifact_shares WHERE id = $1",
             parent_share["id"],
         )
+
+    if artifact_type == "agent_profile":
+        await _notify_agent_handles_for_profile(artifact_id)
 
     return JSONResponse(content=result, status_code=201)

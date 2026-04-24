@@ -1,7 +1,7 @@
 """
 Deep Agent Executor - Compiles and runs multi-phase reasoning workflows for the deep_agent playbook step.
 
-Phases: reason, act, search, evaluate, synthesize, refine. Builds a LangGraph StateGraph at runtime,
+Phases: reason, act, search, evaluate, synthesize, refine, rerank. Builds a LangGraph StateGraph at runtime,
 resolves variables from playbook_state + inputs + phase_results, and returns formatted output plus phase_trace.
 """
 
@@ -597,11 +597,20 @@ async def _run_act_node(
     for k, v in namespace.items():
         playbook_state[k] = v
     prompt = resolve_fn(template, namespace)
-    # Phases inherit the full step palette — no per-phase tool narrowing.
-    # Legacy phase-level available_tools are ignored in favour of the resolved palette.
-    phase_tools = list(step_palette_tools or [])
-    if not phase_tools:
-        phase_tools = list(tools_map.keys())
+    # When the act phase sets available_tools/search_tools, restrict to that subset of the
+    # resolved step palette (intersection with tools_map). Empty/absent inherits full palette.
+    phase_only = _ensure_list(phase.get("available_tools")) or _ensure_list(phase.get("search_tools"))
+    if phase_only:
+        phase_tools = [t for t in phase_only if t in tools_map]
+        if step_palette_tools:
+            allowed = set(step_palette_tools)
+            phase_tools = [t for t in phase_tools if t in allowed]
+        if not phase_tools:
+            phase_tools = list(step_palette_tools or []) or list(tools_map.keys())
+    else:
+        phase_tools = list(step_palette_tools or [])
+        if not phase_tools:
+            phase_tools = list(tools_map.keys())
     if parent_step_for_policy and inject_skill_manifest_effective(parent_step_for_policy):
         if "search_and_acquire_skills" in tools_map and "search_and_acquire_skills" not in phase_tools:
             phase_tools = list(phase_tools) + ["search_and_acquire_skills"]

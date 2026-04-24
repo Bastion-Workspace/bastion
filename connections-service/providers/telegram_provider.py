@@ -14,7 +14,7 @@ from providers.base_messaging_provider import (
     MessageCallback,
     OutboundImage,
 )
-from providers.formatting import markdown_to_telegram_html
+from providers.formatting import markdown_to_telegram_html, split_telegram_html_for_sends
 
 logger = logging.getLogger(__name__)
 
@@ -246,30 +246,36 @@ class TelegramProvider(BaseMessagingProvider):
             return {"success": False, "error": "Bot not running"}
         bot = self._application.bot
         try:
-            html_text = markdown_to_telegram_html(text) if text else ""
-            # Send agent response text first, then images with captions (so order matches UI)
-            if html_text:
-                while html_text:
-                    chunk = html_text[:4096]
-                    html_text = html_text[4096:]
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=chunk,
-                        parse_mode="HTML",
-                    )
+            html = markdown_to_telegram_html(text) if text else ""
+            for chunk, parse_mode in split_telegram_html_for_sends(html, max_len=4096):
+                if not chunk:
+                    continue
+                send_kw: Dict[str, Any] = {"chat_id": chat_id, "text": chunk}
+                if parse_mode:
+                    send_kw["parse_mode"] = parse_mode
+                await bot.send_message(**send_kw)
             if images:
                 for i, img in enumerate(images):
                     if not img.data or not isinstance(img.data, bytes):
                         logger.warning("Telegram send_message: skipping image with no/invalid data")
                         continue
                     caption = img.caption
-                    cap_html = markdown_to_telegram_html(caption)[:1024] if caption else None
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=img.data,
-                        caption=cap_html,
-                        parse_mode="HTML",
-                    )
+                    cap_html = None
+                    cap_parse: Optional[str] = None
+                    if caption and str(caption).strip():
+                        cap_conv = markdown_to_telegram_html(str(caption).strip())
+                        cap_parts = split_telegram_html_for_sends(cap_conv, max_len=1024)
+                        if cap_parts:
+                            cap_html, cap_pm = cap_parts[0]
+                            cap_parse = cap_pm or None
+                    photo_kw: Dict[str, Any] = {
+                        "chat_id": chat_id,
+                        "photo": img.data,
+                        "caption": cap_html,
+                    }
+                    if cap_html and cap_parse:
+                        photo_kw["parse_mode"] = cap_parse
+                    await bot.send_photo(**photo_kw)
             return {"success": True}
         except Exception as e:
             err_msg = str(e)

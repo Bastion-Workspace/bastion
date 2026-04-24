@@ -7,11 +7,16 @@ Zone 2: create_agent_profile, create_playbook, assign_playbook_to_agent, create_
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field
 
 from orchestrator.backend_tool_client import get_backend_tool_client
+from orchestrator.utils.playbook_contracts import (
+    DEEP_AGENT_SISTER_PHASE_OUTPUT_FIELDS,
+    VALID_DEEP_AGENT_PHASE_TYPES,
+    VALID_PLAYBOOK_STEP_TYPES,
+)
 from orchestrator.utils.action_io_registry import (
     get_all_actions,
     get_actions_by_category,
@@ -424,7 +429,7 @@ class ValidatePlaybookWiringOutputs(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
-VALID_STEP_TYPES = frozenset({"tool", "llm_task", "llm_agent", "approval", "loop", "parallel", "branch", "deep_agent"})
+VALID_STEP_TYPES = VALID_PLAYBOOK_STEP_TYPES
 
 # Runtime variables that can be referenced without a dot (e.g. {today})
 RUNTIME_VARS = frozenset({
@@ -439,6 +444,7 @@ RUNTIME_VARS = frozenset({
     "editor_is_first_section", "editor_is_last_section", "editor_ref_count",
     "document_context", "pinned_document_id", "last_tool_results",
     "profile",
+    "current_item",  # fan_out default item_variable injected into playbook_state
 })
 
 _REF_PATTERN = re.compile(r"\{([^}]+)\}")
@@ -497,6 +503,100 @@ def _expand_upstream_steps(steps_before: List[Dict[str, Any]]) -> List[Dict[str,
     return expanded
 
 
+def _scan_template_for_ref_issues(
+    template: str,
+    field_label: str,
+    upstream_by_key: Dict[str, Dict[str, Any]],
+    actions_by_name: Dict[str, Any],
+    current_step: Dict[str, Any],
+    *,
+    sister_phase_names: Optional[Set[str]] = None,
+    check_tool_input_types: bool = False,
+    tool_input_key: Optional[str] = None,
+) -> List[tuple]:
+    """Return list of (field_label, message) for each invalid {ref} in template."""
+    issues: List[tuple] = []
+    if not isinstance(template, str):
+        return issues
+    for match in _REF_PATTERN.finditer(template):
+        ref = match.group(1).strip()
+        dot = ref.find(".")
+        if ref.startswith("{"):
+            inner = ref.lstrip("{").strip()
+            if inner.startswith("#") or inner.startswith("/"):
+                continue
+            if inner in RUNTIME_VARS:
+                hint = f"replace {{{{{inner}}}}} with {{{inner}}}"
+            else:
+                hint = (
+                    f"replace {{{{{inner}}}}} with {{upstream_output_key.formatted}} using the actual output_key of an upstream step"
+                )
+            issues.append((field_label, f"Double braces detected — {hint}. Never use {{{{double}}}} braces."))
+            continue
+        if dot == -1:
+            if _is_runtime_var(ref):
+                continue
+            issues.append(
+                (
+                    field_label,
+                    f'Invalid reference "{{{ref}}}": use {{output_key.field_name}} or runtime var (today, today_end, tomorrow, query, history).',
+                )
+            )
+            continue
+        ref_step_key = ref[:dot].strip()
+        ref_field = ref[dot + 1:].strip()
+        upstream = upstream_by_key.get(ref_step_key)
+        if upstream:
+            output_fields = _get_output_fields_for_step(upstream, actions_by_name)
+            out_field = next((f for f in output_fields if f.get("name") == ref_field), None)
+            if not out_field:
+                issues.append(
+                    (
+                        field_label,
+                        f'Upstream step "{ref_step_key}" has no output "{ref_field}". '
+                        f'Fix: use .formatted or .raw (e.g. {{{ref_step_key}.formatted}}), or declare "{ref_field}" in that step\'s output_schema.properties.',
+                    )
+                )
+                continue
+            if check_tool_input_types and tool_input_key:
+                current_action = actions_by_name.get(current_step.get("action") or "")
+                input_fields = (current_action or {}).get("input_fields") or []
+                in_field = next((f for f in input_fields if f.get("name") == tool_input_key), None)
+                target_type = (in_field or {}).get("type") or "text"
+                if not is_type_compatible((out_field or {}).get("type") or "text", target_type):
+                    issues.append(
+                        (
+                            field_label,
+                            f"Type mismatch: {ref_step_key}.{ref_field} is not compatible with {tool_input_key} ({target_type}). "
+                            f"Fix: wire a different output field (e.g. .formatted for text) or use an upstream step that returns {target_type}.",
+                        )
+                    )
+            continue
+        if sister_phase_names is not None and ref_step_key in sister_phase_names:
+            if ref_field not in DEEP_AGENT_SISTER_PHASE_OUTPUT_FIELDS:
+                issues.append(
+                    (
+                        field_label,
+                        f'Unknown field "{ref_field}" for phase "{ref_step_key}" in the same deep_agent step. '
+                        f'Use one of: {", ".join(sorted(DEEP_AGENT_SISTER_PHASE_OUTPUT_FIELDS))}.',
+                    )
+                )
+            continue
+        if sister_phase_names is not None:
+            issues.append(
+                (
+                    field_label,
+                    f'Unknown upstream step or phase "{ref_step_key}" in {field_label}. '
+                    "Use the output_key of a prior step or the name of another phase in this deep_agent.",
+                )
+            )
+        else:
+            issues.append(
+                (field_label, f'Unknown upstream step "{ref_step_key}" in {field_label}. Use the output_key of a prior step.')
+            )
+    return issues
+
+
 def _validate_playbook_wiring(steps: List[Dict[str, Any]], actions_by_name: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
     Validate playbook step wirings. Returns list of {step_index, step_name, input_key, message}.
@@ -505,6 +605,7 @@ def _validate_playbook_wiring(steps: List[Dict[str, Any]], actions_by_name: Dict
     errors: List[Dict[str, Any]] = []
     if not isinstance(steps, list) or not actions_by_name:
         return errors
+    step_types_human = ", ".join(sorted(VALID_STEP_TYPES))
     for i, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
@@ -513,20 +614,18 @@ def _validate_playbook_wiring(steps: List[Dict[str, Any]], actions_by_name: Dict
         step_type = step.get("step_type") or "tool"
 
         if step_type and step_type not in VALID_STEP_TYPES:
-            errors.append({
-                "step_index": i,
-                "step_name": step_name,
-                "input_key": "step_type",
-                "message": (
-                    f'Invalid step_type "{step_type}". '
-                    f'Must be one of: tool, llm_task, llm_agent, approval, loop, parallel, branch, deep_agent. '
-                    f'Fix: use "tool" for action calls, "llm_task" for LLM prompts, "deep_agent" for multi-phase workflows with a "phases" list.'
-                ),
-            })
-
-        # llm_agent may have empty available_tools for conversational/reasoning-only steps (toolless agent)
-        if step_type == "llm_agent":
-            pass  # available_tools is optional; empty list is valid for reasoning-only steps
+            errors.append(
+                {
+                    "step_index": i,
+                    "step_name": step_name,
+                    "input_key": "step_type",
+                    "message": (
+                        f'Invalid step_type "{step_type}". Must be one of: {step_types_human}. '
+                        'Fix: use "tool" for action calls, "llm_task" for LLM prompts, "deep_agent" for multi-phase workflows, '
+                        '"browser_authenticate" for browser login flows.'
+                    ),
+                }
+            )
 
         if step_type == "tool" and step.get("action"):
             action = actions_by_name.get(step["action"])
@@ -536,107 +635,72 @@ def _validate_playbook_wiring(steps: List[Dict[str, Any]], actions_by_name: Dict
                     continue
                 val = inputs.get(field["name"])
                 if val is None or (isinstance(val, str) and not val.strip()):
-                    errors.append({
-                        "step_index": i,
-                        "step_name": step_name,
-                        "input_key": field["name"],
-                        "message": f'Required input "{field["name"]}" has no value. Wire it to an upstream step (e.g. {{step_1.formatted}}) or enter a literal (e.g. {{today}}).',
-                    })
+                    errors.append(
+                        {
+                            "step_index": i,
+                            "step_name": step_name,
+                            "input_key": field["name"],
+                            "message": (
+                                f'Required input "{field["name"]}" has no value. Wire it to an upstream step '
+                                f"(e.g. {{step_1.formatted}}) or enter a literal (e.g. {{today}})."
+                            ),
+                        }
+                    )
 
         expanded_upstream = _expand_upstream_steps(steps[:i])
         upstream_by_key = {e["key"]: e["step"] for e in expanded_upstream}
 
-        def _add_ref_error(input_key: str, value: str, message: str) -> None:
-            errors.append({"step_index": i, "step_name": step_name, "input_key": input_key, "message": message})
+        sister_names: Optional[Set[str]] = None
+        if step_type == "deep_agent":
+            phases_list = step.get("phases") if isinstance(step.get("phases"), list) else []
+            sister_names = {
+                (p.get("name") or "").strip()
+                for p in phases_list
+                if isinstance(p, dict) and (p.get("name") or "").strip()
+            }
+
+        def _emit_template_issues(
+            template: str,
+            fld: str,
+            *,
+            sisters: Optional[Set[str]] = None,
+            check_types: bool = False,
+            tool_ik: Optional[str] = None,
+        ) -> None:
+            for fld_out, msg in _scan_template_for_ref_issues(
+                template,
+                fld,
+                upstream_by_key,
+                actions_by_name,
+                step,
+                sister_phase_names=sisters,
+                check_tool_input_types=check_types,
+                tool_input_key=tool_ik,
+            ):
+                errors.append({"step_index": i, "step_name": step_name, "input_key": fld_out, "message": msg})
 
         for input_key, value in (inputs or {}).items():
-            if not isinstance(value, str):
-                continue
-            for match in _REF_PATTERN.finditer(value):
-                ref = match.group(1).strip()
-                dot = ref.find(".")
-                # Detect double-brace: {{foo}} causes ref to start with "{"
-                if ref.startswith("{"):
-                    inner = ref.lstrip("{").strip()
-                    # Skip {{#var}} and {{/var}} — valid conditional block syntax
-                    if inner.startswith("#") or inner.startswith("/"):
-                        continue
-                    if inner in RUNTIME_VARS:
-                        hint = f"replace {{{{{inner}}}}} with {{{inner}}}"
-                    else:
-                        hint = f"replace {{{{{inner}}}}} with {{upstream_output_key.formatted}} using the actual output_key of an upstream step"
-                    _add_ref_error(input_key, value, f"Double braces detected — {hint}. Never use {{{{double}}}} braces.")
-                    continue
-                if dot == -1:
-                    if _is_runtime_var(ref):
-                        continue
-                    _add_ref_error(input_key, value, f'Invalid reference "{{{ref}}}": use {{output_key.field_name}} or runtime var (today, today_end, tomorrow, query, history).')
-                    continue
-                ref_step_key = ref[:dot].strip()
-                ref_field = ref[dot + 1:].strip()
-                upstream = upstream_by_key.get(ref_step_key)
-                if not upstream:
-                    _add_ref_error(input_key, value, f'Unknown upstream step "{ref_step_key}" in {value}. Use the output_key of a prior step.')
-                    continue
-                output_fields = _get_output_fields_for_step(upstream, actions_by_name)
-                out_field = next((f for f in output_fields if f.get("name") == ref_field), None)
-                if not out_field:
-                    _add_ref_error(
-                        input_key,
-                        value,
-                        f'Upstream step "{ref_step_key}" has no output "{ref_field}". '
-                        f'Fix: use .formatted or .raw (e.g. {{{ref_step_key}.formatted}}), or declare "{ref_field}" in that step\'s output_schema.properties.',
-                    )
-                    continue
-                current_action = actions_by_name.get(step.get("action") or "")
-                input_fields = (current_action or {}).get("input_fields") or []
-                in_field = next((f for f in input_fields if f.get("name") == input_key), None)
-                target_type = (in_field or {}).get("type") or "text"
-                if not is_type_compatible((out_field or {}).get("type") or "text", target_type):
-                    _add_ref_error(
-                        input_key,
-                        value,
-                        f'Type mismatch: {ref_step_key}.{ref_field} is not compatible with {input_key} ({target_type}). '
-                        f'Fix: wire a different output field (e.g. .formatted for text) or use an upstream step that returns {target_type}.',
-                    )
+            if isinstance(value, str):
+                _emit_template_issues(value, input_key, sisters=None, check_types=True, tool_ik=input_key)
 
         if step_type in ("llm_task", "llm_agent"):
             prompt = step.get("prompt") or step.get("prompt_template") or ""
-            if isinstance(prompt, str):
-                for match in _REF_PATTERN.finditer(prompt):
-                    ref = match.group(1).strip()
-                    dot = ref.find(".")
-                    # Detect double-brace: {{foo}} causes ref to start with "{"
-                    if ref.startswith("{"):
-                        inner = ref.lstrip("{").strip()
-                        # Skip {{#var}} and {{/var}} — valid conditional block syntax
-                        if inner.startswith("#") or inner.startswith("/"):
-                            continue
-                        if inner in RUNTIME_VARS:
-                            hint = f"replace {{{{{inner}}}}} with {{{inner}}}"
-                        else:
-                            hint = f"replace {{{{{inner}}}}} with {{upstream_output_key.formatted}} using the actual output_key of an upstream step"
-                        _add_ref_error("prompt", prompt[:80] + "..." if len(prompt) > 80 else prompt, f"Double braces detected — {hint}. Never use {{{{double}}}} braces.")
-                        continue
-                    if dot == -1:
-                        if _is_runtime_var(ref):
-                            continue
-                        _add_ref_error("prompt", prompt[:80] + "..." if len(prompt) > 80 else prompt, f'Invalid reference "{{{ref}}}": use {{output_key.field}} or runtime var.')
-                        continue
-                    ref_step_key = ref[:dot].strip()
-                    ref_field = ref[dot + 1:].strip()
-                    upstream = upstream_by_key.get(ref_step_key)
-                    if not upstream:
-                        _add_ref_error("prompt", ref, f'Unknown upstream step "{ref_step_key}" in prompt. Use output_key of a prior step.')
-                        continue
-                    output_fields = _get_output_fields_for_step(upstream, actions_by_name)
-                    if not next((f for f in output_fields if f.get("name") == ref_field), None):
-                        _add_ref_error(
-                            "prompt",
-                            ref,
-                            f'Upstream step "{ref_step_key}" has no output "{ref_field}". '
-                            f'Fix: use .formatted or .raw (e.g. {{{ref_step_key}.formatted}}), or declare "{ref_field}" in that step\'s output_schema.properties.',
-                        )
+            _emit_template_issues(prompt, "prompt", sisters=None)
+
+        if step_type == "deep_agent":
+            phases_list = step.get("phases") if isinstance(step.get("phases"), list) else []
+            for pj, phase in enumerate(phases_list):
+                if not isinstance(phase, dict):
+                    continue
+                pname = (phase.get("name") or "").strip() or f"phase_{pj}"
+                for key in ("prompt", "criteria"):
+                    val = phase.get(key)
+                    if isinstance(val, str):
+                        _emit_template_issues(val, f"phases[{pj}].{key} ({pname})", sisters=sister_names)
+            for tmpl_key in ("output_template", "prompt", "prompt_template"):
+                tv = step.get(tmpl_key)
+                if isinstance(tv, str) and tv.strip():
+                    _emit_template_issues(tv, tmpl_key, sisters=sister_names)
 
     return errors
 
@@ -801,7 +865,7 @@ def _validate_playbook_steps(steps: List[Dict[str, Any]]) -> List[str]:
             if not isinstance(phases, list):
                 warnings.append(f"step {i} ({name or '?'}): deep_agent step requires 'phases' (list)")
             else:
-                valid_phase_types = {"reason", "act", "search", "evaluate", "synthesize", "refine"}
+                valid_phase_types = VALID_DEEP_AGENT_PHASE_TYPES
                 for pj, phase in enumerate(phases):
                     if not isinstance(phase, dict):
                         warnings.append(f"step {i} ({name or '?'}): phase {pj} must be an object")
@@ -906,12 +970,16 @@ async def list_available_actions_tool(
             "- ALWAYS WRONG: {{today_iso}}, {{weather_report}}, {{summary_text}} — double braces (except {{#var}} and {{/var}}) and invented names are never valid. "
             "CORRECT: {today} for today's date, {my_step.formatted} for an upstream step's output (use its output_key). "
             "There is no {{today_iso}} — use {today}. There is no {{weather_report}} — use {get_weather.formatted}.\n"
-            "- step_type must be EXACTLY one of: tool, llm_task, llm_agent, approval, loop, parallel, branch, deep_agent. "
+            "- step_type must be EXACTLY one of: tool, llm_task, llm_agent, approval, loop, parallel, branch, deep_agent, browser_authenticate. "
             "Never use tool_call, llm_call, llm_analysis, analysis, or any other name.\n"
             "- llm_agent = ONE step where the LLM runs a ReAct loop and may call tools (which tools and how many times is decided by the LLM, up to max_iterations). Use llm_agent when the task needs dynamic tool choice or multi-step reasoning; use multiple tool steps when the sequence is fixed (e.g. get_weather -> llm_task -> send_email).\n"
             "- llm_agent available_tools: list of action names the agent can call (e.g. [\"send_email\", \"list_todos\"]). "
             "May be empty for conversational/reasoning-only steps (toolless agent: one LLM call, no tool loop).\n"
-            "- deep_agent = ONE step that runs a multi-phase LangGraph workflow. Requires a \"phases\" list; each phase has type (reason, act, search, evaluate, synthesize, refine), name, and optional prompt/available_tools/criteria/target. Use deep_agent when you need a fixed sequence of distinct phases (e.g. reason -> search -> evaluate -> synthesize) with different prompts or tools per phase; use llm_agent when you want a single ReAct loop with free-form tool choice.\n"
+            "- deep_agent = ONE step that runs a multi-phase LangGraph workflow. Requires a \"phases\" list; each phase has type "
+            "(reason, act, search, evaluate, synthesize, refine, rerank), name, and optional prompt/available_tools/search_tools/criteria/target/source_phase/top_n. "
+            "rerank: optional phase after search; uses rerank_documents from the tool palette; source_phase names the search phase whose raw_results to rerank (or defaults to the latest search with raw_results). "
+            "act: optional per-phase available_tools narrows the ReAct mini-loop to a subset of the step's resolved tool palette (omit or leave empty to inherit the full palette). "
+            "Step-level output_phase (name of a phase) and output_template (string with {phase.field} refs) control the formatted string returned by the step; output_template wins when both are set.\n"
             "\nSKILLS & DISCOVERY (llm_agent and deep_agent steps):\n"
             "- skill_ids: list of skill UUID strings. Call list_skills first and use each skill's id field (not name or slug). Alias \"skills\" is accepted. Pinned skills are always attached regardless of discovery_mode.\n"
             "- discovery_mode (or skill_discovery_mode): \"off\" | \"auto\" | \"catalog\" | \"full\". If omitted, effective mode is typically auto (same as Workflow Composer default).\n"

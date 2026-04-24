@@ -1,6 +1,6 @@
 /**
  * Phase list editor for deep_agent steps. Ordered list of phases with add/remove/reorder,
- * per-phase config: name, type (reason, act, search, evaluate, synthesize, refine), type-specific fields.
+ * per-phase config: name, type (reason, act, search, evaluate, synthesize, refine, rerank), type-specific fields.
  */
 
 import React, { useState, useMemo, useCallback } from 'react';
@@ -42,6 +42,7 @@ const PHASE_TYPES = [
   { value: 'evaluate', label: 'Evaluate' },
   { value: 'synthesize', label: 'Synthesize' },
   { value: 'refine', label: 'Refine' },
+  { value: 'rerank', label: 'Rerank' },
 ];
 
 const STARTER_TEMPLATES = [
@@ -301,7 +302,9 @@ export default function DeepAgentPhaseEditor({
         Phases (ordered)
       </Typography>
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-        Add phases to define the reasoning workflow. Reason / Synthesize / Refine use prompts; Act and Search use tools; Evaluate uses criteria and routing.
+        Add phases to define the reasoning workflow. Reason / Synthesize / Refine use prompts; Act and Search use
+        tools; Evaluate uses criteria and routing; Rerank reorders raw_results from a search phase (needs
+        rerank_documents in the step tool palette).
       </Typography>
       {phases.map((phase, idx) => (
         <Accordion
@@ -343,7 +346,7 @@ export default function DeepAgentPhaseEditor({
               </Select>
             </FormControl>
 
-            {(phase?.type || 'reason') !== 'evaluate' && (
+            {(phase?.type || 'reason') !== 'evaluate' && (phase?.type || 'reason') !== 'rerank' && (
               <>
                 <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
                   Prompt
@@ -492,8 +495,8 @@ export default function DeepAgentPhaseEditor({
                 />
                 <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
                   {!(Array.isArray(phase?.available_tools) && phase.available_tools.length > 0)
-                    ? 'This phase uses all tools from the step palette.'
-                    : 'Restrict to a subset of step-level tools:'}
+                    ? 'This phase inherits the full resolved tool palette for the step (same tools as leaving the checklist unchecked).'
+                    : 'Only the selected tools are passed to this act phase’s mini ReAct loop (must be a subset of the step palette).'}
                 </Typography>
                 {(!(Array.isArray(phase?.available_tools) && phase.available_tools.length > 0) && stepPaletteTools?.length > 0) ? (
                   <Typography variant="body2" color="text.secondary" sx={{ py: 0.5 }}>
@@ -575,6 +578,45 @@ export default function DeepAgentPhaseEditor({
                     />
                   </>
                 )}
+              </>
+            )}
+
+            {(phase?.type || 'reason') === 'rerank' && (
+              <>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                  Reranks raw_results from a search phase using the rerank_documents tool. Ensure that tool is in the
+                  step-level palette. Leave source empty to use the latest search phase with raw_results.
+                </Typography>
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Source search phase</InputLabel>
+                  <Select
+                    value={phase?.source_phase ?? ''}
+                    label="Source search phase"
+                    onChange={(e) => updatePhase(idx, { source_phase: e.target.value || undefined })}
+                    disabled={readOnly}
+                    displayEmpty
+                    MenuProps={STEP_DRAWER_SELECT_MENU_PROPS}
+                  >
+                    <MenuItem value="">
+                      <em>Auto (latest with raw_results)</em>
+                    </MenuItem>
+                    {phaseNames.map((n) => (
+                      <MenuItem key={`src-${n}`} value={n}>
+                        {n}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <TextField
+                  size="small"
+                  type="number"
+                  label="Top N after rerank"
+                  value={phase?.top_n ?? 10}
+                  onChange={(e) => updatePhase(idx, { top_n: Math.max(1, parseInt(e.target.value, 10) || 10) })}
+                  inputProps={{ min: 1, max: 100 }}
+                  disabled={readOnly}
+                  fullWidth
+                />
               </>
             )}
 

@@ -1,8 +1,5 @@
 /**
- * Roosevelt's Presence Indicator
- * Status dot component for online/offline/away states
- * 
- * BULLY! A simple but effective visual indicator!
+ * Status dot for online / away / offline presence.
  */
 
 import React from 'react';

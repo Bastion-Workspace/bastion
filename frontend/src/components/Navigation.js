@@ -199,7 +199,7 @@ const Navigation = () => {
     .map((p) => navItems.find((i) => i.path === p))
     .filter(Boolean);
   const unpinnedItems = navItems.filter((i) => !pinnedPaths.includes(i.path));
-  const pagesNavBadgeCount = navItems.reduce((sum, item) => sum + (item.badge || 0), 0);
+  const pagesNavBadgeCount = unpinnedItems.reduce((sum, item) => sum + (item.badge || 0), 0);
 
   const isActive = (path) => location.pathname === path;
 

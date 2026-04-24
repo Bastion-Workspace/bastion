@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Box,
   TextField,
@@ -76,6 +76,8 @@ const ChatInputArea = () => {
   // File attachment state
   const [selectedFiles, setSelectedFiles] = useState([]);
   const fileInputRef = useRef(null);
+  /** When user picks a disambiguated agent from the @ menu, pass its profile id on send (see sendOptions). */
+  const lastInsertedMentionRef = useRef(null);
 
   // @mention autocomplete for Agent Factory
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
@@ -91,6 +93,31 @@ const ChatInputArea = () => {
     { handle: 'auto', name: 'Auto-route (clear agent lock)', isAuto: true },
     ...agentHandles,
   ];
+  const handleDupCounts = useMemo(() => {
+    const c = {};
+    for (const h of agentHandles || []) {
+      if (!h || h.type === 'line') continue;
+      const k = (h.handle || '').toLowerCase();
+      if (!k) continue;
+      c[k] = (c[k] || 0) + 1;
+    }
+    return c;
+  }, [agentHandles]);
+
+  const agentMentionSecondary = (h) => {
+    if (!h || h.isAuto) return h?.name || '';
+    if (h.type === 'line' || h.type === 'team') {
+      return h.name ? `${h.name} (line)` : '(line)';
+    }
+    const nm = h.name || '';
+    const owner = h.owner_display_name || h.owner_username || '';
+    const shared = h.ownership === 'shared';
+    const dup = (handleDupCounts[(h.handle || '').toLowerCase()] || 0) > 1;
+    if (shared || dup) {
+      return owner ? `${nm ? `${nm} · ` : ''}Owner: ${owner}` : nm || '';
+    }
+    return nm || '';
+  };
   const lastAt = (inputValue || '').lastIndexOf('@');
   const afterAt = lastAt >= 0 ? (inputValue || '').slice(lastAt + 1) : '';
   const mentionOpen = lastAt >= 0 && !afterAt.includes(' ');
@@ -135,6 +162,7 @@ const ChatInputArea = () => {
   // Keep local input in sync when context query changes externally (e.g., clear, conversation switch)
   useEffect(() => {
     setInputValue(query || '');
+    lastInsertedMentionRef.current = null;
   }, [query]);
 
   const chatModels = getSelectableChatModels(enabledModelsData);
@@ -147,16 +175,27 @@ const ChatInputArea = () => {
     setSelectedModel(newModel);
   };
 
+  const mentionSendOptionsForText = (text) => {
+    const lm = lastInsertedMentionRef.current;
+    if (!lm?.handle || !lm?.agent_profile_id) return undefined;
+    const m = (text || '').trim().match(/^@([\w-]+)(\s|$)/);
+    if (m && m[1] === lm.handle) {
+      return { agent_profile_id: lm.agent_profile_id };
+    }
+    return undefined;
+  };
+
   const handleSendMessage = async () => {
     const trimmed = (inputValue || '').trim();
     if (!trimmed && selectedFiles.length === 0) return;
-    
+    const sendOpts = mentionSendOptionsForText(trimmed);
+
     // If we have files, we need to send message first to get message_id, then upload files
     if (selectedFiles.length > 0 && currentConversationId) {
       try {
         // Send message first (even if empty, to get message_id)
         const messageContent = trimmed || '📎 Attached files';
-        sendMessage('auto', messageContent);
+        sendMessage('auto', messageContent, sendOpts);
         
         // Get the message_id from the response (we'll need to wait for it)
         // For now, we'll upload files after a short delay
@@ -186,9 +225,11 @@ const ChatInputArea = () => {
       }
     } else {
       // No files, send normally
-      sendMessage('auto', trimmed);
+      sendMessage('auto', trimmed, sendOpts);
     }
-    
+
+    lastInsertedMentionRef.current = null;
+
     // Clear local and context input after sending
     setInputValue('');
     setQuery('');
@@ -226,9 +267,22 @@ const ChatInputArea = () => {
     fileInputRef.current?.click();
   };
 
-  const insertMention = (handle) => {
+  const insertMention = (opt) => {
+    if (!opt) return;
     const before = (inputValue || '').slice(0, lastAt);
-    setInputValue(before + '@' + handle + ' ');
+    if (opt.isAuto) {
+      lastInsertedMentionRef.current = null;
+      setInputValue(before + '@auto ');
+      return;
+    }
+    const h = opt.handle || '';
+    if (!h) return;
+    setInputValue(before + '@' + h + ' ');
+    if (opt.id && opt.type !== 'line' && opt.type !== 'team') {
+      lastInsertedMentionRef.current = { handle: h, agent_profile_id: String(opt.id) };
+    } else {
+      lastInsertedMentionRef.current = null;
+    }
   };
 
   const handleKeyDown = (e) => {
@@ -245,7 +299,7 @@ const ChatInputArea = () => {
       }
       if (e.key === 'Enter') {
         e.preventDefault();
-        insertMention(filteredHandles[clampedMentionIndex].handle);
+        insertMention(filteredHandles[clampedMentionIndex]);
         return;
       }
     }
@@ -581,7 +635,17 @@ const ChatInputArea = () => {
           multiline
           maxRows={4}
           value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
+          onChange={(e) => {
+            const v = e.target.value;
+            setInputValue(v);
+            const lm = lastInsertedMentionRef.current;
+            if (lm?.handle) {
+              const m = v.match(/^@([\w-]+)(\s|$)/);
+              if (!m || m[1] !== lm.handle) {
+                lastInsertedMentionRef.current = null;
+              }
+            }
+          }}
           onKeyDown={handleKeyDown}
           onKeyPress={handleKeyPress}
           placeholder="Type your message... Use @ to mention an agent"
@@ -605,9 +669,15 @@ const ChatInputArea = () => {
             <List dense>
               {filteredHandles.slice(0, 8).map((h, i) => (
                 <ListItemButton
-                  key={h.isAuto ? 'auto' : (h.id || h.handle)}
+                  key={
+                    h.isAuto
+                      ? 'auto'
+                      : h.type === 'line' || h.type === 'team'
+                        ? `line-${h.id || h.handle}`
+                        : `agent-${h.id || h.handle}`
+                  }
                   selected={i === clampedMentionIndex}
-                  onClick={() => insertMention(h.handle)}
+                  onClick={() => insertMention(h)}
                 >
                   {h.isAuto ? (
                     <AutoMode sx={{ mr: 1, fontSize: 18, color: 'text.secondary' }} />
@@ -618,11 +688,7 @@ const ChatInputArea = () => {
                   )}
                   <ListItemText
                     primary={'@' + h.handle}
-                    secondary={
-                      h.type === 'team' || h.type === 'line'
-                        ? (h.name ? `${h.name} (line)` : '(line)')
-                        : (h.name || '')
-                    }
+                    secondary={agentMentionSecondary(h)}
                   />
                 </ListItemButton>
               ))}

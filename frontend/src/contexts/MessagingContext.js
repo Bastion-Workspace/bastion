@@ -3,10 +3,12 @@
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
+import { useQueryClient } from 'react-query';
 import messagingService from '../services/messagingService';
 import { useAuth } from './AuthContext';
 import tabNotificationManager from '../utils/tabNotification';
 import { devLog } from '../utils/devConsole';
+import { invalidateAgentHandlesQuery } from '../services/agentFactoryService';
 
 const MessagingContext = createContext();
 
@@ -20,7 +22,8 @@ export const useMessaging = () => {
 
 export const MessagingProvider = ({ children }) => {
   const { user, isAuthenticated, loading: authLoading } = useAuth();
-  
+  const queryClient = useQueryClient();
+
   devLog('💬 MessagingProvider Render:', { isAuthenticated, user: user?.user_id, authLoading });
   
   // State
@@ -28,6 +31,8 @@ export const MessagingProvider = ({ children }) => {
   const [currentRoomId, setCurrentRoomId] = useState(null);
   const [messages, setMessages] = useState({}); // room_id -> messages array
   const [presence, setPresence] = useState({}); // user_id -> presence info
+  /** Bumps on an interval so staleness-based presence UI re-renders without new WS events. */
+  const [presenceTick, setPresenceTick] = useState(0);
   /** peer_id -> { [user_address]: { status, last_seen_at } } from federated_presence_batch */
   const [federatedPresenceByPeer, setFederatedPresenceByPeer] = useState({});
   /** message_id -> extra attachment rows merged for federated attachment_added WS */
@@ -597,16 +602,26 @@ export const MessagingProvider = ({ children }) => {
     }
   }, [isAuthenticated, user]);
 
-  // Update presence on mount and periodically
+  // Agent Factory: refresh chat @mention handles when server broadcasts a change (share/update/etc.)
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const unregister = messagingService.registerRoomUpdateHandler((data) => {
+      if (data?.type === 'agent_handles_changed') {
+        invalidateAgentHandlesQuery(queryClient);
+      }
+    });
+    return unregister;
+  }, [isAuthenticated, queryClient]);
+
+  // Update presence on mount and periodically (respect tab visibility for away vs online)
   useEffect(() => {
     if (isAuthenticated) {
-      updatePresence('online');
-      
-      // Update presence every 25 seconds
+      updatePresence(typeof document !== 'undefined' && document.hidden ? 'away' : 'online');
+
       presenceUpdateInterval.current = setInterval(() => {
-        updatePresence('online');
+        updatePresence(typeof document !== 'undefined' && document.hidden ? 'away' : 'online');
       }, 25000);
-      
+
       return () => {
         if (presenceUpdateInterval.current) {
           clearInterval(presenceUpdateInterval.current);
@@ -616,6 +631,21 @@ export const MessagingProvider = ({ children }) => {
       };
     }
   }, [isAuthenticated, updatePresence]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onVisibilityChange = () => {
+      updatePresence(document.hidden ? 'away' : 'online');
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, [isAuthenticated, updatePresence]);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const id = setInterval(() => setPresenceTick((t) => t + 1), 15000);
+    return () => clearInterval(id);
+  }, [isAuthenticated]);
 
   // Register global presence handler
   useEffect(() => {
@@ -833,6 +863,7 @@ export const MessagingProvider = ({ children }) => {
     currentRoom,
     messages: currentMessages,
     presence,
+    presenceTick,
     federatedPresenceByPeer,
     federatedAttachmentsByMessage,
     federatedReadReceiptByRoom,

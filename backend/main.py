@@ -86,6 +86,7 @@ _neo4j_maint_task = None
 _neo4j_maint_stop = None
 _vector_maint_task = None
 _vector_maint_stop = None
+_presence_cleanup_task = None
 collection_analysis_service = None
 enhanced_pdf_segmentation_service = None
 category_service = None
@@ -214,6 +215,7 @@ async def lifespan(app: FastAPI):
     global document_service, migration_service, chat_service
     global knowledge_graph_service, collection_analysis_service, enhanced_pdf_segmentation_service
     global _neo4j_maint_task, _neo4j_maint_stop, _vector_maint_task, _vector_maint_stop
+    global _presence_cleanup_task
     global category_service, conversation_service, embedding_manager
     global websocket_manager
     global folder_service
@@ -552,6 +554,34 @@ async def lifespan(app: FastAPI):
         # Proactively refresh expired OAuth (email) tokens on startup
         asyncio.create_task(_refresh_oauth_tokens_on_startup())
 
+        async def _presence_stale_cleanup_loop():
+            from services.messaging.messaging_service import messaging_service
+            from utils.websocket_manager import get_websocket_manager
+
+            while True:
+                try:
+                    await asyncio.sleep(35)
+                    user_ids = await messaging_service.cleanup_stale_presence()
+                    if not user_ids:
+                        continue
+                    ws_mgr = get_websocket_manager()
+                    for uid in user_ids:
+                        try:
+                            await ws_mgr.broadcast_presence_update(uid, "offline")
+                        except Exception as broadcast_err:
+                            logger.warning(
+                                "Presence offline broadcast failed for %s: %s",
+                                uid,
+                                broadcast_err,
+                            )
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning("Presence stale cleanup loop error (non-fatal): %s", e)
+
+        _presence_cleanup_task = asyncio.create_task(_presence_stale_cleanup_loop())
+        logger.info("Presence stale cleanup background task started")
+
         # gRPC Tool Service moved to dedicated tools-service container
 
         from services.document_status_redis_subscriber import (
@@ -575,6 +605,14 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("🔄 Shutting down Plato Knowledge Base...")
+
+    if _presence_cleanup_task:
+        _presence_cleanup_task.cancel()
+        try:
+            await _presence_cleanup_task
+        except asyncio.CancelledError:
+            pass
+        _presence_cleanup_task = None
 
     from services.neo4j_maintenance import cancel_neo4j_maintenance_task
 
