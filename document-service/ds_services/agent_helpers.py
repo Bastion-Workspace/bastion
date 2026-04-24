@@ -5,7 +5,7 @@ FileManager Agent Helpers - Easy-to-use functions for agents to place files
 import logging
 from typing import Optional, Dict, Any, List
 
-from . import get_file_manager
+from .file_manager_service import get_file_manager
 from .models.file_placement_models import FilePlacementRequest, SourceType
 
 logger = logging.getLogger(__name__)

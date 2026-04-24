@@ -60,7 +60,7 @@ async def create_user_file(
             file_manager: FileManagerService = container.file_manager
         else:
             # Fallback: get file manager directly
-            from ds_services import get_file_manager
+            from ds_services.file_manager_service import get_file_manager
             file_manager = await get_file_manager()
         
         # Ensure file manager is initialized
