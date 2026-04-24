@@ -2,19 +2,22 @@
 name = "bastion-local-proxy"
 version = "0.1.0"
 edition = "2021"
-description = "Local proxy daemon for Bastion - system tray, WebSocket connection, screenshot and future capabilities"
+description = "Local proxy daemon for Bastion - system tray, WebSocket, optional native screenshot (xcap), and headless mode"
 authors = ["Bastion"]
 license = "MIT"
 
 [features]
-default = ["gui"]
+default = ["gui", "native-screenshot"]
 gui = ["dep:tray-icon", "dep:muda", "dep:eframe", "dep:egui"]
+# xcap pulls pipewire/libspa; Ubuntu 22.04 / Debian 12 libpipewire headers do not match
+# libspa 0.9.2 (see nashaofu/xcap#247). Headless `.deb` CI builds without this feature.
+native-screenshot = ["dep:xcap"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 futures-util = "0.3"
-xcap = "0.8"
+xcap = { version = "0.8", optional = true }
 image = "0.25"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }

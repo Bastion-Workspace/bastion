@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Feature: **Local proxy** — headless mode (`--headless` / `cargo build --no-default-features`), optional `gui` Cargo feature, Debian `.deb` (`cargo deb`), systemd unit and postinst for `bastion-proxy` user; clearer errors for display-only capabilities on headless hosts.
-- Fix: **Local proxy CI** — build Linux artifacts on `ubuntu-22.04` so `.deb` Depends (`libc6`, `libssl3`) match Debian 12 / older releases instead of `ubuntu-latest` (`libssl3t64`, glibc 2.39+).
+- Fix: **Local proxy CI** — split Linux: desktop binary on `ubuntu-latest` (PipeWire/libspa matches xcap); headless `.deb` on `ubuntu-22.04` with `--no-default-features` (no `native-screenshot` / xcap) for Debian 12–compatible Depends. Optional Cargo feature **`native-screenshot`** (default on) pulls xcap; omit for bookworm-era libpipewire toolchains (nashaofu/xcap#247).
 
 ## [0.70.6] - 2026-04-23
 

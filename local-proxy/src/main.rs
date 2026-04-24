@@ -200,6 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             let _ = cmd_tx.try_send(shared_state::DaemonCommand::Connect);
                         }
                     }
+                    #[cfg(feature = "native-screenshot")]
                     tray::TrayMenuAction::ToggleScreenshot => {
                         let mut st = state.lock().unwrap();
                         let enabled = st

@@ -7,6 +7,7 @@ mod filesystem;
 mod git_info;
 mod open_url;
 mod processes;
+#[cfg(feature = "native-screenshot")]
 mod screenshot;
 mod search_files;
 mod shell;
@@ -17,9 +18,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// All capability IDs and display names for the settings UI.
-pub const CAPABILITIES_UI: &[(&str, &str)] = &[
-    ("screenshot", "Screenshot"),
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+const CAPABILITIES_UI_TAIL: &[(&str, &str)] = &[
     ("clipboard_read", "Clipboard (read)"),
     ("clipboard_write", "Clipboard (write)"),
     ("system_info", "System info"),
@@ -36,6 +36,17 @@ pub const CAPABILITIES_UI: &[(&str, &str)] = &[
     ("open_url", "Open URL"),
 ];
 
+/// Capability IDs and labels for the settings UI (screenshot first when compiled in).
+#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+pub fn capabilities_ui_iter() -> impl Iterator<Item = (&'static str, &'static str)> + Clone {
+    #[cfg(feature = "native-screenshot")]
+    const HEAD: &[(&str, &str)] = &[("screenshot", "Screenshot")];
+    #[cfg(not(feature = "native-screenshot"))]
+    const HEAD: &[(&str, &str)] = &[];
+
+    HEAD.iter().copied().chain(CAPABILITIES_UI_TAIL.iter().copied())
+}
+
 pub use clipboard::{ClipboardReadCapability, ClipboardWriteCapability};
 pub use desktop_notify::DesktopNotifyCapability;
 pub use file_tree::FileTreeCapability;
@@ -47,6 +58,7 @@ pub use filesystem::{
 pub use git_info::GitInfoCapability;
 pub use open_url::OpenUrlCapability;
 pub use processes::ListProcessesCapability;
+#[cfg(feature = "native-screenshot")]
 pub use screenshot::ScreenshotCapability;
 pub use search_files::SearchFilesCapability;
 pub use shell::ShellExecuteCapability;
@@ -73,6 +85,7 @@ pub struct CapabilityRegistry {
 impl CapabilityRegistry {
     pub fn new() -> Self {
         let mut capabilities = HashMap::new();
+        #[cfg(feature = "native-screenshot")]
         capabilities.insert(
             "screenshot".to_string(),
             Box::new(ScreenshotCapability) as Box<dyn Capability>,

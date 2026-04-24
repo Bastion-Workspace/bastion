@@ -157,20 +157,20 @@ impl SettingsApp {
         ui.label("Enable or disable capabilities offered to the server. Disabled capabilities are not advertised.");
         ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for (id, label) in crate::capabilities::CAPABILITIES_UI {
+            for (id, label) in crate::capabilities::capabilities_ui_iter() {
                 let mut enabled = {
                     let st = self.state.lock().unwrap();
                     st.config
                         .capabilities
-                        .get(*id)
+                        .get(id)
                         .map(|c| c.enabled)
                         .unwrap_or(false)
                 };
-                if ui.checkbox(&mut enabled, *label).changed() {
+                if ui.checkbox(&mut enabled, label).changed() {
                     let mut st = self.state.lock().unwrap();
                     st.config
                         .capabilities
-                        .entry((*id).to_string())
+                        .entry(id.to_string())
                         .or_default()
                         .enabled = enabled;
                     if let Err(e) = save_config(&st.config, None) {

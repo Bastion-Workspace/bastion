@@ -21,10 +21,20 @@ pub fn create_tray_icon(
 
     menu.append(&PredefinedMenuItem::separator())?;
 
-    let screenshot_item = CheckMenuItem::with_id("screenshot", "Screenshot", true, false, None::<Accelerator>);
-    menu.append(&screenshot_item)?;
-
-    menu.append(&PredefinedMenuItem::separator())?;
+    let screenshot_item = {
+        #[cfg(feature = "native-screenshot")]
+        {
+            let screenshot_item =
+                CheckMenuItem::with_id("screenshot", "Screenshot", true, false, None::<Accelerator>);
+            menu.append(&screenshot_item)?;
+            menu.append(&PredefinedMenuItem::separator())?;
+            Some(screenshot_item)
+        }
+        #[cfg(not(feature = "native-screenshot"))]
+        {
+            None
+        }
+    };
 
     let settings_item = MenuItem::with_id("settings", "Settings...", true, None::<Accelerator>);
     menu.append(&settings_item)?;
@@ -78,7 +88,8 @@ pub struct TrayMenuState {
     last_status: ConnectionStatus,
     pub status_item: MenuItem,
     pub connect_item: CheckMenuItem,
-    pub screenshot_item: CheckMenuItem,
+    /// Present when built with `native-screenshot` (xcap / PipeWire).
+    pub screenshot_item: Option<CheckMenuItem>,
 }
 
 impl TrayMenuState {
@@ -112,13 +123,15 @@ impl TrayMenuState {
             "Connect (auto-reconnect)"
         });
         self.connect_item.set_checked(st.want_connected);
-        let screenshot_enabled = st
-            .config
-            .capabilities
-            .get("screenshot")
-            .map(|c| c.enabled)
-            .unwrap_or(false);
-        self.screenshot_item.set_checked(screenshot_enabled);
+        if let Some(ref screenshot_item) = self.screenshot_item {
+            let screenshot_enabled = st
+                .config
+                .capabilities
+                .get("screenshot")
+                .map(|c| c.enabled)
+                .unwrap_or(false);
+            screenshot_item.set_checked(screenshot_enabled);
+        }
     }
 
     pub fn try_recv(&self) -> Option<TrayMenuAction> {
@@ -126,6 +139,7 @@ impl TrayMenuState {
         let id = event.id.as_ref();
         Some(match id {
             "connect" => TrayMenuAction::Disconnect,
+            #[cfg(feature = "native-screenshot")]
             "screenshot" => TrayMenuAction::ToggleScreenshot,
             "settings" => TrayMenuAction::OpenSettings,
             "quit" => TrayMenuAction::Quit,
@@ -136,6 +150,7 @@ impl TrayMenuState {
 
 pub enum TrayMenuAction {
     Disconnect,
+    #[cfg(feature = "native-screenshot")]
     ToggleScreenshot,
     OpenSettings,
     Quit,

@@ -12,11 +12,10 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-linux:
-    # Use 22.04 (glibc ~2.35, libssl3) so the .deb and Linux binary install on Debian 12
-    # and older Ubuntu. ubuntu-latest pulls glibc 2.39+ and libssl3t64 in Depends, which
-    # breaks `dpkg -i` on bookworm (libc6 2.36, no t64 package name).
-    runs-on: ubuntu-22.04
+  # ubuntu-latest: PipeWire/libspa headers match xcap's libspa 0.9.2 (see nashaofu/xcap#247).
+  # Ubuntu 22.04 ships older libpipewire and breaks `libspa` at compile time.
+  build-linux-desktop:
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -25,9 +24,6 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Native GUI (egui/eframe), tray, screenshots (xcap), PipeWire (libspa-sys /
-      # Wayland paths), GBM/EGL (glutin), libxdo (tray/muda), and notifications pull
-      # in GLib/GTK/XCB via pkg-config; runners do not include these by default.
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -45,7 +41,52 @@ jobs:
             libdbus-1-dev \
             libpipewire-0.3-dev \
             libgbm-dev \
-            libxdo-dev \
+            libxdo-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          working-directory: local-proxy
+          shared-key: local-proxy-desktop
+
+      - name: Build GUI release binary
+        working-directory: local-proxy
+        run: cargo build --release
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p local-proxy-artifact
+          cp local-proxy/target/release/bastion-local-proxy local-proxy-artifact/bastion-proxy-linux-amd64
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bastion-proxy-linux-amd64
+          path: local-proxy-artifact/bastion-proxy-linux-amd64
+          retention-days: 30
+
+  # Headless .deb without xcap/PipeWire: bookworm-compatible glibc + libssl3 Depends.
+  build-linux-deb:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies (headless, no GTK/PipeWire)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libssl-dev \
             dpkg-dev
 
       - name: Install Rust
@@ -57,6 +98,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           working-directory: local-proxy
+          shared-key: local-proxy-deb
 
       - name: Build headless release (.deb)
         working-directory: local-proxy
@@ -70,22 +112,10 @@ jobs:
           cargo install cargo-deb
           cargo deb --no-build
 
-      - name: Build GUI release binary
-        working-directory: local-proxy
-        run: cargo build --release
-
-      - name: Prepare artifacts
+      - name: Prepare artifact
         run: |
           mkdir -p local-proxy-artifact
-          cp local-proxy/target/release/bastion-local-proxy local-proxy-artifact/bastion-proxy-linux-amd64
           cp local-proxy/target/debian/bastion-proxy_*.deb local-proxy-artifact/
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bastion-proxy-linux-amd64
-          path: local-proxy-artifact/bastion-proxy-linux-amd64
-          retention-days: 30
 
       - name: Upload .deb artifact
         uses: actions/upload-artifact@v4
@@ -131,7 +161,7 @@ jobs:
           retention-days: 30
 
   release:
-    needs: [build-linux, build-windows]
+    needs: [build-linux-desktop, build-linux-deb, build-windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -141,7 +171,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download Linux artifact
+      - name: Download Linux desktop binary
         uses: actions/download-artifact@v4
         with:
           name: bastion-proxy-linux-amd64
@@ -170,8 +200,8 @@ jobs:
 
             Run on your machine to let Bastion agents use local capabilities (screenshot, shell, files, etc.).
 
-            - **Linux (desktop, tray + settings):** `bastion-proxy-linux-amd64` (`chmod +x bastion-proxy-linux-amd64`)
-            - **Linux (headless / systemd, Debian/Ubuntu):** `*.deb` — built on Ubuntu 22.04 for broad compatibility (e.g. Debian 12). Install with `sudo dpkg -i bastion-proxy_*_amd64.deb`, edit `/etc/bastion-proxy/config.yml`, then `sudo systemctl enable --now bastion-proxy`
+            - **Linux (desktop, tray + settings):** `bastion-proxy-linux-amd64` — built on current Ubuntu (includes screenshot via PipeWire). `chmod +x bastion-proxy-linux-amd64`
+            - **Linux (headless / systemd, Debian/Ubuntu):** `*.deb` — built on Ubuntu 22.04 without the screenshot stack for Debian 12–compatible Depends (`libc6`, `libssl3`). Install with `sudo dpkg -i bastion-proxy_*_amd64.deb`, edit `/etc/bastion-proxy/config.yml`, then `sudo systemctl enable --now bastion-proxy`
             - **Windows:** `bastion-proxy-windows-amd64.exe`
 
             Configure Bastion URL and device token in Settings > Device tokens (web UI), then paste the token into the daemon (tray > Settings), or into `/etc/bastion-proxy/config.yml` for the `.deb` service.
