@@ -103,6 +103,11 @@ async def _build_user_memory_for_prompt(user_id: str, grpc_request) -> str:
     return "\n\n".join(parts)
 
 
+def _user_rls_for_chat(user_id: str) -> Dict[str, str]:
+    """RLS GUCs for user-scoped agent_profiles reads when http_request_rls_context is unset (e.g. async orchestrator stream)."""
+    return {"user_id": user_id, "user_role": "user"}
+
+
 class AmbiguousAgentMentionError(Exception):
     """Raised when multiple owned/shared agent profiles share the same @handle for a user."""
 
@@ -141,6 +146,7 @@ async def _list_agent_profile_candidates_for_handle(handle: str, user_id: str) -
         """,
         handle,
         user_id,
+        rls_context=_user_rls_for_chat(user_id),
     )
     return list(rows or [])
 
@@ -166,6 +172,7 @@ async def _verify_user_can_use_agent_profile(profile_id: str, user_id: str) -> b
         """,
         profile_id,
         user_id,
+        rls_context=_user_rls_for_chat(user_id),
     )
     return row is not None
 
@@ -521,6 +528,9 @@ class GRPCContextGatherer:
                 request_context["line_id"] = _line
                 request_context["team_id"] = _line  # mirror for legacy metadata consumers
 
+            # Leading @agent / @auto before verifying UI agent_profile_id (override + RLS-safe resolve).
+            await _apply_leading_agent_mention_override(grpc_request, user_id, request_context)
+
             # Explicit Agent Factory routing from UI (disambiguated @mention): must be accessible (owned or shared).
             _apid = (request_context.get("agent_profile_id") or "").strip()
             if _apid:
@@ -532,6 +542,7 @@ class GRPCContextGatherer:
                     prow = await fetch_one(
                         "SELECT handle FROM agent_profiles WHERE id = $1::uuid",
                         _apid,
+                        rls_context=_user_rls_for_chat(user_id),
                     )
                     h = (prow or {}).get("handle") or ""
                     if h:
@@ -543,8 +554,6 @@ class GRPCContextGatherer:
                     raise
                 except Exception as strip_err:
                     logger.debug("Optional @strip for explicit agent_profile_id skipped: %s", strip_err)
-
-            await _apply_leading_agent_mention_override(grpc_request, user_id, request_context)
 
             cw_id = (request_context.get("code_workspace_id") or "").strip()
             if cw_id:
