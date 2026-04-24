@@ -9,7 +9,7 @@ import logging
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from backend_client import BackendClient
 from line_input import HistoryRing, LineEditor, LineInputParser
@@ -86,6 +86,9 @@ class BBSSession:
         self.messaging_rooms_cache: List[dict] = []
         # RSS article list: False = All, True = Unread only (persists until disconnect).
         self.rss_list_unread_only: bool = False
+        # Main-menu messaging unread: terminal bell when total unread increases (user-to-user rooms).
+        self.messaging_bell_enabled: bool = True
+        self._messaging_unread_baseline: Optional[int] = None
         self._last_activity = time.monotonic()
         self._idle_warned = False
         # Bytes pushed back after optional CRLF handling (StreamReader has no unget).
@@ -186,17 +189,53 @@ class BBSSession:
             self._input_unread.appendleft(b)
             return
 
+    async def _fetch_messaging_unread_total(self) -> Optional[int]:
+        """Sum of unread_count across rooms; None if messaging unavailable."""
+        try:
+            res = await self.client.messaging_list_rooms(self.jwt_token, limit=100)
+        except Exception:
+            logger.debug("messaging_list_rooms for unread failed", exc_info=True)
+            return None
+        if res.get("error"):
+            return None
+        rooms: List[dict] = list(res.get("rooms") or [])
+        n = 0
+        for r in rooms:
+            try:
+                n += int(r.get("unread_count") or 0)
+            except (TypeError, ValueError):
+                pass
+        return n
+
+    async def sync_messaging_unread_baseline(self) -> None:
+        """Call when drawing the main menu so we do not beep for already-unread messages."""
+        self._messaging_unread_baseline = await self._fetch_messaging_unread_total()
+
+    async def poll_messaging_notify_while_waiting(self) -> None:
+        """If messaging unread increased since baseline, emit ASCII BEL (terminal bell)."""
+        total = await self._fetch_messaging_unread_total()
+        if total is None:
+            return
+        baseline = self._messaging_unread_baseline
+        if baseline is not None and total > baseline and self.messaging_bell_enabled:
+            await self._write_bytes(b"\x07")
+        self._messaging_unread_baseline = total
+
     async def read_menu_choice(
         self,
         *,
         allow_digit_suffix: bool = False,
         timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+        on_poll: Optional[Callable[[], Awaitable[None]]] = None,
     ) -> str:
         """
         Menu prompts with [X] hotkeys: read the first key without requiring Enter.
         Letters and symbols echo and return immediately (optional CRLF after the key is drained).
         When allow_digit_suffix is True and the first key is a digit, additional digits are read
         until Enter so multi-digit list indices still work.
+        When poll_interval and on_poll are set, on_poll runs after each short wait with no input
+        (without shortening the overall idle deadline).
         """
         to = timeout
         if to is None:
@@ -217,10 +256,29 @@ class BBSSession:
             to = max(1.0, remaining)
 
         deadline = time.monotonic() + to
+        use_poll = (
+            poll_interval is not None
+            and poll_interval > 0
+            and on_poll is not None
+        )
         while True:
+            next_deadline = deadline
+            if use_poll:
+                slice_end = time.monotonic() + float(poll_interval)
+                if slice_end < deadline:
+                    next_deadline = slice_end
             try:
-                b = await self._next_input_byte(deadline)
+                b = await self._next_input_byte(next_deadline)
             except asyncio.TimeoutError:
+                if time.monotonic() >= deadline:
+                    await self._write("\r\nDisconnected (idle timeout).\r\n")
+                    raise ConnectionError("idle timeout") from None
+                if use_poll:
+                    try:
+                        await on_poll()
+                    except Exception:
+                        logger.debug("read_menu_choice on_poll failed", exc_info=True)
+                    continue
                 await self._write("\r\nDisconnected (idle timeout).\r\n")
                 raise ConnectionError("idle timeout") from None
 

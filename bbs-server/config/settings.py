@@ -17,6 +17,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float((os.getenv(name, str(default)) or "").strip())
+    except ValueError:
+        return default
+
+
 def _clean_service_key(raw: str) -> str:
     s = raw.strip()
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"":
@@ -40,6 +47,9 @@ class Settings:
     BBS_MAX_CONNECTIONS: int = int(os.getenv("BBS_MAX_CONNECTIONS", "20"))
     BBS_IDLE_TIMEOUT: int = int(os.getenv("BBS_IDLE_TIMEOUT", "600"))
     BBS_IDLE_WARN_SECONDS: int = int(os.getenv("BBS_IDLE_WARN_SECONDS", "60"))
+    # While on the main menu, poll messaging unread this often; terminal bell (BEL) when unread rises.
+    # Set to 0 to disable polling (no background beep on the main menu).
+    BBS_MENU_NOTIFY_POLL_SECONDS: float = max(0.0, _env_float("BBS_MENU_NOTIFY_POLL_SECONDS", 4.0))
     # 0 = disabled. After N seconds with no input, blank the screen (Esc only resumes); never in wallpaper pane.
     BBS_SCREEN_BLANK_AFTER_SECONDS: int = max(0, _env_int("BBS_SCREEN_BLANK_AFTER_SECONDS", 180))
     BBS_THEME: str = os.getenv("BBS_THEME", "green").lower()

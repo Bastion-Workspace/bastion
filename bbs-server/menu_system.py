@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from config.settings import settings
 from rendering.text import draw_box, format_header_datetime
 
 if TYPE_CHECKING:
@@ -70,14 +71,32 @@ async def main_menu(session: "BBSSession") -> None:
             await session._write(
                 f"{t.fg_bright_yellow}[!]{t.reset} SysOp (admin)\r\n"
             )
+        bell_label = "on" if session.messaging_bell_enabled else "silent"
+        await session._write(
+            f"{t.dim}New messaging unread: terminal bell {bell_label}. "
+            f"Press * to toggle.{t.reset}\r\n"
+        )
         menu_prompt = (
             f"{t.fg_bright_green}[G]{t.reset} Goodbye (logout)\r\n\r\n"
             f"{t.dim}Welcome to your ultimate workspace.{t.reset}\r\n\r\nChoice: "
         )
         await session._write(menu_prompt)
-        raw_line = await session.read_menu_choice()
+        await session.sync_messaging_unread_baseline()
+        poll_sec = float(settings.BBS_MENU_NOTIFY_POLL_SECONDS or 0.0)
+        read_kw = {}
+        if poll_sec > 0:
+            read_kw["poll_interval"] = poll_sec
+            read_kw["on_poll"] = session.poll_messaging_notify_while_waiting
+        raw_line = await session.read_menu_choice(**read_kw)
         raw_s = raw_line.strip().lower()
         choice = _normalize_menu_choice(raw_line)
+        if choice in ("*", ".") or raw_s in ("bell", "mute", "silent", "quiet"):
+            session.messaging_bell_enabled = not session.messaging_bell_enabled
+            now = "ON" if session.messaging_bell_enabled else "OFF (silent)"
+            await session._write(
+                f"\r\nMessage bell is now {now}.\r\n\r\n"
+            )
+            continue
         if not choice:
             await session._write("Please enter a menu letter.\r\n\r\n")
             continue
