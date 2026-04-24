@@ -13,7 +13,10 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    # Use 22.04 (glibc ~2.35, libssl3) so the .deb and Linux binary install on Debian 12
+    # and older Ubuntu. ubuntu-latest pulls glibc 2.39+ and libssl3t64 in Depends, which
+    # breaks `dpkg -i` on bookworm (libc6 2.36, no t64 package name).
+    runs-on: ubuntu-22.04
     permissions:
       contents: read
       packages: write
@@ -168,7 +171,7 @@ jobs:
             Run on your machine to let Bastion agents use local capabilities (screenshot, shell, files, etc.).
 
             - **Linux (desktop, tray + settings):** `bastion-proxy-linux-amd64` (`chmod +x bastion-proxy-linux-amd64`)
-            - **Linux (headless / systemd, Debian/Ubuntu):** `*.deb` — install with `sudo dpkg -i bastion-proxy_*_amd64.deb`, edit `/etc/bastion-proxy/config.yml`, then `sudo systemctl enable --now bastion-proxy`
+            - **Linux (headless / systemd, Debian/Ubuntu):** `*.deb` — built on Ubuntu 22.04 for broad compatibility (e.g. Debian 12). Install with `sudo dpkg -i bastion-proxy_*_amd64.deb`, edit `/etc/bastion-proxy/config.yml`, then `sudo systemctl enable --now bastion-proxy`
             - **Windows:** `bastion-proxy-windows-amd64.exe`
 
             Configure Bastion URL and device token in Settings > Device tokens (web UI), then paste the token into the daemon (tray > Settings), or into `/etc/bastion-proxy/config.yml` for the `.deb` service.
