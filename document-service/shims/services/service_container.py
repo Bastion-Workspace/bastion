@@ -4,6 +4,11 @@ Injectable stand-in for backend ``service_container``.
 ``document-service/main.py`` assigns ``document_service`` and ``folder_service``
 after the processing pipeline is built so lazy imports inside vendored code
 that call ``get_service_container()`` still resolve.
+
+Porting contract: code copied from the backend often does ``if container.foo``.
+Attributes checked that way must exist on ``_ServiceContainer`` (default
+``None``); missing attributes raise ``AttributeError`` before the branch runs.
+Prefer declaring optional slots here over ``getattr`` in scattered call sites.
 """
 
 from typing import Any, Optional
@@ -25,10 +30,13 @@ def clear_document_services() -> None:
 
 
 class _ServiceContainer:
-    """Minimal container; mirrors backend flag used by FileManagerService."""
+    """Minimal container; optional slots mirror backend for truthiness checks."""
 
     # Parity with backend service_container: direct_search checks this for vector share scopes.
     document_sharing_service: Optional[Any] = None
+    # LangGraph / agent tools (see backend ServiceContainer.__init__).
+    file_manager: Optional[Any] = None
+    websocket_manager: Optional[Any] = None
 
     @property
     def is_initialized(self) -> bool:
