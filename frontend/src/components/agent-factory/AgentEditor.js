@@ -131,7 +131,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
         invalidateAgentHandlesQuery(queryClient);
         setLocalProfile(null);
       },
-      onError: (err) => {
+      onError: (err, variables) => {
         const d = err?.response?.data?.detail;
         let message = err?.message || 'Failed to save profile';
         if (typeof d === 'string') {
@@ -140,6 +140,26 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
           message = d.map((x) => (typeof x === 'string' ? x : x?.msg || JSON.stringify(x))).join('; ');
         } else if (d && typeof d === 'object') {
           message = d.msg || JSON.stringify(d);
+        }
+        const status = err?.response?.status;
+        const looksLikeNotFound =
+          status === 404 &&
+          typeof message === 'string' &&
+          message.toLowerCase().includes('not found');
+        const pid = variables?.id;
+        const sharedRows = queryClient.getQueryData('agentFactorySharedWithMe') || [];
+        const isSharedArtifact =
+          !!pid &&
+          sharedRows.some(
+            (s) => s.artifact_type === 'agent_profile' && s.artifact_id === pid
+          );
+        const cachedProfile = pid ? queryClient.getQueryData(['agentFactoryProfile', pid]) : null;
+        if (
+          looksLikeNotFound &&
+          (isSharedArtifact || cachedProfile?.ownership === 'shared')
+        ) {
+          message =
+            'This agent is shared with you, so only the owner can change it. Use "Make my own copy" below to edit your own version.';
         }
         setSaveError(message);
       },
@@ -211,7 +231,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
 
   const handleProfileChange = useCallback(
     (next) => {
-      if (profile?.is_builtin || profile?.ownership === 'shared') return;
+      if (profile?.is_builtin || profile?.ownership === 'shared' || shareIdForProfile) return;
       setLocalProfile(next);
       if (!profileId || !next) return;
       pendingProfileRef.current = next;
@@ -255,7 +275,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
         saveTimeoutRef.current = null;
       }, 600);
     },
-    [profileId, profile?.is_builtin, updateProfileMutation]
+    [profileId, profile?.is_builtin, profile?.ownership, shareIdForProfile, updateProfileMutation]
   );
 
   useEffect(() => () => {
@@ -340,7 +360,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
 
   if (!currentProfile) return null;
 
-  const isShared = currentProfile?.ownership === 'shared';
+  const isShared = currentProfile?.ownership === 'shared' || !!shareIdForProfile;
   const isReadOnly = isShared || !!currentProfile?.is_builtin;
 
   const isChatDefault =
@@ -449,7 +469,11 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
               <Switch
                 checked={!!currentProfile.is_active}
                 onChange={handleActiveToggle}
-                disabled={pauseProfileMutation.isLoading || resumeProfileMutation.isLoading}
+                disabled={
+                  pauseProfileMutation.isLoading ||
+                  resumeProfileMutation.isLoading ||
+                  isShared
+                }
                 color="primary"
               />
             }
@@ -554,7 +578,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
       <AllowedConnectionsSection
         profile={currentProfile}
         onChange={handleProfileChange}
-        readOnly={!!currentProfile?.is_builtin || !!currentProfile?.is_locked}
+        readOnly={isReadOnly || !!currentProfile?.is_locked}
       />
 
       <ScheduleSection profileId={profileId} />
@@ -562,7 +586,7 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
       <MonitorsSection
         profile={currentProfile}
         onChange={handleProfileChange}
-        readOnly={!!currentProfile?.is_builtin || !!currentProfile?.is_locked}
+        readOnly={isReadOnly || !!currentProfile?.is_locked}
       />
 
       <BudgetSection profileId={profileId} budget={currentProfile?.budget} />

@@ -1995,6 +1995,9 @@ def _row_to_profile(row: Dict[str, Any]) -> Dict[str, Any]:
     """Convert DB row to API-friendly dict (UUID and JSONB as native types)."""
     if not row:
         return {}
+    ownership = row.get("ownership") or "owned"
+    if row.get("is_builtin"):
+        ownership = "builtin"
     return {
         "id": str(row["id"]),
         "user_id": row["user_id"],
@@ -2026,6 +2029,7 @@ def _row_to_profile(row: Dict[str, Any]) -> Dict[str, Any]:
         "include_agent_memory": row.get("include_agent_memory", False),
         "auto_routable": row.get("auto_routable", False),
         "chat_visible": row.get("chat_visible", True),
+        "category": row.get("category"),
         "data_workspace_config": _ensure_json_obj(row.get("data_workspace_config"), {}),
         "allowed_connections": _ensure_json_obj(row.get("allowed_connections"), []),
         "default_run_context": row.get("default_run_context") or "interactive",
@@ -2034,6 +2038,9 @@ def _row_to_profile(row: Dict[str, Any]) -> Dict[str, Any]:
         "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
         "is_locked": row.get("is_locked", False),
         "is_builtin": row.get("is_builtin", False),
+        "ownership": ownership,
+        "owner_username": row.get("owner_username"),
+        "owner_display_name": row.get("owner_display_name"),
     }
 
 
