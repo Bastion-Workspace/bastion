@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Feature: **Local proxy** — headless mode (`--headless` / `cargo build --no-default-features`), optional `gui` Cargo feature, Debian `.deb` (`cargo deb`), systemd unit and postinst for `bastion-proxy` user; clearer errors for display-only capabilities on headless hosts.
+
 ## [0.70.6] - 2026-04-23
 
 - Update: **Settings** — remove unused **News** tab; merge **Wallpaper** into **Appearance**; legacy **`?tab=wallpaper`** / **`?tab=news`** redirect to **`appearance`** / **`rss-feeds`**.

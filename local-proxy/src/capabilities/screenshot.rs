@@ -22,9 +22,14 @@ impl Capability for ScreenshotCapability {
     }
 
     async fn execute(&self, args: Value, _config: &AppConfig) -> Result<CapabilityResult, String> {
-        let monitors = xcap::Monitor::all().map_err(|e| e.to_string())?;
+        let monitors = xcap::Monitor::all().map_err(|e| {
+            format!(
+                "Screenshot unavailable (no display or compositor): {}",
+                e
+            )
+        })?;
         if monitors.is_empty() {
-            return Err("No monitor found".to_string());
+            return Err("Screenshot unavailable: no monitor found (headless or no display)".to_string());
         }
 
         let monitor_arg = args

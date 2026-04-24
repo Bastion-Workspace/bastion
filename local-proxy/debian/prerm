@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+remove|upgrade|deconfigure)
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl stop bastion-proxy.service 2>/dev/null || true
+        systemctl disable bastion-proxy.service 2>/dev/null || true
+    fi
+    ;;
+esac
+
+exit 0

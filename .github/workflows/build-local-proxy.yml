@@ -42,7 +42,8 @@ jobs:
             libdbus-1-dev \
             libpipewire-0.3-dev \
             libgbm-dev \
-            libxdo-dev
+            libxdo-dev \
+            dpkg-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -54,20 +55,40 @@ jobs:
         with:
           working-directory: local-proxy
 
-      - name: Build release
+      - name: Build headless release (.deb)
+        working-directory: local-proxy
+        run: |
+          chmod +x debian/postinst debian/prerm
+          cargo build --release --no-default-features
+
+      - name: Install cargo-deb and package
+        working-directory: local-proxy
+        run: |
+          cargo install cargo-deb
+          cargo deb --no-build
+
+      - name: Build GUI release binary
         working-directory: local-proxy
         run: cargo build --release
 
-      - name: Prepare artifact
+      - name: Prepare artifacts
         run: |
           mkdir -p local-proxy-artifact
           cp local-proxy/target/release/bastion-local-proxy local-proxy-artifact/bastion-proxy-linux-amd64
+          cp local-proxy/target/debian/bastion-proxy_*.deb local-proxy-artifact/
 
-      - name: Upload artifact
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: bastion-proxy-linux-amd64
           path: local-proxy-artifact/bastion-proxy-linux-amd64
+          retention-days: 30
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bastion-proxy-deb-amd64
+          path: local-proxy-artifact/*.deb
           retention-days: 30
 
   build-windows:
@@ -122,6 +143,11 @@ jobs:
         with:
           name: bastion-proxy-linux-amd64
 
+      - name: Download Linux .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: bastion-proxy-deb-amd64
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -132,17 +158,19 @@ jobs:
         with:
           files: |
             bastion-proxy-linux-amd64/bastion-proxy-linux-amd64
+            bastion-proxy-deb-amd64/*.deb
             bastion-proxy-windows-amd64/bastion-proxy-windows-amd64.exe
           draft: false
           prerelease: ${{ contains(github.ref, '-dev') }}
           body: |
             ## Bastion Local Proxy Daemon
 
-            Run on your machine to let Bastion agents use local capabilities (screenshot, future: shell, files).
+            Run on your machine to let Bastion agents use local capabilities (screenshot, shell, files, etc.).
 
-            - **Linux:** `bastion-proxy-linux-amd64` (make executable: `chmod +x bastion-proxy-linux-amd64`)
+            - **Linux (desktop, tray + settings):** `bastion-proxy-linux-amd64` (`chmod +x bastion-proxy-linux-amd64`)
+            - **Linux (headless / systemd, Debian/Ubuntu):** `*.deb` — install with `sudo dpkg -i bastion-proxy_*_amd64.deb`, edit `/etc/bastion-proxy/config.yml`, then `sudo systemctl enable --now bastion-proxy`
             - **Windows:** `bastion-proxy-windows-amd64.exe`
 
-            Configure Bastion URL and device token in Settings > Device tokens, then paste the token into the daemon (tray menu > Settings).
+            Configure Bastion URL and device token in Settings > Device tokens (web UI), then paste the token into the daemon (tray > Settings), or into `/etc/bastion-proxy/config.yml` for the `.deb` service.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

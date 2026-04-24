@@ -24,7 +24,12 @@ impl Capability for OpenUrlCapability {
             .and_then(|v| v.as_str())
             .ok_or("Missing 'url' argument")?;
 
-        open::that(url).map_err(|e| e.to_string())?;
+        open::that(url).map_err(|e| {
+            format!(
+                "Cannot open URL in a browser (headless or no graphical session): {}",
+                e
+            )
+        })?;
 
         let result = json!({
             "success": true,

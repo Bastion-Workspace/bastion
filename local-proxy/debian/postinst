@@ -1,0 +1,32 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+configure)
+    if ! getent passwd bastion-proxy >/dev/null 2>&1; then
+        if command -v adduser >/dev/null 2>&1; then
+            adduser --system --group --no-create-home --quiet bastion-proxy
+        elif command -v useradd >/dev/null 2>&1; then
+            useradd --system --user-group --no-create-home --shell /usr/sbin/nologin bastion-proxy
+        else
+            echo "bastion-proxy postinst: adduser or useradd is required" >&2
+            exit 1
+        fi
+    fi
+
+    install -d -o bastion-proxy -g bastion-proxy -m 0750 /etc/bastion-proxy
+
+    if [ ! -f /etc/bastion-proxy/config.yml ] && [ -f /etc/bastion-proxy/config.yml.example ]; then
+        install -o bastion-proxy -g bastion-proxy -m 0640 /etc/bastion-proxy/config.yml.example /etc/bastion-proxy/config.yml
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload || true
+    fi
+
+    echo "bastion-proxy: edit /etc/bastion-proxy/config.yml (device_id, bastion_url, token), then run:"
+    echo "  sudo systemctl enable --now bastion-proxy"
+    ;;
+esac
+
+exit 0

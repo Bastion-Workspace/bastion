@@ -25,38 +25,42 @@ impl Capability for DesktopNotifyCapability {
             .unwrap_or("Bastion");
         let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("");
 
-        let success = show_notification(title, body);
+        let (success, err_detail) = show_notification(title, body);
+
+        if !success {
+            return Err(format!(
+                "Desktop notifications unavailable (no D-Bus session, display, or notification daemon){}",
+                err_detail
+                    .map(|d| format!(": {}", d))
+                    .unwrap_or_default()
+            ));
+        }
 
         let result = json!({
-            "success": success
+            "success": true
         });
 
         Ok(CapabilityResult {
-            formatted: if success {
-                "Notification sent".to_string()
-            } else {
-                "Failed to show notification".to_string()
-            },
+            formatted: "Notification sent".to_string(),
             result,
         })
     }
 }
 
 #[cfg(not(windows))]
-fn show_notification(title: &str, body: &str) -> bool {
-    notify_rust::Notification::new()
-        .summary(title)
-        .body(body)
-        .show()
-        .is_ok()
+fn show_notification(title: &str, body: &str) -> (bool, Option<String>) {
+    match notify_rust::Notification::new().summary(title).body(body).show() {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    }
 }
 
 #[cfg(windows)]
-fn show_notification(title: &str, body: &str) -> bool {
+fn show_notification(title: &str, body: &str) -> (bool, Option<String>) {
     use winrt_notification::Toast;
-    Toast::new(Toast::POWERSHELL_APP_ID)
-        .title(title)
-        .text1(body)
-        .show()
-        .is_ok()
+    let t = Toast::new(Toast::POWERSHELL_APP_ID).title(title).text1(body);
+    match t.show() {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    }
 }

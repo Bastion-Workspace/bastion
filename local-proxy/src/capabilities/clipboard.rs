@@ -20,8 +20,12 @@ impl Capability for ClipboardReadCapability {
     }
 
     async fn execute(&self, _args: Value, _config: &AppConfig) -> Result<CapabilityResult, String> {
-        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        let content = clipboard.get_text().map_err(|e| e.to_string())?;
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| {
+            format!("Clipboard read unavailable (no display or session clipboard): {}", e)
+        })?;
+        let content = clipboard.get_text().map_err(|e| {
+            format!("Clipboard read failed (headless or no clipboard server): {}", e)
+        })?;
         let length = content.len();
 
         let result = json!({
@@ -52,8 +56,12 @@ impl Capability for ClipboardWriteCapability {
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-        clipboard.set_text(content).map_err(|e| e.to_string())?;
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| {
+            format!("Clipboard write unavailable (no display or session clipboard): {}", e)
+        })?;
+        clipboard.set_text(content).map_err(|e| {
+            format!("Clipboard write failed (headless or no clipboard server): {}", e)
+        })?;
 
         let result = json!({
             "success": true
