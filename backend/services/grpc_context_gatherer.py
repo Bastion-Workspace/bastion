@@ -183,6 +183,62 @@ async def _resolve_agent_handle(handle: str, user_id: str) -> Optional[str]:
     return None
 
 
+async def _apply_leading_agent_mention_override(
+    grpc_request: orchestrator_pb2.ChatRequest,
+    user_id: str,
+    request_context: Dict[str, Any],
+) -> None:
+    """Resolve a leading @mention for routing even when the UI sent agent_profile_id.
+
+    Without this, the branch that injects profile context skips @ parsing, so e.g. picking a
+    shared agent from the @ menu while a default custom agent is selected never updates routing.
+    Also handles @auto when agent_profile_id was preset (clears sticky + drops profile selection).
+    """
+    q = (grpc_request.query or "").strip()
+    m = re.match(r"^@([\w-]+)(?:\s+(.*))?$", q, re.DOTALL)
+    if not m:
+        return
+    handle = m.group(1)
+    rest = (m.group(2) or "").strip()
+    if handle.lower() == "auto":
+        grpc_request.query = rest
+        had_ui_agent_profile = bool(request_context.get("agent_profile_id"))
+        request_context.pop("agent_profile_id", None)
+        try:
+            from services.conversation_service import ConversationService
+
+            conversation_service = ConversationService()
+            await conversation_service.update_agent_metadata(
+                conversation_id=grpc_request.conversation_id,
+                user_id=grpc_request.user_id,
+                primary_agent_selected="chat_agent",
+                last_agent=None,
+                clear_agent_profile_id=True,
+                clear_active_line=True,
+            )
+            logger.debug(
+                "CONTEXT GATHERER: @auto cleared sticky agent/line (had_ui_agent_profile=%s)",
+                had_ui_agent_profile,
+            )
+        except Exception as e:
+            logger.warning("Failed to clear agent routing for @auto (override path): %s", e)
+        return
+    try:
+        profile_id = await _resolve_agent_handle(handle, user_id)
+    except AmbiguousAgentMentionError:
+        raise
+    if not profile_id or not await _verify_user_can_use_agent_profile(profile_id, user_id):
+        return
+    request_context["agent_profile_id"] = str(profile_id)
+    grpc_request.query = rest
+    grpc_request.metadata["resolved_agent_handle"] = handle
+    logger.debug(
+        "CONTEXT GATHERER: Leading @%s -> agent_profile_id=%s (overrides UI selection if any)",
+        handle,
+        profile_id,
+    )
+
+
 async def _resolve_team_handle(handle: str, user_id: str) -> Optional[str]:
     """Resolve an @handle to an agent_lines id. Returns None if not found."""
     from services.database_manager.database_helpers import fetch_one
@@ -488,6 +544,8 @@ class GRPCContextGatherer:
                 except Exception as strip_err:
                     logger.debug("Optional @strip for explicit agent_profile_id skipped: %s", strip_err)
 
+            await _apply_leading_agent_mention_override(grpc_request, user_id, request_context)
+
             cw_id = (request_context.get("code_workspace_id") or "").strip()
             if cw_id:
                 try:
@@ -726,14 +784,15 @@ class GRPCContextGatherer:
                     except Exception as e:
                         logger.warning("Failed to clear agent routing for @auto: %s", e)
                 else:
-                    mention_match = re.match(r"^@([\w-]+)\s+", query_stripped)
+                    mention_match = re.match(r"^@([\w-]+)(?:\s+(.*))?$", query_stripped, re.DOTALL)
                     if mention_match:
                         handle = mention_match.group(1)
+                        mention_rest = (mention_match.group(2) or "").strip()
                         profile_id = await _resolve_agent_handle(handle, user_id)
                         if profile_id:
                             grpc_request.metadata["agent_profile_id"] = profile_id
                             grpc_request.metadata["resolved_agent_handle"] = handle
-                            grpc_request.query = query_stripped[mention_match.end() :].strip()
+                            grpc_request.query = mention_rest
                             logger.debug("CONTEXT GATHERER: Resolved @%s to agent_profile_id=%s", handle, profile_id)
                             try:
                                 from services.database_manager.database_helpers import fetch_all
@@ -794,7 +853,7 @@ class GRPCContextGatherer:
                                 from services import agent_line_service
                                 grpc_request.metadata["team_context_id"] = team_id
                                 grpc_request.metadata["resolved_team_handle"] = handle
-                                grpc_request.query = query_stripped[mention_match.end() :].strip()
+                                grpc_request.query = mention_rest
                                 try:
                                     team_chat_context = await agent_line_service.get_line_chat_context(team_id, user_id)
                                     grpc_request.metadata["team_chat_context"] = team_chat_context
