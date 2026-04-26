@@ -15,7 +15,8 @@ jobs:
   build-android:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write required for softprops/action-gh-release (create release + upload APK)
+      contents: write
       packages: write
 
     steps:
