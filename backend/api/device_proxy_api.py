@@ -64,7 +64,7 @@ async def device_websocket(websocket: WebSocket):
     token_id = str(row["id"])
     ws_manager = get_websocket_manager()
     ws_manager._register_connection(websocket, session_id=user_id)
-    ws_manager.register_device(user_id, device_id, websocket, [])
+    ws_manager.register_device(user_id, device_id, websocket, [], token_id=token_id)
     try:
         await update_last_connected(token_id, ip=client_ip)
     except Exception as e:
@@ -84,7 +84,7 @@ async def device_websocket(websocket: WebSocket):
                 capabilities = msg.get("capabilities") or []
                 dev_id = msg.get("device_id") or device_id
                 ws_manager.unregister_device(user_id, device_id)
-                ws_manager.register_device(user_id, dev_id, websocket, capabilities)
+                ws_manager.register_device(user_id, dev_id, websocket, capabilities, token_id=token_id)
                 device_id = dev_id
             elif msg_type == "result":
                 request_id = msg.get("request_id")

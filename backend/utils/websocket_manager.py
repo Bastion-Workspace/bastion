@@ -27,6 +27,8 @@ class WebSocketManager:
         # Device proxy (Bastion Local Proxy daemon): user_id -> {device_id -> ws}
         self.device_connections: Dict[str, Dict[str, WebSocket]] = {}
         self.device_capabilities: Dict[str, Dict[str, List[str]]] = {}  # user_id -> {device_id -> [capabilities]}
+        # Same keys as device_connections: device_tokens.id (UUID str) for settings / merge with DB
+        self.device_token_ids: Dict[str, Dict[str, str]] = {}
         self.pending_device_invocations: Dict[str, Tuple[str, asyncio.Future]] = {}  # request_id -> (user_id, future)
     
     async def connect(self, websocket: WebSocket, session_id: str = None):
@@ -721,13 +723,23 @@ class WebSocketManager:
     # Device proxy (Bastion Local Proxy daemon)
     # =====================
 
-    def register_device(self, user_id: str, device_id: str, websocket: WebSocket, capabilities: List[str]):
+    def register_device(
+        self,
+        user_id: str,
+        device_id: str,
+        websocket: WebSocket,
+        capabilities: List[str],
+        token_id: Optional[str] = None,
+    ):
         """Register a connected device proxy (daemon) for a user."""
         if user_id not in self.device_connections:
             self.device_connections[user_id] = {}
             self.device_capabilities[user_id] = {}
+            self.device_token_ids[user_id] = {}
         self.device_connections[user_id][device_id] = websocket
         self.device_capabilities[user_id][device_id] = list(capabilities) if capabilities else []
+        if token_id:
+            self.device_token_ids[user_id][device_id] = token_id
         logger.info(f"Device registered: user={user_id}, device={device_id}, capabilities={capabilities}")
 
     def unregister_device(self, user_id: str, device_id: str):
@@ -740,6 +752,10 @@ class WebSocketManager:
             del self.device_capabilities[user_id][device_id]
             if not self.device_capabilities[user_id]:
                 del self.device_capabilities[user_id]
+        if user_id in self.device_token_ids and device_id in self.device_token_ids[user_id]:
+            del self.device_token_ids[user_id][device_id]
+            if not self.device_token_ids[user_id]:
+                del self.device_token_ids[user_id]
 
     def _resolve_target_device_id(
         self, devices: Dict[str, WebSocket], device_id: Optional[str]
@@ -867,7 +883,15 @@ class WebSocketManager:
         """List connected devices for a user."""
         devices = self.device_connections.get(user_id) or {}
         caps = self.device_capabilities.get(user_id) or {}
-        return [{"device_id": did, "capabilities": caps.get(did, [])} for did in devices]
+        token_map = self.device_token_ids.get(user_id) or {}
+        return [
+            {
+                "device_id": did,
+                "capabilities": caps.get(did, []),
+                "token_id": token_map.get(did) or None,
+            }
+            for did in devices
+        ]
 
     def get_connection_count(self) -> int:
         """Get the number of active connections"""

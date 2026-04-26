@@ -1,6 +1,6 @@
 {
   "name": "bastion-mobile",
-  "version": "0.1.0",
+  "version": "0.70.8",
   "private": true,
   "main": "expo-router/entry",
   "scripts": {

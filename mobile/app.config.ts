@@ -3,7 +3,7 @@ import type { ExpoConfig } from 'expo/config';
 const config: ExpoConfig = {
   name: 'Bastion',
   slug: 'bastion-mobile',
-  version: '0.1.0',
+  version: '0.70.8',
   orientation: 'portrait',
   scheme: 'bastion',
   userInterfaceStyle: 'automatic',

@@ -22,12 +22,16 @@ import {
   DialogContent,
   DialogActions,
   TextField,
+  Chip,
 } from '@mui/material';
 import LinkOffIcon from '@mui/icons-material/LinkOff';
 import AddIcon from '@mui/icons-material/Add';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import DevicesIcon from '@mui/icons-material/Devices';
 import apiService from '../services/apiService';
+
+const POLL_MS = 12000;
 
 const formatDate = (iso) => {
   if (!iso) return '—';
@@ -49,23 +53,63 @@ const DeviceTokensSettings = () => {
   const [creating, setCreating] = useState(false);
   const [createdResult, setCreatedResult] = useState(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
-  const loadTokens = async () => {
+  const loadTokens = async ({ silent } = {}) => {
     try {
       setError(null);
+      if (silent) {
+        setRefreshing(true);
+      } else {
+        setLoading(true);
+      }
       const res = await apiService.get('/api/settings/device-tokens');
       setTokens(res.tokens || []);
     } catch (err) {
       setError(err.message || 'Failed to load device tokens');
       setTokens([]);
     } finally {
-      setLoading(false);
+      if (silent) {
+        setRefreshing(false);
+      } else {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    loadTokens();
+    loadTokens({ silent: false });
   }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => loadTokens({ silent: true }), POLL_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === 'visible') {
+        loadTokens({ silent: true });
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, []);
+
+  const deviceSecondaryText = (t) => {
+    const name = t.device_name || '';
+    if (t.connected) {
+      const parts = ['Connected now'];
+      if (t.live_device_id && t.live_device_id !== name) {
+        parts.push(`Device ID: ${t.live_device_id}`);
+      }
+      return parts.join(' · ');
+    }
+    if (t.last_connected_at) {
+      return `Offline · Last connected: ${formatDate(t.last_connected_at)}`;
+    }
+    return `Offline · Created: ${formatDate(t.created_at)} · Not connected yet`;
+  };
 
   const handleAddDevice = async () => {
     const name = (deviceName || '').trim();
@@ -81,7 +125,7 @@ const DeviceTokensSettings = () => {
         message: res.message || 'Copy the token now; it will not be shown again.',
       });
       setDeviceName('');
-      await loadTokens();
+      await loadTokens({ silent: true });
     } catch (err) {
       setError(err.response?.data?.detail || err.message || 'Failed to create token');
     } finally {
@@ -113,7 +157,7 @@ const DeviceTokensSettings = () => {
       setRevokingId(tokenId);
       setError(null);
       await apiService.delete(`/api/settings/device-tokens/${encodeURIComponent(tokenId)}`);
-      await loadTokens();
+      await loadTokens({ silent: true });
     } catch (err) {
       setError(err.message || 'Failed to revoke token');
     } finally {
@@ -141,13 +185,28 @@ const DeviceTokensSettings = () => {
 
       <Card sx={{ mb: 2 }}>
         <CardContent>
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={() => setAddDialogOpen(true)}
-          >
-            Add device
-          </Button>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1 }}>
+            <Button
+              variant="contained"
+              startIcon={<AddIcon />}
+              onClick={() => setAddDialogOpen(true)}
+            >
+              Add device
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={refreshing ? <CircularProgress size={16} color="inherit" /> : <RefreshIcon />}
+              onClick={() => loadTokens({ silent: true })}
+              disabled={loading || refreshing}
+            >
+              Refresh status
+            </Button>
+            {refreshing && !loading && (
+              <Typography variant="caption" color="text.secondary">
+                Updating…
+              </Typography>
+            )}
+          </Box>
 
           {loading ? (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
@@ -179,12 +238,20 @@ const DeviceTokensSettings = () => {
                   }
                 >
                   <ListItemText
-                    primary={t.device_name || 'Unnamed device'}
-                    secondary={
-                      t.last_connected_at
-                        ? `Last connected: ${formatDate(t.last_connected_at)}`
-                        : `Created: ${formatDate(t.created_at)} · Not connected yet`
+                    primary={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                        <Typography component="span" variant="body1">
+                          {t.device_name || 'Unnamed device'}
+                        </Typography>
+                        <Chip
+                          size="small"
+                          label={t.connected ? 'Online' : 'Offline'}
+                          color={t.connected ? 'success' : 'default'}
+                          variant={t.connected ? 'filled' : 'outlined'}
+                        />
+                      </Box>
                     }
+                    secondary={deviceSecondaryText(t)}
                   />
                 </ListItem>
               ))}

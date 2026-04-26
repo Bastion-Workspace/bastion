@@ -7,8 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Feature: **Bastion Mobile** — new `mobile/` Expo (React Native) app: Tier 1 (auth, todos, read-only documents) and Tier 2 (in-app messaging WebSockets, orchestrator streaming chat); GitHub Actions `build-mobile-android.yml` (debug APK) and manual `build-mobile-ios.yml` placeholder.
+## [0.70.8] - 2026-04-26
+
+- Feature: **Bastion Mobile** — new `mobile/` Expo (React Native) app: Tier 1 (auth, todos, read-only documents) and Tier 2 (in-app messaging WebSockets, orchestrator streaming chat); GitHub Actions `build-mobile-android.yml` (debug APK) and manual `build-mobile-ios.yml` placeholder; mobile app version aligned with monorepo (`0.70.8`).
 - Feature: **Settings — Local proxy (devices)** — live Online/Offline from server WebSocket state, optional live device ID when it differs from the label, refresh control and periodic refetch while the panel is open.
+- Fix: **Device tokens** — `GET /api/settings/device-tokens` merges in-process WebSocket presence (`connected`, `live_device_id`); device proxy WebSocket registers `token_id` on `register_device` so presence matches tokens after hello/reconnect.
+- Fix: **Mobile Android CI** — `permissions: contents: write` for GitHub Releases; `action-gh-release@v2` with explicit token.
 
 ## [0.70.7] - 2026-04-26
 

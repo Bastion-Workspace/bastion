@@ -1399,10 +1399,27 @@ async def create_device_token(
 async def list_device_tokens(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
-    """List device tokens for the current user (without raw token)."""
+    """List device tokens for the current user (without raw token).
+
+    Merges in-process WebSocket presence (connected / live_device_id). Same-process only;
+    not authoritative across multiple backend replicas without sticky routing.
+    """
     try:
         from services.device_token_service import list_device_tokens as svc_list
+        from utils.websocket_manager import get_websocket_manager
+
         tokens = await svc_list(current_user.user_id)
+        ws_manager = get_websocket_manager()
+        live_by_token: dict = {}
+        for d in ws_manager.get_user_devices(current_user.user_id):
+            tid = d.get("token_id")
+            if tid:
+                live_by_token[str(tid)] = d
+        for t in tokens:
+            tid = str(t["id"])
+            live = live_by_token.get(tid)
+            t["connected"] = bool(live)
+            t["live_device_id"] = live["device_id"] if live else None
         return {"tokens": tokens}
     except Exception as e:
         logger.error(f"Failed to list device tokens: {e}")

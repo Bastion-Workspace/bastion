@@ -514,7 +514,12 @@ const Navigation = () => {
             color="inherit"
             sx={{ p: 0 }}
           >
-            <Avatar sx={{ bgcolor: 'rgba(255,255,255,0.2)' }}>
+            <Avatar
+              sx={{
+                bgcolor: darkMode ? 'primary.main' : 'rgba(255,255,255,0.2)',
+                color: darkMode ? 'primary.contrastText' : 'inherit',
+              }}
+            >
               {getUserInitials()}
             </Avatar>
           </IconButton>

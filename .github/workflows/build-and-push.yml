@@ -84,7 +84,7 @@ jobs:
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           
-          # Detect if dev or production (e.g. 0.70.7-dev vs 0.70.0). Drives GHCR package family:
+          # Detect if dev or production (e.g. 0.70.8-dev vs 0.70.0). Drives GHCR package family:
           # - production → ghcr.io/<owner>/bastion-<service> (intended public)
           # - dev        → ghcr.io/<owner>/bastion-dev-<service> (stays private; separate package name)
           if [[ "$VERSION" == *"-dev" ]]; then
