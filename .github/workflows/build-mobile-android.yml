@@ -1,3 +1,5 @@
+# Re-run failed jobs on an old commit still uses that commit (no YAML updates). After workflow
+# fixes, use "Run workflow" here or push to main; tag-only re-run keeps the old tree.
 name: Build Bastion Mobile (Android)
 
 on:
@@ -85,11 +87,12 @@ jobs:
 
       - name: Create Release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: mobile/android/app/build/outputs/apk/debug/*.apk
           draft: false
           prerelease: ${{ contains(github.ref, '-dev') }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           body: |
             ## Bastion Mobile (Android debug APK)
 
@@ -98,8 +101,6 @@ jobs:
             Install the APK on a device or emulator. Set **Bastion server URL** via `EXPO_PUBLIC_API_BASE_URL` at build time, or use a dev client pointed at your server.
 
             Debug builds use the default debug keystore (not for Play Store). For release signing, add keystore secrets and switch the workflow to `assembleRelease` / `bundleRelease`.
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build summary
         run: |
