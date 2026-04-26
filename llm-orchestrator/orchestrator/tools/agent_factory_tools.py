@@ -440,7 +440,7 @@ RUNTIME_VARS = frozenset({
     "editor_current_section", "editor_current_heading",
     "editor_previous_section", "editor_next_section",
     "editor_section_index", "editor_adjacent_sections", "editor_total_sections",
-    "editor_toc",
+    "editor_toc", "editor_linked_notes",
     "editor_is_first_section", "editor_is_last_section", "editor_ref_count",
     "document_context", "pinned_document_id", "last_tool_results",
     "profile",

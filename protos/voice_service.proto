@@ -52,11 +52,11 @@ message TranscribeResponse {
 message SynthesizeRequest {
   string text = 1;
   string voice_id = 2;       // Provider-specific voice identifier
-  string provider = 3;       // "elevenlabs", "openai", "piper"; empty = default
+  string provider = 3;       // "elevenlabs", "hedra", "openai", "openrouter", "piper"; empty = default
   string output_format = 4; // "ogg", "wav", "mp3"
   string api_key = 5;       // optional per-request override; empty = env default
   string base_url = 6;      // optional API base URL override
-  string model_id = 7;      // optional; ElevenLabs model id or Hedra TTS engine UUID; empty = platform default
+  string model_id = 7;      // optional; ElevenLabs model id, Hedra TTS engine UUID, or OpenRouter model slug; empty = platform default
 }
 
 message SynthesizeResponse {

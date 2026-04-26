@@ -14,6 +14,7 @@ from services.user_voice_provider_service import (
     SETTING_USE_ADMIN_TTS,
     SETTING_USER_ADMIN_ELEVENLABS_TTS_MODEL_ID,
     SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID,
+    SETTING_USER_ADMIN_OPENROUTER_TTS_MODEL_ID,
     SETTING_USER_ADMIN_TTS_PROVIDER,
     SETTING_USER_ADMIN_TTS_VOICE_ID,
     SETTING_USER_ADMIN_TTS_VOICE_PIPER,
@@ -22,6 +23,7 @@ from services.user_voice_provider_service import (
     SETTING_USER_BYOK_TTS_VOICE_PIPER,
     SETTING_USER_ELEVENLABS_TTS_MODEL_ID,
     SETTING_USER_HEDRA_TTS_MODEL_ID,
+    SETTING_USER_OPENROUTER_TTS_MODEL_ID,
     SETTING_USER_STT_PROVIDER_ID,
     SETTING_USER_TTS_PROVIDER_ID,
     SETTING_USER_TTS_VOICE_ID,
@@ -31,6 +33,10 @@ from utils.elevenlabs_tts_model import validated_elevenlabs_model_id
 from utils.hedra_tts_model import (
     fetch_hedra_text_to_speech_models,
     validated_hedra_tts_model_id,
+)
+from utils.openrouter_tts_model import (
+    fetch_openrouter_tts_models,
+    validated_openrouter_tts_model_id,
 )
 from services.user_settings_kv_service import get_user_setting, set_user_setting
 from utils.auth_middleware import get_current_user
@@ -167,7 +173,8 @@ async def _voice_settings_payload(user_id: str) -> Dict[str, Any]:
     effective_provider = ""
 
     if use_admin_tts:
-        if admin_tts_provider == "browser":
+        # Missing / blank = browser for new deployments; "server" = deployer voice-service default.
+        if admin_tts_provider in ("browser", ""):
             prefer_browser_tts = True
             effective_voice = ""
             effective_provider = ""
@@ -176,7 +183,9 @@ async def _voice_settings_payload(user_id: str) -> Dict[str, Any]:
             effective_provider = "piper"
         else:
             effective_voice = admin_server_v
-            effective_provider = admin_tts_provider
+            effective_provider = (
+                "" if admin_tts_provider == "server" else admin_tts_provider
+            )
     else:
         if raw_byok_engine == "browser":
             prefer_browser_tts = True
@@ -207,6 +216,12 @@ async def _voice_settings_payload(user_id: str) -> Dict[str, Any]:
     admin_hedra_model = (
         await get_user_setting(user_id, SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID) or ""
     ).strip()
+    user_openrouter_model = (
+        await get_user_setting(user_id, SETTING_USER_OPENROUTER_TTS_MODEL_ID) or ""
+    ).strip()
+    admin_openrouter_model = (
+        await get_user_setting(user_id, SETTING_USER_ADMIN_OPENROUTER_TTS_MODEL_ID) or ""
+    ).strip()
 
     return {
         "use_admin_tts": use_admin_tts,
@@ -230,6 +245,8 @@ async def _voice_settings_payload(user_id: str) -> Dict[str, Any]:
         "user_admin_elevenlabs_tts_model_id": admin_el_model,
         "user_hedra_tts_model_id": user_hedra_model,
         "user_admin_hedra_tts_model_id": admin_hedra_model,
+        "user_openrouter_tts_model_id": user_openrouter_model,
+        "user_admin_openrouter_tts_model_id": admin_openrouter_model,
     }
 
 
@@ -270,6 +287,49 @@ async def list_hedra_tts_models(
         raise HTTPException(status_code=502, detail=str(e)) from e
     except Exception as e:
         logger.exception("list_hedra_tts_models failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.get("/openrouter-tts-models")
+async def list_openrouter_tts_models(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List OpenRouter TTS models (speech output modality) for admin or BYOK OpenRouter key."""
+    uid = current_user.user_id
+    try:
+        use_admin = _truthy(await get_user_setting(uid, SETTING_USE_ADMIN_TTS))
+        api_key = ""
+        base_url: Optional[str] = None
+        if use_admin:
+            api_key = (getattr(settings, "OPENROUTER_API_KEY", "") or "").strip()
+            if not api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Set OPENROUTER_API_KEY on the backend to list OpenRouter TTS models for built-in TTS.",
+                )
+            base_url = (getattr(settings, "OPENROUTER_BASE_URL", "") or "").strip() or None
+        else:
+            ctx = await user_voice_provider_service.get_voice_context(uid, "tts")
+            if not ctx or str(ctx.get("provider_type") or "").lower() != "openrouter":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Select an OpenRouter cloud TTS provider to list models.",
+                )
+            api_key = (ctx.get("api_key") or "").strip()
+            base_url = (ctx.get("base_url") or "").strip() or None
+            if not api_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="OpenRouter API key is missing for this provider.",
+                )
+        models = await fetch_openrouter_tts_models(api_key, base_url)
+        return {"success": True, "models": models}
+    except HTTPException:
+        raise
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+    except Exception as e:
+        logger.exception("list_openrouter_tts_models failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
@@ -418,6 +478,30 @@ async def put_voice_settings(
             await set_user_setting(
                 uid,
                 SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID,
+                v,
+                "string",
+            )
+        if "user_openrouter_tts_model_id" in request:
+            v = str(request["user_openrouter_tts_model_id"] or "").strip()
+            try:
+                validated_openrouter_tts_model_id(v)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            await set_user_setting(
+                uid,
+                SETTING_USER_OPENROUTER_TTS_MODEL_ID,
+                v,
+                "string",
+            )
+        if "user_admin_openrouter_tts_model_id" in request:
+            v = str(request["user_admin_openrouter_tts_model_id"] or "").strip()
+            try:
+                validated_openrouter_tts_model_id(v)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            await set_user_setting(
+                uid,
+                SETTING_USER_ADMIN_OPENROUTER_TTS_MODEL_ID,
                 v,
                 "string",
             )

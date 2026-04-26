@@ -11,11 +11,64 @@ pub fn capability_enabled(config: &AppConfig, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// True when remote writes/patches are allowed: explicit `write_file`, or `write_file` omitted and `read_file` enabled (shared allowlist).
+pub fn implicit_write_allowed(config: &AppConfig) -> bool {
+    match config.capabilities.get("write_file") {
+        Some(c) => c.enabled,
+        None => config
+            .capabilities
+            .get("read_file")
+            .map(|c| c.enabled)
+            .unwrap_or(false),
+    }
+}
+
+/// YAML config key that supplies allowed_paths / denied_paths for this capability.
+fn policy_config_key<'a>(config: &'a AppConfig, capability_name: &'a str) -> Option<&'a str> {
+    match capability_name {
+        "patch_file" => {
+            if config.capabilities.contains_key("patch_file") {
+                Some("patch_file")
+            } else if config.capabilities.contains_key("write_file") {
+                Some("write_file")
+            } else if config.capabilities.contains_key("read_file") {
+                Some("read_file")
+            } else {
+                None
+            }
+        }
+        "write_file" => {
+            if config.capabilities.contains_key("write_file") {
+                Some("write_file")
+            } else if config.capabilities.contains_key("read_file") {
+                Some("read_file")
+            } else {
+                None
+            }
+        }
+        _ => {
+            if config.capabilities.contains_key(capability_name) {
+                Some(capability_name)
+            } else {
+                None
+            }
+        }
+    }
+}
+
 /// Whether the daemon should advertise this capability to the backend on register.
 pub fn capability_offered(config: &AppConfig, name: &str) -> bool {
     if name == "create_directory" {
-        return capability_enabled(config, "create_directory")
-            || capability_enabled(config, "write_file");
+        return capability_enabled(config, "create_directory") || implicit_write_allowed(config);
+    }
+    if name == "write_file" {
+        return implicit_write_allowed(config);
+    }
+    if name == "patch_file" {
+        if config.capabilities.contains_key("patch_file") {
+            return capability_enabled(config, "patch_file");
+        }
+        return implicit_write_allowed(config);
     }
     capability_enabled(config, name)
 }
@@ -73,9 +126,15 @@ pub fn validate_path_for_write(
 }
 
 fn validate_path_inner(config: &AppConfig, capability_name: &str, path_str: &str) -> Result<(), String> {
+    let policy_key = policy_config_key(config, capability_name).ok_or_else(|| {
+        format!(
+            "Capability {} not configured (add it, or enable read_file with allowed_paths for Code Space writes)",
+            capability_name
+        )
+    })?;
     let cap = config
         .capabilities
-        .get(capability_name)
+        .get(policy_key)
         .ok_or_else(|| format!("Capability {} not configured", capability_name))?;
 
     for denied in &cap.denied_paths {
@@ -156,7 +215,8 @@ pub fn check_output_limit(
     capability_name: &str,
     size: usize,
 ) -> Result<(), String> {
-    let cap = config.capabilities.get(capability_name);
+    let policy_key = policy_config_key(config, capability_name).unwrap_or(capability_name);
+    let cap = config.capabilities.get(policy_key);
     let Some(max) = cap.and_then(|c| c.max_output_bytes) else {
         return Ok(());
     };

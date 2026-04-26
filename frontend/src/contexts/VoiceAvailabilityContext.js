@@ -12,7 +12,7 @@ const defaultPrefs = {
   effective_server_voice_id: '',
   effective_server_provider: '',
   byokTtsActive: false,
-  prefer_browser_tts: false,
+  prefer_browser_tts: true,
 };
 
 const VoiceAvailabilityContext = createContext({

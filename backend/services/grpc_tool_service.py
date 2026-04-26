@@ -21,6 +21,7 @@ from services.grpc_handlers import (
     RssHandlersMixin,
     MediaHandlersMixin,
     DataWorkspaceHandlersMixin,
+    CodeWorkspaceHandlersMixin,
     NavigationHandlersMixin,
     SearchUtilityHandlersMixin,
     AnalysisHandlersMixin,
@@ -32,6 +33,7 @@ from services.grpc_handlers import (
     DataConnectorBuilderHandlersMixin,
     ControlPaneHandlersMixin,
     AgentFactoryCrudHandlersMixin,
+    ShellPolicyHandlersMixin,
 )
 
 
@@ -46,6 +48,7 @@ class ToolServiceImplementation(
     RssHandlersMixin,
     MediaHandlersMixin,
     DataWorkspaceHandlersMixin,
+    CodeWorkspaceHandlersMixin,
     NavigationHandlersMixin,
     SearchUtilityHandlersMixin,
     AnalysisHandlersMixin,
@@ -57,6 +60,7 @@ class ToolServiceImplementation(
     DataConnectorBuilderHandlersMixin,
     ControlPaneHandlersMixin,
     AgentFactoryCrudHandlersMixin,
+    ShellPolicyHandlersMixin,
     tool_service_pb2_grpc.ToolServiceServicer,
 ):
     """

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Autocomplete,
   TextField,
@@ -15,16 +15,42 @@ import apiService from '../services/apiService';
  * 
  * Dropdown that displays filesystem directory tree for journal location selection
  */
-const JournalLocationPicker = ({ value, onChange, disabled, error }) => {
+const JournalLocationPicker = ({
+  value,
+  onChange,
+  disabled,
+  error,
+  locationsUrl = '/api/org/settings/journal-locations',
+}) => {
   const [directories, setDirectories] = useState([]);
   const [loading, setLoading] = useState(false);
   const [errorState, setErrorState] = useState(null);
   const [options, setOptions] = useState([]);
 
+  const loadDirectories = useCallback(async () => {
+    try {
+      setLoading(true);
+      setErrorState(null);
+
+      const response = await apiService.get(locationsUrl);
+
+      if (response && response.success && response.directories) {
+        setDirectories(response.directories);
+      } else {
+        setErrorState('Failed to load directories');
+      }
+    } catch (err) {
+      console.error('Failed to load journal locations:', err);
+      setErrorState(err.message || 'Failed to load directories');
+    } finally {
+      setLoading(false);
+    }
+  }, [locationsUrl]);
+
   // Load directory tree
   useEffect(() => {
     loadDirectories();
-  }, []);
+  }, [loadDirectories]);
 
   // Build flat list of options from tree
   useEffect(() => {
@@ -53,26 +79,6 @@ const JournalLocationPicker = ({ value, onChange, disabled, error }) => {
     });
     setOptions(flatOptions);
   }, [directories]);
-
-  const loadDirectories = async () => {
-    try {
-      setLoading(true);
-      setErrorState(null);
-      
-      const response = await apiService.get('/api/org/settings/journal-locations');
-      
-      if (response && response.success && response.directories) {
-        setDirectories(response.directories);
-      } else {
-        setErrorState('Failed to load directories');
-      }
-    } catch (err) {
-      console.error('Failed to load journal locations:', err);
-      setErrorState(err.message || 'Failed to load directories');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   return (
     <Box>

@@ -176,6 +176,12 @@ service ToolService {
   rpc UpdateDataWorkspaceRows(UpdateDataWorkspaceRowsRequest) returns (UpdateDataWorkspaceRowsResponse);
   rpc DeleteDataWorkspaceRows(DeleteDataWorkspaceRowsRequest) returns (DeleteDataWorkspaceRowsResponse);
 
+  // Local code workspace registry + indexed chunks (Postgres FTS + Qdrant)
+  rpc ListCodeWorkspaces(ListCodeWorkspacesRequest) returns (ListCodeWorkspacesResponse);
+  rpc GetCodeWorkspace(GetCodeWorkspaceRequest) returns (GetCodeWorkspaceResponse);
+  rpc UpsertCodeWorkspaceChunks(UpsertCodeWorkspaceChunksRequest) returns (UpsertCodeWorkspaceChunksResponse);
+  rpc CodeSemanticSearch(CodeSemanticSearchRequest) returns (CodeSemanticSearchResponse);
+
   // Navigation operations (locations and routes)
   rpc CreateLocation(CreateLocationRequest) returns (CreateLocationResponse);
   rpc ListLocations(ListLocationsRequest) returns (ListLocationsResponse);
@@ -230,6 +236,10 @@ service ToolService {
   rpc GetPlaybook(GetPlaybookRequest) returns (GetPlaybookResponse);
   rpc LogAgentExecution(LogAgentExecutionRequest) returns (LogAgentExecutionResponse);
   rpc ParkApproval(ParkApprovalRequest) returns (ParkApprovalResponse);
+  rpc GetUserShellPolicy(GetUserShellPolicyRequest) returns (GetUserShellPolicyResponse);
+  rpc UpsertShellPolicyRule(UpsertShellPolicyRuleRequest) returns (UpsertShellPolicyRuleResponse);
+  rpc DeleteShellPolicyRule(DeleteShellPolicyRuleRequest) returns (DeleteShellPolicyRuleResponse);
+  rpc GrantAndConsumeShellApproval(GrantAndConsumeShellApprovalRequest) returns (GrantAndConsumeShellApprovalResponse);
   rpc GetAgentMemory(GetAgentMemoryRequest) returns (GetAgentMemoryResponse);
   rpc SetAgentMemory(SetAgentMemoryRequest) returns (SetAgentMemoryResponse);
   rpc ListAgentMemories(ListAgentMemoriesRequest) returns (ListAgentMemoriesResponse);
@@ -404,6 +414,30 @@ message DocumentContentResponse {
   string format = 3;  // "text", "markdown", "html"
   // Absolute resolved path on document-service disk (API gateway uses for metadata.canonical_path).
   optional string canonical_path = 4;
+}
+
+// Resolved document link graph (wikilinks, org links, frontmatter refs, etc.)
+message GetDocumentLinksRequest {
+  string document_id = 1;
+  string user_id = 2;
+  string direction = 3;           // "outgoing" | "incoming" | "both"
+  repeated string link_types = 4; // e.g. "wikilink"; empty = all types
+  int32 limit = 5;                // max rows per direction; 0 = server default (50)
+}
+
+message DocumentLinkItem {
+  string document_id = 1;
+  string filename = 2;
+  string title = 3;
+  string canonical_path = 4;  // from metadata_json when present; else empty
+  string link_type = 5;
+  int32 line_number = 6;
+  string direction = 7;       // "outgoing" | "incoming"
+}
+
+message GetDocumentLinksResponse {
+  repeated DocumentLinkItem links = 1;
+  int32 total = 2;
 }
 
 message DocumentChunksResponse {
@@ -2121,6 +2155,98 @@ message DeleteDataWorkspaceRowsResponse {
   string error_message = 4;
 }
 
+// Code workspace (local proxy) registry + semantic index
+message ListCodeWorkspacesRequest {
+  string user_id = 1;
+}
+
+message CodeWorkspaceSummary {
+  string workspace_id = 1;
+  string name = 2;
+  string device_id = 3;
+  string workspace_path = 4;
+  string last_git_branch = 5;
+  string updated_at = 6;
+}
+
+message ListCodeWorkspacesResponse {
+  repeated CodeWorkspaceSummary workspaces = 1;
+  int32 total = 2;
+}
+
+message GetCodeWorkspaceRequest {
+  string user_id = 1;
+  string workspace_id = 2;
+}
+
+message CodeWorkspaceDetail {
+  string workspace_id = 1;
+  string user_id = 2;
+  string name = 3;
+  string device_id = 4;
+  string device_name = 5;
+  string workspace_path = 6;
+  string last_git_branch = 7;
+  string last_file_tree_json = 8;
+  string settings_json = 9;
+  string conversation_id = 10;
+  string created_at = 11;
+  string updated_at = 12;
+}
+
+message GetCodeWorkspaceResponse {
+  bool success = 1;
+  optional string error = 2;
+  CodeWorkspaceDetail workspace = 3;
+}
+
+message CodeWorkspaceChunkProto {
+  string file_path = 1;
+  int32 chunk_index = 2;
+  int32 start_line = 3;
+  int32 end_line = 4;
+  string content = 5;
+  string language = 6;
+  string git_sha = 7;
+}
+
+message UpsertCodeWorkspaceChunksRequest {
+  string user_id = 1;
+  string workspace_id = 2;
+  bool replace_workspace = 3;
+  repeated CodeWorkspaceChunkProto chunks = 4;
+}
+
+message UpsertCodeWorkspaceChunksResponse {
+  bool success = 1;
+  int32 inserted = 2;
+  optional string error = 3;
+  int32 embedded = 4;
+}
+
+message CodeSemanticSearchRequest {
+  string user_id = 1;
+  string workspace_id = 2;
+  string query = 3;
+  int32 limit = 4;
+  string file_glob = 5;
+}
+
+message CodeSemanticSearchHit {
+  string chunk_id = 1;
+  string file_path = 2;
+  int32 start_line = 3;
+  int32 end_line = 4;
+  string snippet = 5;
+  double score = 6;
+}
+
+message CodeSemanticSearchResponse {
+  bool success = 1;
+  repeated CodeSemanticSearchHit hits = 2;
+  optional string error = 3;
+}
+
 // Face Analysis Messages
 message DetectFacesRequest {
   string attachment_path = 1;  // Full path to image file
@@ -3342,6 +3468,56 @@ message ParkApprovalRequest {
 message ParkApprovalResponse {
   bool success = 1;
   string approval_id = 2;  // UUID of agent_approval_queue row
+  string error = 3;
+}
+
+message GetUserShellPolicyRequest {
+  string user_id = 1;
+}
+
+message GetUserShellPolicyResponse {
+  bool success = 1;
+  string rules_json = 2;  // JSON array of rule objects
+  string error = 3;
+}
+
+message UpsertShellPolicyRuleRequest {
+  string user_id = 1;
+  string rule_id = 2;  // empty UUID string = insert new
+  string pattern = 3;
+  string match_mode = 4;  // prefix | contains | glob
+  string action = 5;      // allow | deny | require_approval
+  string scope_workspace_id = 6;  // optional
+  string label = 7;
+  int32 priority = 8;
+}
+
+message UpsertShellPolicyRuleResponse {
+  bool success = 1;
+  string rule_id = 2;
+  string error = 3;
+}
+
+message DeleteShellPolicyRuleRequest {
+  string user_id = 1;
+  string rule_id = 2;
+}
+
+message DeleteShellPolicyRuleResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GrantAndConsumeShellApprovalRequest {
+  string user_id = 1;
+  string approval_id = 2;  // optional when consume=true and using command lookup
+  string command = 3;      // used for consume lookup when approval_id empty
+  bool consume = 4;       // false: pending -> approved for approval_id; true: approved -> consumed (by id or command)
+}
+
+message GrantAndConsumeShellApprovalResponse {
+  bool success = 1;
+  bool granted_or_consumed = 2;
   string error = 3;
 }
 

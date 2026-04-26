@@ -34,6 +34,9 @@ _ORG_LINK_RE = re.compile(
 _MD_LINK_RE = re.compile(
     r'\[([^\]]*)\]\(([^)]+)\)'
 )
+_WIKILINK_RE = re.compile(
+    r'\[\[([^\]|]+)(?:\|([^\]]*))?\]\]'
+)
 
 
 def _parse_org_links(content: str) -> List[Tuple[str, str, str, int]]:
@@ -75,6 +78,44 @@ def _parse_markdown_links(content: str) -> List[Tuple[str, str, int]]:
             if url.startswith('mailto:'):
                 continue
             results.append((url, text, i))
+    return results
+
+
+def _wikilink_plain_title(target: str) -> bool:
+    t = (target or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if low.startswith(("file:", "id:", "http://", "https://", "#")):
+        return False
+    if re.match(r"^\.?\.\.?\/[^\s]*\.(org|md|txt)$", t, re.I) or re.match(
+        r"^[^\s/\\]+\.(org|md|txt)$", t, re.I
+    ):
+        return False
+    if "/" in t or "\\" in t:
+        return False
+    return True
+
+
+def _parse_wikilinks_with_lines(content: str) -> List[Tuple[str, str, int]]:
+    trimmed = content[1:] if content.startswith("\ufeff") else content
+    m_fm = re.match(r"^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?", trimmed)
+    if m_fm:
+        body = trimmed[m_fm.end():]
+        prefix_lines = trimmed[: m_fm.end()].count("\n")
+    else:
+        body = trimmed
+        prefix_lines = 0
+
+    results: List[Tuple[str, str, int]] = []
+    for i, line in enumerate(body.splitlines(), start=1):
+        abs_line = prefix_lines + i
+        for m in _WIKILINK_RE.finditer(line):
+            target = (m.group(1) or "").strip()
+            desc = (m.group(2) or "").strip() or target
+            if not target or not _wikilink_plain_title(target):
+                continue
+            results.append((target, desc, abs_line))
     return results
 
 
@@ -280,6 +321,24 @@ class LinkExtractionService:
         )
         return None
 
+    async def _resolve_wikilink_target(
+        self,
+        title: str,
+        source_doc: Dict[str, Any],
+        rls_context: Dict[str, str],
+    ) -> Optional[str]:
+        user_id = source_doc.get("user_id")
+        collection_type = source_doc.get("collection_type") or "user"
+        if not user_id or not title:
+            return None
+        doc = await self.document_repository.find_by_wikilink_title(
+            title.strip(), user_id, collection_type
+        )
+        if doc:
+            return doc.document_id
+        logger.debug("Wikilink unresolved: title=%r", title)
+        return None
+
     async def extract_and_store_links(
         self,
         document_id: str,
@@ -349,6 +408,24 @@ class LinkExtractionService:
                     'collection_type': collection_type,
                     'team_id': team_id,
                 })
+
+            filename_lc = (doc_row.get("filename") or "").lower()
+            if filename_lc.endswith(".md"):
+                for wtitle, wdesc, wline in _parse_wikilinks_with_lines(content):
+                    target_id = await self._resolve_wikilink_target(
+                        wtitle, doc_row, rls_context
+                    )
+                    links_to_insert.append({
+                        "source_document_id": document_id,
+                        "target_document_id": target_id,
+                        "target_raw_path": f"wikilink:{wtitle}",
+                        "link_type": "wikilink",
+                        "description": wdesc or None,
+                        "line_number": wline,
+                        "user_id": user_id,
+                        "collection_type": collection_type,
+                        "team_id": team_id,
+                    })
 
             # Frontmatter file references (proprietary keys: outline, style, components, etc.)
             for raw_ref, key in _extract_frontmatter_refs(content):

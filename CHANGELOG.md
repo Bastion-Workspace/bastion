@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.70.7] - 2026-04-26
+
+- Fix: **LLM agent tool results** — `llm_agent` steps only passed `formatted` to the model as `ToolMessage` content, so **`local_read_file`** (and similar tools) dropped **`content`**, **`entries`**, etc. Pipeline executor now appends JSON for remaining payload keys (with truncation via existing `MAX_TOOL_RESULT_CHARS`).
+- Fix: **WebSockets behind reverse proxies** — frontend nginx uses dedicated `/api/ws/` and `/api/messaging/ws` locations (long timeouts, `Upgrade` only there); backend enables Uvicorn **`--ws-ping-interval` / `--ws-ping-timeout`** by default (`UVICORN_WS_PING_*`); **`docs/DEPLOYMENT.md`** §2.4 documents edge proxy requirements and **`UVICORN_WORKERS=1`** for the local proxy.
 - Feature: **Local proxy** — headless mode (`--headless` / `cargo build --no-default-features`), optional `gui` Cargo feature, Debian `.deb` (`cargo deb`), systemd unit and postinst for `bastion-proxy` user; clearer errors for display-only capabilities on headless hosts.
 - Fix: **Local proxy CI** — split Linux: desktop binary on `ubuntu-latest` (PipeWire/libspa matches xcap); headless `.deb` on `ubuntu-22.04` with `--no-default-features` (no `native-screenshot` / xcap) for Debian 12–compatible Depends. Optional Cargo feature **`native-screenshot`** (default on) pulls xcap; omit for bookworm-era libpipewire toolchains (nashaofu/xcap#247).
 

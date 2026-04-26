@@ -593,6 +593,40 @@ class GRPCContextGatherer:
                     if "column" not in str(e).lower() and "does not exist" not in str(e).lower():
                         logger.warning("Failed to load code workspace context: %s", e)
 
+            try:
+                from services.database_manager.database_helpers import fetch_all as _fetch_all_shell
+
+                _sp_rows = await _fetch_all_shell(
+                    """
+                    SELECT id::text, pattern, match_mode, action,
+                           scope_workspace_id::text AS scope_workspace_id,
+                           label, priority
+                    FROM user_shell_policy
+                    WHERE user_id = $1
+                    ORDER BY priority ASC NULLS LAST, created_at ASC
+                    """,
+                    user_id,
+                    rls_context={"user_id": user_id, "user_role": "user"},
+                )
+                if _sp_rows:
+                    grpc_request.metadata["shell_command_policy"] = json.dumps(
+                        [
+                            {
+                                "id": r.get("id"),
+                                "pattern": r.get("pattern") or "",
+                                "match_mode": r.get("match_mode") or "prefix",
+                                "action": r.get("action") or "allow",
+                                "scope_workspace_id": r.get("scope_workspace_id"),
+                                "label": r.get("label"),
+                                "priority": r.get("priority"),
+                            }
+                            for r in _sp_rows
+                        ]
+                    )
+            except Exception as e:
+                if "does not exist" not in str(e).lower() and "relation" not in str(e).lower():
+                    logger.debug("Shell policy load skipped: %s", e)
+
             # Check if models are properly configured
             models_configured = request_context.get("models_configured", True)  # Default to True for backward compatibility
             if not models_configured:

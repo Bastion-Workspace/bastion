@@ -28,6 +28,7 @@ const CAPABILITIES_UI_TAIL: &[(&str, &str)] = &[
     ("read_file", "Read file"),
     ("list_directory", "List directory"),
     ("write_file", "Write file"),
+    ("patch_file", "Patch file (replace text)"),
     ("create_directory", "Create directory"),
     ("file_tree", "File tree"),
     ("search_files", "Search files"),
@@ -53,7 +54,8 @@ pub use file_tree::FileTreeCapability;
 // Re-exports for API consumers; registry uses `filesystem::` paths for some types.
 #[allow(unused_imports)]
 pub use filesystem::{
-    CreateDirectoryCapability, ListDirectoryCapability, ReadFileCapability, WriteFileCapability,
+    CreateDirectoryCapability, ListDirectoryCapability, PatchFileCapability, ReadFileCapability,
+    WriteFileCapability,
 };
 pub use git_info::GitInfoCapability;
 pub use open_url::OpenUrlCapability;
@@ -121,6 +123,10 @@ impl CapabilityRegistry {
         capabilities.insert(
             "write_file".to_string(),
             Box::new(WriteFileCapability) as Box<dyn Capability>,
+        );
+        capabilities.insert(
+            "patch_file".to_string(),
+            Box::new(PatchFileCapability) as Box<dyn Capability>,
         );
         capabilities.insert(
             "create_directory".to_string(),

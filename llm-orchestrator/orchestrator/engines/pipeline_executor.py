@@ -43,6 +43,43 @@ _TRACE_ARGS_MAX = 512
 # Max characters for a single tool result sent to the LLM (~20K tokens); backstop to prevent context overflow
 MAX_TOOL_RESULT_CHARS = 80000
 
+
+def _tool_result_str_for_llm(result: Any) -> str:
+    """
+    Build ToolMessage text for the LLM. Many tools put a short summary in `formatted` and
+    payloads in other keys (e.g. local_read_file uses `content`); using only `formatted`
+    drops file bodies, directory listings, etc.
+    """
+    if not isinstance(result, dict):
+        return str(result or "")
+    if result.get("image_data_uri"):
+        return (result.get("formatted") or "Screenshot").strip()
+    summary = (result.get("formatted") or "").strip()
+    skip = {
+        "formatted",
+        "image_data_uri",
+        "images",
+        "artifact",
+        "proposal_id",
+        "_needs_human_interaction",
+        "_acquire_skills",
+        "_acquired_tools",
+        "_skill_guidance",
+        "_acquired_skill_infos",
+    }
+    payload = {
+        k: v
+        for k, v in result.items()
+        if k not in skip and not str(k).startswith("_")
+    }
+    if not payload:
+        return summary or json.dumps(result, default=str, ensure_ascii=False)
+    try:
+        body = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        body = str(payload)
+    return f"{summary}\n{body}" if summary else body
+
 from orchestrator.engines.tool_resolution import (
     M365_STYLE_SANITIZE_PREFIXES,
     ResolvedSkillInfo,
@@ -2053,7 +2090,7 @@ async def _execute_llm_agent_step(
                         }
                     if original_name:
                         executed_tool_names.append(original_name)
-                    result_str = result.get("formatted", str(result)) if isinstance(result, dict) else str(result or "")
+                    result_str = _tool_result_str_for_llm(result)
                     # If tool returned an image (e.g. local_screenshot), don't send huge base64 to LLM;
                     # use a short placeholder and collect the image for the final response.
                     if isinstance(result, dict) and result.get("image_data_uri"):
@@ -2479,7 +2516,6 @@ async def execute_step(
     kwargs: Dict[str, Any] = {**resolved, **params_spec, "user_id": user_id}
     # Tool functions may not accept user_id; try without if they don't
     tool_fn = contract.tool_function
-    import inspect
     sig = inspect.signature(tool_fn)
     final_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters}
     if "user_id" not in sig.parameters and "user_id" in kwargs:

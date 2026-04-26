@@ -662,6 +662,47 @@ BUILTIN_SKILL_DEFINITIONS: list[dict] = [
         "tags": ["knowledge graph", "entities", "relationships", "entity search", "graph traversal", "connections", "linked data"],
         "evidence_metadata": {"engine_type": "automation"},
     },
+    # ---- Zettelkasten ----
+    {
+        "slug": "zettelkasten-traversal",
+        "name": "Zettelkasten Note Traversal",
+        "description": (
+            "Navigate the note link graph for the open markdown document. "
+            "Find what the current note links to, load linked note content, "
+            "and traverse the note graph up to depth 2. "
+            "Use for 'what does this note connect to', 'load my linked notes', "
+            "'find all notes about X that I have linked here', or 'build context from my ZK'."
+        ),
+        "category": "knowledge-graph",
+        "procedure": (
+            "Prefer the link graph when you have a document_id (e.g. from editor_document_id or a prior tool result).\n"
+            "Step 0: Call get_document_links with that document_id; use direction='outgoing' for notes this file links to, "
+            "direction='incoming' for backlinks (what links TO this note), or direction='both'. "
+            "Optional link_types filter e.g. ['wikilink'] to focus on Zettelkasten wikilinks.\n"
+            "The prompt variable editor_linked_notes lists [[Title]] wikilinks parsed from the open file — use as a hint when the graph is stale or for unresolved titles.\n"
+            "When you need fuzzy discovery or editor_linked_notes titles without graph rows, call search_documents with the title (limit 1–3) then get_document_content.\n"
+            "After resolving neighbours, call get_document_content for each document_id you need to read.\n"
+            "Limit graph traversal to depth 2 unless the user explicitly asks for deeper. Summarise the note neighbourhood before answering.\n"
+            "If editor_linked_notes is empty and the user has no open note, use search_documents on the user's query."
+        ),
+        "required_tools": ["search_documents", "get_document_content", "get_document_links"],
+        "optional_tools": ["search_within_document"],
+        "tags": [
+            "zettelkasten",
+            "wikilinks",
+            "backlinks",
+            "note graph",
+            "linked notes",
+            "note neighbourhood",
+            "knowledge base",
+            "note traversal",
+            "my notes",
+            "connected notes",
+            "network of notes",
+        ],
+        "evidence_metadata": {"engine_type": "automation"},
+        "is_core": True,
+    },
     # ---- Data ----
     {
         "slug": "data-workspace",
@@ -787,14 +828,14 @@ BUILTIN_SKILL_DEFINITIONS: list[dict] = [
             "local_screenshot: capture the current screen. local_clipboard_read / local_clipboard_write: read or set clipboard content. "
             "local_system_info: OS, CPU, memory, disk info. local_desktop_notify: show a desktop notification. "
             "local_shell_execute: run a shell command (use with care; confirm destructive commands with the user). "
-            "local_read_file / local_write_file: read or write files on the local filesystem. local_list_directory: list directory contents. "
+            "local_read_file / local_write_file / local_patch_file: read, overwrite, or search-replace in local files. local_list_directory: list directory contents. "
             "local_list_processes: list running processes. local_open_url: open a URL in the default browser. "
             "Always confirm potentially destructive operations (write, shell) with the user before executing."
         ),
         "required_tools": [
             "local_screenshot", "local_clipboard_read", "local_clipboard_write",
             "local_system_info", "local_desktop_notify", "local_shell_execute",
-            "local_read_file", "local_list_directory", "local_write_file",
+            "local_read_file", "local_list_directory", "local_write_file", "local_patch_file",
             "local_list_processes", "local_open_url",
         ],
         "optional_tools": [],
@@ -804,23 +845,53 @@ BUILTIN_SKILL_DEFINITIONS: list[dict] = [
     {
         "slug": "code-workspace",
         "name": "Code Workspace",
-        "description": "Browse, search, and edit code in a local workspace. File tree, content search, git info, read/write files, and run commands.",
+        "description": "Browse, search, index, and edit code in local workspaces via Bastion Local Proxy; supports multiple saved workspaces per user.",
         "category": "code",
         "procedure": (
-            "You help the user work with a local code workspace via Bastion Local Proxy. "
-            "code_open_workspace: set the workspace root directory. code_file_tree: list the file tree (optional depth, glob filter). "
-            "code_search_files: search file contents by query (regex or literal) or filename pattern. "
-            "code_git_info: get git branch, status, recent commits for the workspace. "
-            "local_read_file: read a file by path. local_write_file: write/create a file. local_list_directory: list a directory. "
-            "local_shell_execute: run shell commands (e.g. build, test, lint). "
-            "Typical flow: code_open_workspace, then code_file_tree to orient, code_search_files or local_read_file to examine code."
+            "You help the user work with local code workspaces via Bastion Local Proxy. "
+            "ALWAYS start by calling code_list_workspaces to list saved workspaces (id, name, path, device_id). "
+            "If there are none, tell the user to create one in the Bastion UI (Code Workspaces) or provide an absolute path and device. "
+            "If exactly one workspace exists and the user did not name another, call code_get_workspace then code_open_workspace with that workspace_path and device_id. "
+            "If multiple exist, show name + path + id and ask which workspace_id to use before calling code_open_workspace. "
+            "After opening: call code_file_tree to orient (pass the same device_id from code_get_workspace so the right proxy handles paths when multiple devices are connected). "
+            "Use code_search_files for exact regex/symbol search on the device (same device_id). "
+            "For intent-based questions over indexed code, call code_semantic_search with the chosen workspace_id (user must run code_index_workspace first to populate the index). "
+            "code_index_workspace: walks the repo on the device and upserts chunks for semantic search (may run in multiple batches if truncated). "
+            "code_git_info: branch, status, diff, log. "
+            "Follow any project rules in the system context (e.g. code_workspace_rules) for this workspace. "
+            "**Editing — two paths:** (1) **Files on disk** (normal case): use local_read_file to read source; prefer **local_patch_file** "
+            "(exact old_string → new_string, unique match) for small edits; use local_write_file for full-file rewrites. "
+            "If a write fails, the Local Proxy config may have write_file disabled or the path outside allowed_paths — fix config on the device. "
+            "For non-trivial or destructive edits, summarize the change and get explicit user confirmation before writing. "
+            "Read enough context (full file or surrounding lines) so replacements are accurate. "
+            "(2) **Bastion documents** when you have a document_id (imported notes, specs, or doc-linked content): use patch_file for batched "
+            "replace/delete/insert_after_heading/append proposals, or append_to_file for appends — these create editor proposals the user accepts in the UI. "
+            "That patch_file is for document_id workflows only; for repo files on disk use local_patch_file / local_write_file. "
+            "**Shell (local_shell_execute):** Commands may be allowed, blocked by user shell policy (deny), or require human approval (require_approval). "
+            "If the tool reports approval required, stop and wait — the user approves in chat (e.g. yes/approve) or via the notifications queue; then retry the same command. "
+            "Always confirm destructive or irreversible operations (rm -rf, force push, piping to sh, etc.) with the user before running, even when policy would allow. "
+            "Run builds/tests/lints from workspace_path as cwd when helpful. Never invent paths — derive from code_get_workspace and code_file_tree."
         ),
         "required_tools": [
-            "code_open_workspace", "code_file_tree", "code_search_files", "code_git_info",
-            "local_read_file", "local_write_file", "local_list_directory", "local_shell_execute",
+            "code_list_workspaces",
+            "code_get_workspace",
+            "code_open_workspace",
+            "code_file_tree",
+            "code_search_files",
+            "code_git_info",
+            "local_read_file",
+            "local_write_file",
+            "local_patch_file",
+            "local_list_directory",
+            "local_shell_execute",
         ],
-        "optional_tools": [],
-        "tags": ["code", "workspace", "file tree", "search code", "git status", "coding", "source code", "codebase"],
+        "optional_tools": [
+            "code_index_workspace",
+            "code_semantic_search",
+            "patch_file",
+            "append_to_file",
+        ],
+        "tags": ["code", "workspace", "file tree", "search code", "git status", "coding", "source code", "codebase", "semantic search", "index"],
         "evidence_metadata": {"engine_type": "automation"},
     },
     # ---- Code platforms ----

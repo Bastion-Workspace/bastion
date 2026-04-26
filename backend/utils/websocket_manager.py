@@ -5,7 +5,7 @@ WebSocket connection manager for real-time updates
 import asyncio
 import json
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -741,6 +741,42 @@ class WebSocketManager:
             if not self.device_capabilities[user_id]:
                 del self.device_capabilities[user_id]
 
+    def _resolve_target_device_id(
+        self, devices: Dict[str, WebSocket], device_id: Optional[str]
+    ) -> Tuple[Optional[str], Optional[dict]]:
+        """
+        Pick which proxy handles the call. Returns (target_id or None, error_dict or None).
+        When multiple proxies are connected, device_id must be explicit — never guess.
+        """
+        if not devices:
+            return None, {
+                "success": False,
+                "error": "No device connected",
+                "formatted": "No device connected for this user.",
+            }
+        norm = (device_id or "").strip() or None
+        if norm and norm not in devices:
+            connected = ", ".join(sorted(devices.keys()))
+            msg = (
+                f"Device '{norm}' is not connected. "
+                f"Connected device_id(s): {connected or '(none)'}. "
+                "Use the device_id from the local proxy config (register message), "
+                "or from GET /api/code-workspaces/connected-devices."
+            )
+            return None, {"success": False, "error": msg, "formatted": msg}
+        if len(devices) == 1:
+            return next(iter(devices)), None
+        if norm:
+            return norm, None
+        connected = ", ".join(sorted(devices.keys()))
+        msg = (
+            "Multiple local proxies are connected; pass device_id explicitly. "
+            f"Connected device_id(s): {connected}. "
+            "Use each proxy's device_id from its config (not only the display name), "
+            "or open this chat from the Code Space so Bastion can attach code_workspace_device_id."
+        )
+        return None, {"success": False, "error": msg, "formatted": msg}
+
     async def invoke_device_tool(
         self,
         user_id: str,
@@ -751,14 +787,15 @@ class WebSocketManager:
     ) -> dict:
         """
         Send a tool invocation to a connected device and wait for the result.
-        If device_id is None, use the first connected device for the user.
+        If device_id is omitted and exactly one proxy is connected, use it.
+        If several proxies are connected, device_id is required — no fallback.
         """
         import uuid
         request_id = str(uuid.uuid4())
         devices = self.device_connections.get(user_id) or {}
-        if not devices:
-            return {"success": False, "error": "No device connected", "formatted": "No device connected for this user."}
-        target_device_id = device_id if device_id and device_id in devices else next(iter(devices))
+        target_device_id, err = self._resolve_target_device_id(devices, device_id)
+        if err is not None:
+            return err
         ws = devices[target_device_id]
         caps = (self.device_capabilities.get(user_id) or {}).get(target_device_id) or []
         if tool not in caps:
@@ -796,9 +833,9 @@ class WebSocketManager:
 
         request_id = str(uuid.uuid4())
         devices = self.device_connections.get(user_id) or {}
-        if not devices:
-            return {"success": False, "error": "No device connected", "formatted": "No device connected for this user."}
-        target_device_id = device_id if device_id and device_id in devices else next(iter(devices))
+        target_device_id, err = self._resolve_target_device_id(devices, device_id)
+        if err is not None:
+            return err
         ws = devices[target_device_id]
 
         loop = asyncio.get_event_loop()

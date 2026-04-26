@@ -2,8 +2,11 @@
 Local proxy tools - Invoke capabilities on the user's connected Bastion Local Proxy daemon.
 """
 
+import json
 import logging
 from typing import Any, Dict, List, Optional
+
+from orchestrator.utils.shell_policy import evaluate_shell_policy
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +14,23 @@ from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_local_proxy_device_id(
+    explicit_device_id: Optional[str],
+    pipeline_metadata: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """
+    Target device for local proxy tools. Prefer an explicit tool argument, then the Code Space
+    device from request metadata (set when code_workspace_id is sent to the orchestrator).
+    """
+    d = (explicit_device_id or "").strip()
+    if d:
+        return d
+    meta = pipeline_metadata or {}
+    cw = (meta.get("code_workspace_device_id") or "").strip()
+    return cw or None
+
 
 # Map orchestrator tool name -> daemon capability name (used for invocation and filtering)
 TOOL_TO_CAPABILITY = {
@@ -23,6 +43,7 @@ TOOL_TO_CAPABILITY = {
     "local_read_file": "read_file",
     "local_list_directory": "list_directory",
     "local_write_file": "write_file",
+    "local_patch_file": "patch_file",
     "local_list_processes": "list_processes",
     "local_open_url": "open_url",
 }
@@ -271,6 +292,10 @@ class LocalShellExecuteInputs(BaseModel):
     command: str = Field(description="Shell command to run")
     timeout_seconds: Optional[int] = Field(default=60, description="Timeout in seconds")
     cwd: Optional[str] = Field(default=None, description="Working directory (optional)")
+    device_id: Optional[str] = Field(
+        default=None,
+        description="Local proxy device_id when multiple proxies are connected (else use Code Space context)",
+    )
 
 
 class LocalShellExecuteOutputs(BaseModel):
@@ -280,14 +305,88 @@ class LocalShellExecuteOutputs(BaseModel):
     formatted: str = Field(description="Human-readable summary")
 
 
-async def local_shell_execute_tool(command: str, timeout_seconds: int = 60, cwd: Optional[str] = None, user_id: str = "system") -> Dict[str, Any]:
-    """Run a shell command on the user's local machine (policy may restrict allowed commands)."""
+async def local_shell_execute_tool(
+    command: str,
+    timeout_seconds: int = 60,
+    cwd: Optional[str] = None,
+    device_id: Optional[str] = None,
+    user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run a shell command on the user's local machine (daemon policy + optional user shell_command_policy)."""
     try:
+        meta = _pipeline_metadata or {}
+        workspace_id = meta.get("workspace_id") or meta.get("code_workspace_id")
+        raw_rules = meta.get("shell_command_policy")
+        if isinstance(raw_rules, str):
+            try:
+                rules = json.loads(raw_rules or "[]")
+            except (json.JSONDecodeError, TypeError):
+                rules = []
+        elif isinstance(raw_rules, list):
+            rules = raw_rules
+        else:
+            rules = []
+
+        action, label = evaluate_shell_policy(
+            rules if isinstance(rules, list) else [], command or "", str(workspace_id).strip() if workspace_id else None
+        )
+
+        if action == "deny":
+            reason = label or "command denied by policy"
+            return {
+                "stdout": "",
+                "stderr": f"Blocked: {reason}",
+                "exit_code": -1,
+                "formatted": f"Command blocked by policy: {reason}",
+            }
+
         client = await get_backend_tool_client()
+
+        if action == "require_approval":
+            gres = await client.grant_and_consume_shell_approval(
+                user_id,
+                approval_id="",
+                command=command or "",
+                consume=True,
+            )
+            if not (gres.get("success") and gres.get("granted_or_consumed")):
+                _ex = meta.get("execution_id")
+                approval_id = await client.park_approval(
+                    user_id=user_id,
+                    agent_profile_id=str(meta.get("agent_profile_id") or ""),
+                    execution_id=str(_ex) if _ex else None,
+                    step_name="shell_command_approval",
+                    prompt=(f"Allow agent to run: `{command}`" + (f"\n({label})" if label else "")),
+                    preview_data={"command": command, "label": label},
+                    thread_id=str(meta.get("thread_id") or meta.get("langgraph_thread_id") or "")[:500],
+                    checkpoint_ns=str(meta.get("checkpoint_ns") or "")[:255],
+                    playbook_config=meta.get("playbook_config") if isinstance(meta.get("playbook_config"), dict) else None,
+                    governance_type="shell_command_approval",
+                )
+                return {
+                    "_needs_human_interaction": True,
+                    "interaction_type": "shell_command_approval",
+                    "interaction_data": {
+                        "command": command,
+                        "label": label,
+                        "approval_id": approval_id or "",
+                    },
+                    "session_id": approval_id or "",
+                    "formatted": f"Approval required to run: `{command}`. Request sent.",
+                }
+
         args = {"command": command, "timeout_seconds": timeout_seconds}
         if cwd:
             args["cwd"] = cwd
-        result = await client.invoke_device_tool(user_id=user_id, tool="shell_execute", args=args, timeout=timeout_seconds + 5)
+        target_dev = resolve_local_proxy_device_id(device_id, meta)
+        result = await client.invoke_device_tool(
+            user_id=user_id,
+            tool="shell_execute",
+            args=args,
+            device_id=target_dev or "",
+            timeout=timeout_seconds + 5,
+        )
         if not result.get("success"):
             return {"stdout": "", "stderr": "", "exit_code": -1, "formatted": result.get("error", "Command failed")}
         data = result.get("result") or {}
@@ -305,7 +404,7 @@ async def local_shell_execute_tool(command: str, timeout_seconds: int = 60, cwd:
 register_action(
     name="local_shell_execute",
     category="local_proxy",
-    description="Run a shell command on the user's local machine. Subject to daemon policy (allowed_commands, denied_patterns).",
+    description="Run a shell command on the user's local machine. Subject to daemon policy (allowed_commands, denied_patterns) and optional user shell_command_policy (allow/deny/require_approval).",
     inputs_model=LocalShellExecuteInputs,
     params_model=None,
     outputs_model=LocalShellExecuteOutputs,
@@ -317,6 +416,10 @@ register_action(
 
 class LocalReadFileInputs(BaseModel):
     path: str = Field(description="Absolute or relative path to the file")
+    device_id: Optional[str] = Field(
+        default=None,
+        description="Local proxy device_id when multiple proxies are connected (else use Code Space context)",
+    )
 
 
 class LocalReadFileOutputs(BaseModel):
@@ -325,11 +428,22 @@ class LocalReadFileOutputs(BaseModel):
     formatted: str = Field(description="Human-readable summary")
 
 
-async def local_read_file_tool(path: str, user_id: str = "system") -> Dict[str, Any]:
+async def local_read_file_tool(
+    path: str,
+    device_id: Optional[str] = None,
+    user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Read a file from the user's local machine (path must be allowed by daemon policy)."""
     try:
         client = await get_backend_tool_client()
-        result = await client.invoke_device_tool(user_id=user_id, tool="read_file", args={"path": path})
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
+        result = await client.invoke_device_tool(
+            user_id=user_id,
+            tool="read_file",
+            args={"path": path},
+            device_id=target_dev or "",
+        )
         if not result.get("success"):
             return {"content": "", "size_bytes": 0, "formatted": result.get("error", "Read failed")}
         data = result.get("result") or {}
@@ -355,6 +469,10 @@ register_action(
 class LocalListDirectoryInputs(BaseModel):
     path: str = Field(description="Directory path to list")
     recursive: bool = Field(default=False, description="Include subdirectories (one level)")
+    device_id: Optional[str] = Field(
+        default=None,
+        description="Local proxy device_id when multiple proxies are connected (else use Code Space context)",
+    )
 
 
 class LocalListDirectoryOutputs(BaseModel):
@@ -363,11 +481,23 @@ class LocalListDirectoryOutputs(BaseModel):
     formatted: str = Field(description="Human-readable summary")
 
 
-async def local_list_directory_tool(path: str, recursive: bool = False, user_id: str = "system") -> Dict[str, Any]:
+async def local_list_directory_tool(
+    path: str,
+    recursive: bool = False,
+    device_id: Optional[str] = None,
+    user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """List directory contents on the user's local machine (path must be allowed by daemon policy)."""
     try:
         client = await get_backend_tool_client()
-        result = await client.invoke_device_tool(user_id=user_id, tool="list_directory", args={"path": path, "recursive": recursive})
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
+        result = await client.invoke_device_tool(
+            user_id=user_id,
+            tool="list_directory",
+            args={"path": path, "recursive": recursive},
+            device_id=target_dev or "",
+        )
         if not result.get("success"):
             return {"entries": [], "count": 0, "formatted": result.get("error", "List failed")}
         data = result.get("result") or {}
@@ -395,6 +525,10 @@ class LocalWriteFileInputs(BaseModel):
     path: str = Field(description="File path to write")
     content: str = Field(description="Content to write")
     append: bool = Field(default=False, description="Append instead of overwrite")
+    device_id: Optional[str] = Field(
+        default=None,
+        description="Local proxy device_id when multiple proxies are connected (else use Code Space context)",
+    )
 
 
 class LocalWriteFileOutputs(BaseModel):
@@ -403,11 +537,24 @@ class LocalWriteFileOutputs(BaseModel):
     formatted: str = Field(description="Human-readable summary")
 
 
-async def local_write_file_tool(path: str, content: str, append: bool = False, user_id: str = "system") -> Dict[str, Any]:
+async def local_write_file_tool(
+    path: str,
+    content: str,
+    append: bool = False,
+    device_id: Optional[str] = None,
+    user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Write content to a file on the user's local machine (path must be allowed by daemon policy)."""
     try:
         client = await get_backend_tool_client()
-        result = await client.invoke_device_tool(user_id=user_id, tool="write_file", args={"path": path, "content": content, "append": append})
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
+        result = await client.invoke_device_tool(
+            user_id=user_id,
+            tool="write_file",
+            args={"path": path, "content": content, "append": append},
+            device_id=target_dev or "",
+        )
         if not result.get("success"):
             return {"success": False, "bytes_written": 0, "formatted": result.get("error", "Write failed")}
         data = result.get("result") or {}
@@ -425,6 +572,83 @@ register_action(
     params_model=None,
     outputs_model=LocalWriteFileOutputs,
     tool_function=local_write_file_tool,
+)
+
+
+# ── local_patch_file ───────────────────────────────────────────────────────
+
+class LocalPatchFileInputs(BaseModel):
+    path: str = Field(description="File path on the device")
+    old_string: str = Field(description="Exact substring to replace (must be unique unless replace_all is true)")
+    new_string: str = Field(default="", description="Replacement text")
+    replace_all: bool = Field(default=False, description="If true, replace every occurrence of old_string")
+    device_id: Optional[str] = Field(
+        default=None,
+        description="Local proxy device_id when multiple proxies are connected (else use Code Space context)",
+    )
+
+
+class LocalPatchFileOutputs(BaseModel):
+    success: bool = Field(description="Whether the patch was applied")
+    replacements: int = Field(default=0, description="Number of replacements made")
+    bytes_written: int = Field(default=0, description="Size of file after write")
+    formatted: str = Field(description="Human-readable summary")
+
+
+async def local_patch_file_tool(
+    path: str,
+    old_string: str,
+    new_string: str = "",
+    replace_all: bool = False,
+    device_id: Optional[str] = None,
+    user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Apply a search-and-replace patch on the user's local machine (same path policy as write_file)."""
+    try:
+        client = await get_backend_tool_client()
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
+        result = await client.invoke_device_tool(
+            user_id=user_id,
+            tool="patch_file",
+            args={
+                "path": path,
+                "old_string": old_string,
+                "new_string": new_string,
+                "replace_all": replace_all,
+            },
+            device_id=target_dev or "",
+        )
+        if not result.get("success"):
+            return {
+                "success": False,
+                "replacements": 0,
+                "bytes_written": 0,
+                "formatted": result.get("error", "Patch failed"),
+            }
+        data = result.get("result") or {}
+        return {
+            "success": bool(data.get("success", True)),
+            "replacements": int(data.get("replacements", 0) or 0),
+            "bytes_written": int(data.get("bytes_written", 0) or 0),
+            "formatted": result.get("formatted", "Patched"),
+        }
+    except Exception as e:
+        logger.error("local_patch_file_tool error: %s", e)
+        return {"success": False, "replacements": 0, "bytes_written": 0, "formatted": str(e)}
+
+
+register_action(
+    name="local_patch_file",
+    category="local_proxy",
+    description=(
+        "Replace exact text in a local file via the proxy (unique match, or replace_all). "
+        "Prefer this over rewriting entire files for small edits. Same path allowlist as read/write."
+    ),
+    inputs_model=LocalPatchFileInputs,
+    params_model=None,
+    outputs_model=LocalPatchFileOutputs,
+    tool_function=local_patch_file_tool,
 )
 
 

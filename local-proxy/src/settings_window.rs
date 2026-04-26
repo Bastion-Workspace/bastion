@@ -1,6 +1,7 @@
 //! egui/eframe settings window: Connection, Capabilities, Status tabs.
 
 use crate::config::save_config;
+use crate::policy;
 use crate::shared_state::{ConnectionStatus, InvocationRecord, SharedState};
 use eframe::egui;
 use std::time::SystemTime;
@@ -158,13 +159,10 @@ impl SettingsApp {
         ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for (id, label) in crate::capabilities::capabilities_ui_iter() {
+                // Reflect implicit rules (e.g. write_file offered when read_file is on and write_file isn't explicitly disabled).
                 let mut enabled = {
                     let st = self.state.lock().unwrap();
-                    st.config
-                        .capabilities
-                        .get(id)
-                        .map(|c| c.enabled)
-                        .unwrap_or(false)
+                    policy::capability_offered(&st.config, id)
                 };
                 if ui.checkbox(&mut enabled, label).changed() {
                     let mut st = self.state.lock().unwrap();

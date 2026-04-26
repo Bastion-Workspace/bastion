@@ -485,7 +485,7 @@ GRANT ALL PRIVILEGES ON user_sessions TO bastion_user;
 GRANT ALL PRIVILEGES ON users_id_seq TO bastion_user;
 GRANT ALL PRIVILEGES ON user_sessions_id_seq TO bastion_user;
 
--- Per-user TTS/STT API keys BYOK (migrations 110 + 119; Hedra included)
+-- Per-user TTS/STT API keys BYOK (migrations 110 + 119 + 161; Hedra + OpenRouter included)
 CREATE TABLE IF NOT EXISTS user_voice_providers (
     id BIGSERIAL PRIMARY KEY,
     user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -498,7 +498,7 @@ CREATE TABLE IF NOT EXISTS user_voice_providers (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_voice_provider_type CHECK (
-        provider_type IN ('elevenlabs', 'openai', 'deepgram', 'whisper_api', 'hedra')
+        provider_type IN ('elevenlabs', 'openai', 'deepgram', 'whisper_api', 'hedra', 'openrouter')
     ),
     CONSTRAINT chk_voice_provider_role CHECK (provider_role IN ('tts', 'stt'))
 );
@@ -2130,6 +2130,41 @@ COMMENT ON COLUMN org_settings.user_id IS 'User ID these settings belong to';
 COMMENT ON COLUMN org_settings.settings_json IS 'JSON blob containing all org-mode settings (TODO sequences, tags, preferences)';
 COMMENT ON COLUMN org_settings.created_at IS 'When settings were first created';
 COMMENT ON COLUMN org_settings.updated_at IS 'When settings were last modified';
+
+-- ========================================
+-- ZETTELKASTEN SETTINGS TABLE
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS zettelkasten_settings (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL UNIQUE,
+    settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_zettelkasten_settings_user_id ON zettelkasten_settings(user_id);
+CREATE INDEX IF NOT EXISTS idx_zettelkasten_settings_json ON zettelkasten_settings USING GIN(settings_json);
+
+ALTER TABLE zettelkasten_settings ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS zettelkasten_settings_select_policy ON zettelkasten_settings;
+DROP POLICY IF EXISTS zettelkasten_settings_insert_policy ON zettelkasten_settings;
+DROP POLICY IF EXISTS zettelkasten_settings_update_policy ON zettelkasten_settings;
+DROP POLICY IF EXISTS zettelkasten_settings_delete_policy ON zettelkasten_settings;
+
+CREATE POLICY zettelkasten_settings_select_policy ON zettelkasten_settings
+    FOR SELECT USING (user_id = current_setting('app.current_user_id', true)::varchar);
+
+CREATE POLICY zettelkasten_settings_insert_policy ON zettelkasten_settings
+    FOR INSERT WITH CHECK (user_id = current_setting('app.current_user_id', true)::varchar);
+
+CREATE POLICY zettelkasten_settings_update_policy ON zettelkasten_settings
+    FOR UPDATE USING (user_id = current_setting('app.current_user_id', true)::varchar)
+    WITH CHECK (user_id = current_setting('app.current_user_id', true)::varchar);
+
+CREATE POLICY zettelkasten_settings_delete_policy ON zettelkasten_settings
+    FOR DELETE USING (user_id = current_setting('app.current_user_id', true)::varchar);
 
 -- ========================================
 -- MESSAGING SYSTEM TABLES
@@ -5455,6 +5490,78 @@ CREATE TABLE IF NOT EXISTS code_workspaces (
 CREATE INDEX IF NOT EXISTS idx_code_workspaces_user_id ON code_workspaces(user_id);
 CREATE INDEX IF NOT EXISTS idx_code_workspaces_user_device ON code_workspaces (user_id, device_id);
 GRANT SELECT, INSERT, UPDATE, DELETE ON code_workspaces TO bastion_user;
+
+-- Code chunks for semantic / full-text search over local workspaces (migration 163)
+CREATE TABLE IF NOT EXISTS code_chunks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES code_workspaces(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    chunk_index INT NOT NULL,
+    start_line INT NOT NULL DEFAULT 1,
+    end_line INT NOT NULL DEFAULT 1,
+    content TEXT NOT NULL,
+    language TEXT,
+    git_sha TEXT,
+    content_tsv tsvector,
+    qdrant_point_id TEXT,
+    embedding_pending BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_code_chunks_workspace_file_chunk UNIQUE (workspace_id, file_path, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_user_workspace ON code_chunks (user_id, workspace_id);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_workspace ON code_chunks (workspace_id);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_tsv ON code_chunks USING GIN (content_tsv);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_pending ON code_chunks (workspace_id) WHERE embedding_pending IS TRUE;
+GRANT SELECT, INSERT, UPDATE, DELETE ON code_chunks TO bastion_user;
+
+-- Code workspace RLS (migration 165; parity with agent_approval_queue / document_chunks isolation)
+ALTER TABLE code_workspaces ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS code_workspaces_all ON code_workspaces;
+CREATE POLICY code_workspaces_all ON code_workspaces FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+ALTER TABLE code_chunks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS code_chunks_all ON code_chunks;
+CREATE POLICY code_chunks_all ON code_chunks FOR ALL
+  USING (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  )
+  WITH CHECK (
+    current_setting('app.current_user_role', true) = 'admin'
+    OR user_id = current_setting('app.current_user_id', true)::varchar
+  );
+
+-- Per-user shell command policy (migration 164)
+CREATE TABLE IF NOT EXISTS user_shell_policy (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    pattern TEXT NOT NULL,
+    match_mode VARCHAR(20) NOT NULL DEFAULT 'prefix',
+    action VARCHAR(20) NOT NULL,
+    scope_workspace_id UUID REFERENCES code_workspaces(id) ON DELETE CASCADE,
+    label TEXT,
+    priority INT NOT NULL DEFAULT 50,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_user_shell_policy_match_mode CHECK (match_mode IN ('prefix', 'contains', 'glob')),
+    CONSTRAINT chk_user_shell_policy_action CHECK (action IN ('allow', 'deny', 'require_approval'))
+);
+CREATE INDEX IF NOT EXISTS idx_user_shell_policy_user ON user_shell_policy(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_shell_policy_user_priority ON user_shell_policy(user_id, priority);
+ALTER TABLE user_shell_policy ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS user_shell_policy_all ON user_shell_policy;
+CREATE POLICY user_shell_policy_all ON user_shell_policy FOR ALL
+    USING (user_id = current_setting('app.current_user_id', true)::varchar);
+GRANT SELECT, INSERT, UPDATE, DELETE ON user_shell_policy TO bastion_user;
 
 -- User Home dashboards (migration 111; greenfield merged here)
 CREATE TABLE IF NOT EXISTS user_home_dashboards (

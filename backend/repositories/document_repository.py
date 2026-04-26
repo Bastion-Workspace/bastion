@@ -817,6 +817,55 @@ class DocumentRepository:
             logger.warning("find_by_filename_in_user_collection failed: %s", e)
             return None
 
+    async def find_by_wikilink_title(
+        self,
+        title: str,
+        user_id: Optional[str],
+        collection_type: str,
+    ) -> Optional[DocumentInfo]:
+        """
+        Resolve a markdown wikilink [[title]] to a document: exact filename match
+        (with .md/.org/.txt) or case-insensitive stem match against filename.
+        """
+        if not title or not user_id:
+            return None
+        try:
+            from services.database_manager.database_helpers import fetch_one
+
+            rls_context = {"user_id": user_id or "", "user_role": "user"}
+            for ext in (".md", ".org", ".txt"):
+                row = await fetch_one(
+                    """
+                    SELECT * FROM document_metadata
+                    WHERE LOWER(filename) = LOWER($1) AND user_id = $2 AND collection_type = $3
+                    LIMIT 1
+                    """,
+                    title + ext,
+                    user_id,
+                    collection_type,
+                    rls_context=rls_context,
+                )
+                if row:
+                    return self._row_to_document_info(row)
+            row = await fetch_one(
+                """
+                SELECT * FROM document_metadata
+                WHERE user_id = $1 AND collection_type = $2
+                  AND LOWER(REGEXP_REPLACE(filename, '\\.(md|org|txt)$', '', 'i')) = LOWER($3)
+                LIMIT 1
+                """,
+                user_id,
+                collection_type,
+                title,
+                rls_context=rls_context,
+            )
+            if row:
+                return self._row_to_document_info(row)
+            return None
+        except Exception as e:
+            logger.warning("find_by_wikilink_title failed: %s", e)
+            return None
+
     async def touch_updated_at(self, document_id: str, user_id: str = None) -> bool:
         """Update only document_metadata.updated_at (e.g. after file content changed on disk)."""
         try:

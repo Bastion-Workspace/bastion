@@ -168,9 +168,17 @@ async def stream_from_grpc_orchestrator(
             # we have a conversation_id and must persist so conversation history (and tool_call_summary
             # for "pending operations") is available on the next turn.
             is_custom_agent_request = bool(request_context and request_context.get("agent_profile_id"))
-            skip_persistence = is_custom_agent_request and not (conversation_id and str(conversation_id).strip())
+            persist_conversation = True
+            try:
+                if isinstance(rc, dict) and rc.get("persist_conversation") is False:
+                    persist_conversation = False
+            except Exception:
+                persist_conversation = True
+            skip_persistence = (not persist_conversation) or (
+                is_custom_agent_request and not (conversation_id and str(conversation_id).strip())
+            )
             if skip_persistence:
-                logger.info("Custom agent run (no conversation_id): skipping conversation persistence")
+                logger.info("Skipping conversation persistence (persist_conversation=%s)", persist_conversation)
             
             # Initialize title_updated flag before try block to avoid UnboundLocalError
             title_updated = False

@@ -345,6 +345,57 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"Unexpected error getting document content: {e}")
             return None
+
+    async def get_document_links(
+        self,
+        document_id: str,
+        user_id: str = "system",
+        direction: str = "both",
+        link_types: Optional[List[str]] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Resolved document link graph from document_links (outgoing / incoming / both).
+        """
+        try:
+            await self._ensure_connected()
+            req = tool_service_pb2.GetDocumentLinksRequest(
+                document_id=document_id,
+                user_id=user_id,
+                direction=(direction or "both").strip().lower() or "both",
+                limit=int(limit) if limit else 50,
+            )
+            lt = link_types or []
+            for t in lt:
+                if t and str(t).strip():
+                    req.link_types.append(str(t).strip())
+
+            response = await self._doc_stub.GetDocumentLinks(req)
+            links = []
+            for l in response.links:
+                links.append(
+                    {
+                        "document_id": l.document_id,
+                        "filename": l.filename,
+                        "title": l.title,
+                        "canonical_path": l.canonical_path,
+                        "link_type": l.link_type,
+                        "line_number": l.line_number,
+                        "direction": l.direction,
+                    }
+                )
+            return {"links": links, "total": int(response.total)}
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.NOT_FOUND:
+                logger.warning("GetDocumentLinks: document not found: %s", document_id)
+                return {"links": [], "total": 0, "error": "not_found"}
+            logger.error(
+                "GetDocumentLinks failed: %s - %s", e.code(), e.details()
+            )
+            return {"links": [], "total": 0, "error": str(e)}
+        except Exception as e:
+            logger.error("Unexpected error in get_document_links: %s", e)
+            return {"links": [], "total": 0, "error": str(e)}
     
     async def get_document_size(self, document_id: str, user_id: str = "system") -> int:
         """
@@ -4278,6 +4329,158 @@ class BackendToolClient:
                 'total_count': 0,
                 'error': str(e)
             }
+
+    async def list_code_workspaces(self, user_id: str = "system") -> Dict[str, Any]:
+        """List saved local code workspaces for the user."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListCodeWorkspacesRequest(user_id=user_id)
+            response = await self._stub.ListCodeWorkspaces(request)
+            workspaces = []
+            for ws in response.workspaces:
+                workspaces.append(
+                    {
+                        "workspace_id": ws.workspace_id,
+                        "name": ws.name,
+                        "device_id": ws.device_id,
+                        "workspace_path": ws.workspace_path,
+                        "last_git_branch": ws.last_git_branch,
+                        "updated_at": ws.updated_at,
+                    }
+                )
+            return {"workspaces": workspaces, "total": response.total}
+        except grpc.RpcError as e:
+            logger.error("ListCodeWorkspaces failed: %s - %s", e.code(), e.details())
+            return {"workspaces": [], "total": 0, "error": str(e)}
+        except Exception as e:
+            logger.error("list_code_workspaces error: %s", e)
+            return {"workspaces": [], "total": 0, "error": str(e)}
+
+    async def get_code_workspace(self, workspace_id: str, user_id: str = "system") -> Dict[str, Any]:
+        """Fetch one code workspace row by id."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetCodeWorkspaceRequest(
+                user_id=user_id, workspace_id=workspace_id
+            )
+            response = await self._stub.GetCodeWorkspace(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "error": response.error if response.HasField("error") else "unknown",
+                }
+            w = response.workspace
+            return {
+                "success": True,
+                "workspace": {
+                    "workspace_id": w.workspace_id,
+                    "user_id": w.user_id,
+                    "name": w.name,
+                    "device_id": w.device_id,
+                    "device_name": w.device_name,
+                    "workspace_path": w.workspace_path,
+                    "last_git_branch": w.last_git_branch,
+                    "last_file_tree_json": w.last_file_tree_json,
+                    "settings_json": w.settings_json,
+                    "conversation_id": w.conversation_id,
+                    "created_at": w.created_at,
+                    "updated_at": w.updated_at,
+                },
+            }
+        except grpc.RpcError as e:
+            logger.error("GetCodeWorkspace failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.error("get_code_workspace error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def upsert_code_workspace_chunks(
+        self,
+        user_id: str,
+        workspace_id: str,
+        replace_workspace: bool,
+        chunks: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Persist indexed code chunks and embed into vector store."""
+        try:
+            await self._ensure_connected()
+            pb_chunks = []
+            for c in chunks or []:
+                pb_chunks.append(
+                    tool_service_pb2.CodeWorkspaceChunkProto(
+                        file_path=str(c.get("file_path", "")),
+                        chunk_index=int(c.get("chunk_index", 0)),
+                        start_line=int(c.get("start_line", 1)),
+                        end_line=int(c.get("end_line", 1)),
+                        content=str(c.get("content", "")),
+                        language=str(c.get("language", "")),
+                        git_sha=str(c.get("git_sha", "")),
+                    )
+                )
+            request = tool_service_pb2.UpsertCodeWorkspaceChunksRequest(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                replace_workspace=replace_workspace,
+                chunks=pb_chunks,
+            )
+            response = await self._stub.UpsertCodeWorkspaceChunks(request)
+            return {
+                "success": response.success,
+                "inserted": response.inserted,
+                "embedded": response.embedded,
+                "error": response.error if response.HasField("error") else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("UpsertCodeWorkspaceChunks failed: %s - %s", e.code(), e.details())
+            return {"success": False, "inserted": 0, "embedded": 0, "error": str(e)}
+        except Exception as e:
+            logger.error("upsert_code_workspace_chunks error: %s", e)
+            return {"success": False, "inserted": 0, "embedded": 0, "error": str(e)}
+
+    async def code_semantic_search(
+        self,
+        user_id: str,
+        workspace_id: str,
+        query: str,
+        limit: int = 20,
+        file_glob: str = "",
+    ) -> Dict[str, Any]:
+        """Hybrid semantic + FTS search over indexed code chunks."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CodeSemanticSearchRequest(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                query=query,
+                limit=int(limit),
+                file_glob=file_glob or "",
+            )
+            response = await self._stub.CodeSemanticSearch(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "hits": [],
+                    "error": response.error if response.HasField("error") else "search_failed",
+                }
+            hits = []
+            for h in response.hits:
+                hits.append(
+                    {
+                        "chunk_id": h.chunk_id,
+                        "file_path": h.file_path,
+                        "start_line": h.start_line,
+                        "end_line": h.end_line,
+                        "snippet": h.snippet,
+                        "score": h.score,
+                    }
+                )
+            return {"success": True, "hits": hits}
+        except grpc.RpcError as e:
+            logger.error("CodeSemanticSearch failed: %s - %s", e.code(), e.details())
+            return {"success": False, "hits": [], "error": str(e)}
+        except Exception as e:
+            logger.error("code_semantic_search error: %s", e)
+            return {"success": False, "hits": [], "error": str(e)}
     
     async def get_workspace_schema(
         self,
@@ -6303,6 +6506,117 @@ class BackendToolClient:
         except Exception as e:
             logger.error("park_approval error: %s", e)
             return None
+
+    async def get_user_shell_policy(self, user_id: str) -> Dict[str, Any]:
+        """Fetch user shell policy rules as JSON list. Returns success, rules (list), rules_json, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetUserShellPolicyRequest(user_id=user_id or "")
+            response = await self._stub.GetUserShellPolicy(request)
+            rules: List[Any] = []
+            if response.success and (response.rules_json or "").strip():
+                try:
+                    rules = json.loads(response.rules_json)
+                except (json.JSONDecodeError, TypeError):
+                    rules = []
+            return {
+                "success": response.success,
+                "rules": rules if isinstance(rules, list) else [],
+                "rules_json": response.rules_json or "[]",
+                "formatted": response.rules_json or "[]",
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("get_user_shell_policy failed: %s - %s", e.code(), e.details())
+            return {"success": False, "rules": [], "rules_json": "[]", "formatted": "", "error": e.details() or ""}
+        except Exception as e:
+            logger.error("get_user_shell_policy error: %s", e)
+            return {"success": False, "rules": [], "rules_json": "[]", "formatted": "", "error": str(e)}
+
+    async def upsert_shell_policy_rule(
+        self,
+        *,
+        user_id: str,
+        rule_id: str = "",
+        pattern: str,
+        match_mode: str = "prefix",
+        action: str = "allow",
+        scope_workspace_id: str = "",
+        label: str = "",
+        priority: int = 50,
+    ) -> Dict[str, Any]:
+        """Insert or update a shell policy rule. Returns success, rule_id, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpsertShellPolicyRuleRequest(
+                user_id=user_id or "",
+                rule_id=rule_id or "",
+                pattern=pattern or "",
+                match_mode=match_mode or "prefix",
+                action=action or "allow",
+                scope_workspace_id=scope_workspace_id or "",
+                label=label or "",
+                priority=int(priority),
+            )
+            response = await self._stub.UpsertShellPolicyRule(request)
+            return {
+                "success": response.success,
+                "rule_id": response.rule_id or "",
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("upsert_shell_policy_rule failed: %s - %s", e.code(), e.details())
+            return {"success": False, "rule_id": "", "error": e.details() or ""}
+        except Exception as e:
+            logger.error("upsert_shell_policy_rule error: %s", e)
+            return {"success": False, "rule_id": "", "error": str(e)}
+
+    async def delete_shell_policy_rule(self, user_id: str, rule_id: str) -> Dict[str, Any]:
+        """Delete a shell policy rule by id."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteShellPolicyRuleRequest(
+                user_id=user_id or "",
+                rule_id=rule_id or "",
+            )
+            response = await self._stub.DeleteShellPolicyRule(request)
+            return {"success": response.success, "error": response.error or ""}
+        except grpc.RpcError as e:
+            logger.error("delete_shell_policy_rule failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or ""}
+        except Exception as e:
+            logger.error("delete_shell_policy_rule error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def grant_and_consume_shell_approval(
+        self,
+        user_id: str,
+        *,
+        approval_id: str = "",
+        command: str = "",
+        consume: bool = True,
+    ) -> Dict[str, Any]:
+        """Grant pending shell approval (consume=false) or consume an approved row (consume=true)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GrantAndConsumeShellApprovalRequest(
+                user_id=user_id or "",
+                approval_id=approval_id or "",
+                command=command or "",
+                consume=bool(consume),
+            )
+            response = await self._stub.GrantAndConsumeShellApproval(request)
+            return {
+                "success": response.success,
+                "granted_or_consumed": response.granted_or_consumed,
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("grant_and_consume_shell_approval failed: %s - %s", e.code(), e.details())
+            return {"success": False, "granted_or_consumed": False, "error": e.details() or ""}
+        except Exception as e:
+            logger.error("grant_and_consume_shell_approval error: %s", e)
+            return {"success": False, "granted_or_consumed": False, "error": str(e)}
 
     async def get_agent_memory(
         self,

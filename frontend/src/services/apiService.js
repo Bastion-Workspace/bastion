@@ -62,6 +62,12 @@ class ApiService {
     update: (id, data) => this.put(`/api/code-workspaces/${id}`, data),
     delete: (id) => this.delete(`/api/code-workspaces/${id}`),
     refreshTree: (id) => this.post(`/api/code-workspaces/${id}/refresh-tree`, {}),
+    readFile: (workspaceId, relativePath) =>
+      this.get(
+        `/api/code-workspaces/${encodeURIComponent(workspaceId)}/file?path=${encodeURIComponent(relativePath)}`
+      ),
+    writeFile: (workspaceId, body) =>
+      this.put(`/api/code-workspaces/${encodeURIComponent(workspaceId)}/file`, body),
   };
 
   // Legacy method proxies for backward compatibility
@@ -227,6 +233,7 @@ class ApiService {
   getUserVoiceSettings = () => this.get('/api/user/voice-settings');
   setUserVoiceSettings = (body) => this.put('/api/user/voice-settings', body);
   getUserHedraTtsModels = () => this.get('/api/user/hedra-tts-models');
+  getUserOpenrouterTtsModels = () => this.get('/api/user/openrouter-tts-models');
 
   getHomeDashboard = () => this.get('/api/home-dashboard');
   putHomeDashboard = (body) => this.put('/api/home-dashboard', body);

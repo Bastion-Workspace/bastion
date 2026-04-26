@@ -58,6 +58,14 @@ export const PROMPT_VARIABLES = [
   { key: 'editor_total_sections', group: 'editor', label: 'Total sections', description: 'Total number of sections in the file.', requiresOpenFile: true },
   { key: 'editor_is_first_section', group: 'editor', label: 'Is first section', description: '"true" when cursor is in the first section; empty otherwise. Use {{#editor_is_first_section}} for start-of-doc content.', requiresOpenFile: true },
   { key: 'editor_is_last_section', group: 'editor', label: 'Is last section', description: '"true" when cursor is in the last section; empty otherwise.', requiresOpenFile: true },
+  {
+    key: 'editor_linked_notes',
+    group: 'editor',
+    label: 'Linked notes (wikilinks)',
+    description:
+      'Comma-separated [[Title]] wikilinks found in the open file. Empty if none. Use when you need to know what notes this document connects to.',
+    requiresOpenFile: true,
+  },
   { key: 'editor_ref_count', group: 'editor_refs', label: 'Ref count', description: 'Number of loaded ref_* files. Use {{#editor_ref_count > 0}} when refs exist.', requiresOpenFile: true },
 
   // User

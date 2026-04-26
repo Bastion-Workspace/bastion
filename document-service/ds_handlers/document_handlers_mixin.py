@@ -435,6 +435,168 @@ class DocumentHandlersMixin:
             import traceback
             traceback.print_exc()
             await context.abort(grpc.StatusCode.INTERNAL, f"Get content failed: {str(e)}")
+
+    async def GetDocumentLinks(
+        self,
+        request: tool_service_pb2.GetDocumentLinksRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetDocumentLinksResponse:
+        """Outgoing / incoming edges from document_links (wikilinks, org, frontmatter, etc.)."""
+        try:
+            from ds_db.database_manager.database_helpers import fetch_all, fetch_one
+
+            doc_id = (request.document_id or "").strip()
+            user_id = (request.user_id or "").strip() or "system"
+            direction = (request.direction or "both").strip().lower() or "both"
+            if direction not in ("outgoing", "incoming", "both"):
+                direction = "both"
+            lim = int(request.limit) if request.limit else 50
+            if lim < 1:
+                lim = 50
+            if lim > 200:
+                lim = 200
+            link_types = [str(x).strip() for x in request.link_types if str(x).strip()]
+
+            if not doc_id:
+                await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "document_id is required")
+
+            rls_context = {"user_id": user_id, "user_role": "user"}
+            meta = await fetch_one(
+                """
+                SELECT document_id FROM document_metadata
+                WHERE document_id = $1 AND user_id = $2
+                """,
+                doc_id,
+                user_id,
+                rls_context=rls_context,
+            )
+            if not meta:
+                await context.abort(grpc.StatusCode.NOT_FOUND, "Document not found")
+
+            rows_out: list = []
+            if direction in ("outgoing", "both"):
+                if link_types:
+                    rows_out = await fetch_all(
+                        """
+                        SELECT dl.target_document_id AS document_id,
+                               dm.filename,
+                               COALESCE(NULLIF(trim(dm.title), ''), dm.filename) AS title,
+                               COALESCE(dm.metadata_json->>'canonical_path', '') AS canonical_path,
+                               dl.link_type,
+                               COALESCE(dl.line_number, 0) AS line_number,
+                               'outgoing'::text AS direction
+                        FROM document_links dl
+                        INNER JOIN document_metadata dm ON dm.document_id = dl.target_document_id
+                        WHERE dl.source_document_id = $1
+                          AND dl.user_id = $2
+                          AND dl.target_document_id IS NOT NULL
+                          AND dl.link_type = ANY($3::text[])
+                        ORDER BY dm.filename, dl.line_number NULLS LAST
+                        LIMIT $4
+                        """,
+                        doc_id,
+                        user_id,
+                        link_types,
+                        lim,
+                        rls_context=rls_context,
+                    )
+                else:
+                    rows_out = await fetch_all(
+                        """
+                        SELECT dl.target_document_id AS document_id,
+                               dm.filename,
+                               COALESCE(NULLIF(trim(dm.title), ''), dm.filename) AS title,
+                               COALESCE(dm.metadata_json->>'canonical_path', '') AS canonical_path,
+                               dl.link_type,
+                               COALESCE(dl.line_number, 0) AS line_number,
+                               'outgoing'::text AS direction
+                        FROM document_links dl
+                        INNER JOIN document_metadata dm ON dm.document_id = dl.target_document_id
+                        WHERE dl.source_document_id = $1
+                          AND dl.user_id = $2
+                          AND dl.target_document_id IS NOT NULL
+                        ORDER BY dm.filename, dl.line_number NULLS LAST
+                        LIMIT $3
+                        """,
+                        doc_id,
+                        user_id,
+                        lim,
+                        rls_context=rls_context,
+                    )
+
+            rows_in: list = []
+            if direction in ("incoming", "both"):
+                if link_types:
+                    rows_in = await fetch_all(
+                        """
+                        SELECT dl.source_document_id AS document_id,
+                               dm.filename,
+                               COALESCE(NULLIF(trim(dm.title), ''), dm.filename) AS title,
+                               COALESCE(dm.metadata_json->>'canonical_path', '') AS canonical_path,
+                               dl.link_type,
+                               COALESCE(dl.line_number, 0) AS line_number,
+                               'incoming'::text AS direction
+                        FROM document_links dl
+                        INNER JOIN document_metadata dm ON dm.document_id = dl.source_document_id
+                        WHERE dl.target_document_id = $1
+                          AND dl.user_id = $2
+                          AND dl.link_type = ANY($3::text[])
+                        ORDER BY dm.filename, dl.line_number NULLS LAST
+                        LIMIT $4
+                        """,
+                        doc_id,
+                        user_id,
+                        link_types,
+                        lim,
+                        rls_context=rls_context,
+                    )
+                else:
+                    rows_in = await fetch_all(
+                        """
+                        SELECT dl.source_document_id AS document_id,
+                               dm.filename,
+                               COALESCE(NULLIF(trim(dm.title), ''), dm.filename) AS title,
+                               COALESCE(dm.metadata_json->>'canonical_path', '') AS canonical_path,
+                               dl.link_type,
+                               COALESCE(dl.line_number, 0) AS line_number,
+                               'incoming'::text AS direction
+                        FROM document_links dl
+                        INNER JOIN document_metadata dm ON dm.document_id = dl.source_document_id
+                        WHERE dl.target_document_id = $1
+                          AND dl.user_id = $2
+                        ORDER BY dm.filename, dl.line_number NULLS LAST
+                        LIMIT $3
+                        """,
+                        doc_id,
+                        user_id,
+                        lim,
+                        rls_context=rls_context,
+                    )
+
+            combined = (rows_out or []) + (rows_in or [])
+            response = tool_service_pb2.GetDocumentLinksResponse()
+            for row in combined:
+                rid = row.get("document_id")
+                if not rid:
+                    continue
+                item = response.links.add()
+                item.document_id = str(rid)
+                item.filename = str(row.get("filename") or "")
+                item.title = str(row.get("title") or "")
+                item.canonical_path = str(row.get("canonical_path") or "")
+                item.link_type = str(row.get("link_type") or "")
+                item.line_number = int(row.get("line_number") or 0)
+                item.direction = str(row.get("direction") or "")
+            response.total = len(response.links)
+            return response
+
+        except (grpc.RpcError, grpc._cython.cygrpc.AbortError):
+            raise
+        except Exception as e:
+            logger.error(f"GetDocumentLinks error: {e}")
+            import traceback
+            traceback.print_exc()
+            await context.abort(grpc.StatusCode.INTERNAL, f"Get document links failed: {str(e)}")
     
     async def GetDocumentChunks(
         self,

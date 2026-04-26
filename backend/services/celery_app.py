@@ -51,6 +51,7 @@ celery_app = Celery(
         "services.celery_tasks.federation_tasks",
         "services.celery_tasks.skill_metrics_tasks",
         "services.celery_tasks.skill_promotion_tasks",
+        "services.celery_tasks.code_workspace_tasks",
     ]
 )
 

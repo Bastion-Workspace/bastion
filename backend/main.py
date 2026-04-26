@@ -1100,6 +1100,8 @@ logger.debug("✅ Org Todo API routes registered")
 # Include org settings API
 from api.org_settings_api import router as org_settings_router
 app.include_router(org_settings_router)
+from api.zettelkasten_api import router as zettelkasten_router
+app.include_router(zettelkasten_router)
 logger.debug("✅ Org Settings API routes registered")
 
 # Include org tag API

@@ -922,9 +922,14 @@ export default function StepConfigDrawer({
         {stepType === 'tool' && (
           <Autocomplete
             size="small"
+            disablePortal
+            openOnFocus
             options={toolOptions}
             groupBy={(opt) => opt.category}
             getOptionLabel={(opt) => (typeof opt === 'string' ? opt : opt.description || opt.name)}
+            PopperProps={{
+              sx: { zIndex: 1500 },
+            }}
             value={toolOptions.find((o) => o.name === actionName) || null}
             onChange={(_, v) => {
               setStep((s) => ({ ...s, action: v?.name ?? '' }));

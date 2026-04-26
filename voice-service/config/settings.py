@@ -37,6 +37,12 @@ class Settings:
     OPENAI_TTS_MODEL: str = os.getenv("OPENAI_TTS_MODEL", "tts-1")
     OPENAI_TTS_VOICE: str = os.getenv("OPENAI_TTS_VOICE", "alloy")
 
+    # OpenRouter TTS (OpenAI-compatible /audio/speech)
+    OPENROUTER_API_KEY: Optional[str] = os.getenv("OPENROUTER_API_KEY")
+    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+    OPENROUTER_TTS_MODEL: str = os.getenv("OPENROUTER_TTS_MODEL", "")
+    OPENROUTER_TTS_VOICE: str = os.getenv("OPENROUTER_TTS_VOICE", "alloy")
+
     # Piper (local)
     PIPER_MODEL_PATH: str = os.getenv("PIPER_MODEL_PATH", "/app/models/piper")
     PIPER_VOICE: str = os.getenv("PIPER_VOICE", "en_US-arctic-medium")
@@ -47,7 +53,7 @@ class Settings:
     )
 
     VALID_STT_PROVIDERS = frozenset({"whisper"})
-    VALID_TTS_PROVIDERS = frozenset({"elevenlabs", "hedra", "openai", "piper"})
+    VALID_TTS_PROVIDERS = frozenset({"elevenlabs", "hedra", "openai", "openrouter", "piper"})
 
     @classmethod
     def validate(cls) -> None:
@@ -71,6 +77,10 @@ class Settings:
         if cls.VOICE_TTS_PROVIDER == "openai" and not cls.OPENAI_API_KEY:
             raise ValueError(
                 "OPENAI_API_KEY is required when VOICE_TTS_PROVIDER=openai"
+            )
+        if cls.VOICE_TTS_PROVIDER == "openrouter" and not cls.OPENROUTER_API_KEY:
+            raise ValueError(
+                "OPENROUTER_API_KEY is required when VOICE_TTS_PROVIDER=openrouter"
             )
         if cls.WHISPER_MODEL_SIZE not in (
             "tiny",

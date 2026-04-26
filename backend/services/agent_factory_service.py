@@ -807,210 +807,173 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
     steps = definition.get("steps")
     if not isinstance(steps, list):
         return ["definition.steps must be a list"]
-    seen_step_names: set = set()
-    for i, step in enumerate(steps):
-        if not isinstance(step, dict):
-            warnings.append(f"step {i}: must be an object")
-            continue
-        name = step.get("name")
-        name_str = str(name or "").strip()
-        if not name_str:
-            warnings.append(f"step {i}: missing or empty 'name'")
-        step_type = step.get("step_type")
-        if not step_type:
-            warnings.append(f"step {i} ({name_str or '?'}): missing 'step_type'")
-        elif step_type not in VALID_STEP_TYPES:
-            warnings.append(f"step {i} ({name_str or '?'}): invalid step_type '{step_type}'")
-        output_key = step.get("output_key")
-        if not output_key or not str(output_key).strip():
-            warnings.append(f"step {i} ({name_str or '?'}): missing or empty 'output_key'")
-        if step_type == "tool":
-            if not step.get("action"):
-                warnings.append(f"step {i} ({name_str or '?'}): tool step requires 'action'")
-        _warn_invalid_user_facts_policy_on_step(step, f"step {i} ({name_str or '?'})", warnings)
-        if step_type == "deep_agent":
-            phases = step.get("phases")
-            if not isinstance(phases, list):
-                warnings.append(f"step {i} ({name_str or '?'}): deep_agent step requires 'phases' (list)")
-            else:
-                valid_phase_types = VALID_DEEP_AGENT_PHASE_TYPES
-                seen_phase_names: set = set()
-                phase_name_to_type: Dict[str, str] = {}
-                for pj, phase in enumerate(phases):
-                    if not isinstance(phase, dict):
-                        warnings.append(f"step {i} ({name_str or '?'}): phase {pj} must be an object")
-                        continue
-                    pname = (phase.get("name") or "").strip()
-                    if not pname:
-                        warnings.append(f"step {i} ({name_str or '?'}): phase {pj} missing or empty 'name'")
-                    ptype = (phase.get("type") or "").strip().lower()
-                    if not ptype:
-                        warnings.append(f"step {i} ({name_str or '?'}): phase {pj} ({pname or '?'}) missing 'type'")
-                    elif ptype not in valid_phase_types:
-                        warnings.append(f"step {i} ({name_str or '?'}): phase {pj} ({pname or '?'}) invalid type '{ptype}'")
-                    if ptype == "evaluate":
-                        if not (phase.get("criteria") or "").strip():
-                            warnings.append(f"step {i} ({name_str or '?'}): phase {pj} (evaluate) requires 'criteria'")
-                        if phase.get("on_pass") is None and phase.get("on_fail") is None:
-                            warnings.append(f"step {i} ({name_str or '?'}): phase {pj} (evaluate) should set 'on_pass' and/or 'on_fail'")
-                    if ptype == "refine":
-                        if not (phase.get("target") or "").strip():
-                            warnings.append(f"step {i} ({name_str or '?'}): phase {pj} (refine) requires 'target' (phase name)")
-                    if pname:
-                        seen_phase_names.add(pname)
-                        phase_name_to_type[pname] = ptype
-                _out_ph = step.get("output_phase")
-                if _out_ph is not None:
-                    if not isinstance(_out_ph, str) or not _out_ph.strip():
-                        warnings.append(
-                            f"step {i} ({name_str or '?'}): output_phase must be a non-empty string when set "
-                            "(use the Composer default to clear it)"
-                        )
-                    else:
-                        _opn = _out_ph.strip()
-                        if _opn not in seen_phase_names:
-                            warnings.append(
-                                f"step {i} ({name_str or '?'}): output_phase {_opn!r} does not match any defined phase name"
-                            )
-                        elif phase_name_to_type.get(_opn) == "evaluate":
-                            warnings.append(
-                                f"step {i} ({name_str or '?'}): output_phase points at evaluate phase {_opn!r} — "
-                                "that phase's output is usually JSON gate text; prefer synthesize, refine, or reason"
-                            )
-                _out_tpl = step.get("output_template")
-                if _out_tpl is not None and not isinstance(_out_tpl, str):
-                    warnings.append(
-                        f"step {i} ({name_str or '?'}): output_template must be a string when set"
-                    )
-                _op_set = isinstance(_out_ph, str) and bool(_out_ph.strip())
-                _tpl_set = isinstance(_out_tpl, str) and bool(str(_out_tpl).strip())
-                if _op_set and _tpl_set:
-                    warnings.append(
-                        f"step {i} ({name_str or '?'}): note — output_template takes precedence over output_phase at runtime"
-                    )
-        skill_refs = step.get("skill_ids") or step.get("skills")
-        if skill_refs is not None and not isinstance(skill_refs, list):
-            warnings.append(f"step {i} ({name_str or '?'}): skill_ids/skills must be a list")
-        elif isinstance(skill_refs, list):
-            for ref in skill_refs:
-                if not isinstance(ref, str) or not ref.strip():
-                    warnings.append(f"step {i} ({name_str or '?'}): skill_ids/skills must be list of non-empty strings")
-                    break
-        if step_type in ("llm_agent", "deep_agent"):
-            _step_tools = list(step.get("available_tools") or [])
-            _step_skills = list(skill_refs or [])
-            if not _step_tools and not _step_skills and _playbook_step_skill_discovery_off(step):
+
+    def _validate_step_list(step_list: List[Any], prefix: str) -> None:
+        seen_step_names: set = set()
+        for i, step in enumerate(step_list):
+            loc = f"{prefix}step {i}"
+            if not isinstance(step, dict):
+                warnings.append(f"{loc}: must be an object")
+                continue
+            name = step.get("name")
+            name_str = str(name or "").strip()
+            label = f"{loc} ({name_str or '?'})"
+
+            if not name_str:
+                warnings.append(f"{loc}: missing or empty 'name'")
+
+            step_type = step.get("step_type")
+            if not step_type:
+                warnings.append(f"{label}: missing 'step_type'")
+            elif step_type not in VALID_STEP_TYPES:
+                warnings.append(f"{label}: invalid step_type '{step_type}'")
+
+            # Guardrails for common authoring mistakes discovered in the wild.
+            if "loop_over" in step:
                 warnings.append(
-                    f"step {i} ({name_str or '?'}): {step_type} has no available_tools and no pinned skill_ids, "
-                    "and skill discovery is off — the agent will have no capabilities at runtime. "
-                    "Add tools to available_tools, add skill_ids, or enable skill discovery "
-                    "(set discovery_mode to 'auto' or 'catalog')."
+                    f"{label}: unsupported key 'loop_over' found. "
+                    "Loop steps do not iterate lists. Use llm_agent/deep_agent fan_out instead."
                 )
-            # Best-of-N sampling
-            raw_samples = step.get("samples")
-            if raw_samples is not None:
-                try:
-                    sn = int(raw_samples)
-                    if sn < 1 or sn > 5:
-                        warnings.append(
-                            f"step {i} ({name_str or '?'}): samples must be an integer 1–5 (got {raw_samples!r})"
-                        )
-                    elif sn > 3:
-                        warnings.append(
-                            f"step {i} ({name_str or '?'}): samples={sn} increases cost and latency — "
-                            "consider 2–3 unless quality demands more."
-                        )
-                except (TypeError, ValueError):
-                    warnings.append(
-                        f"step {i} ({name_str or '?'}): samples must be an integer 1–5 (got {raw_samples!r})"
-                    )
-            ss_raw = step.get("selection_strategy")
-            if ss_raw is not None and str(ss_raw).strip():
-                ss = str(ss_raw).strip().lower()
-                if ss not in ("llm_judge", "highest_score"):
-                    warnings.append(
-                        f"step {i} ({name_str or '?'}): invalid selection_strategy {ss_raw!r} "
-                        "(use llm_judge or highest_score)"
-                    )
-                elif ss == "highest_score" and step_type != "deep_agent":
-                    warnings.append(
-                        f"step {i} ({name_str or '?'}): selection_strategy highest_score is only supported "
-                        "on deep_agent steps (use llm_judge for llm_agent)."
-                    )
-                elif ss == "highest_score" and step_type == "deep_agent":
-                    phases_chk = step.get("phases") if isinstance(step.get("phases"), list) else []
-                    has_eval = any(
-                        isinstance(p, dict) and str(p.get("type") or "").strip().lower() == "evaluate"
-                        for p in phases_chk
-                    )
-                    if not has_eval:
-                        warnings.append(
-                            f"step {i} ({name_str or '?'}): selection_strategy highest_score needs at least one "
-                            "evaluate phase in phases; otherwise the runtime falls back to llm_judge."
-                        )
-            sc = step.get("selection_criteria")
-            if sc is not None and not isinstance(sc, str):
+            if step_type == "loop" and step.get("loop_over"):
                 warnings.append(
-                    f"step {i} ({name_str or '?'}): selection_criteria must be a string if set"
+                    f"{label}: loop_over is not supported on step_type=loop. Use fan_out on llm_agent/deep_agent."
                 )
-            # Dynamic fan-out
+            if step_type == "llm_task":
+                if not (step.get("prompt") or step.get("prompt_template")):
+                    inputs_obj = step.get("inputs")
+                    if isinstance(inputs_obj, dict) and isinstance(inputs_obj.get("prompt"), str) and inputs_obj.get("prompt", "").strip():
+                        warnings.append(
+                            f"{label}: llm_task has prompt under inputs.prompt. "
+                            "Move it to top-level 'prompt' (or 'prompt_template')."
+                        )
+
+            output_key = step.get("output_key")
+            if not output_key or not str(output_key).strip():
+                warnings.append(f"{label}: missing or empty 'output_key'")
+            if step_type == "tool" and not step.get("action"):
+                warnings.append(f"{label}: tool step requires 'action'")
+
+            _warn_invalid_user_facts_policy_on_step(step, label, warnings)
+
+            # Deep agent validation (existing)
+            if step_type == "deep_agent":
+                phases = step.get("phases")
+                if not isinstance(phases, list):
+                    warnings.append(f"{label}: deep_agent step requires 'phases' (list)")
+                else:
+                    valid_phase_types = VALID_DEEP_AGENT_PHASE_TYPES
+                    seen_phase_names: set = set()
+                    phase_name_to_type: Dict[str, str] = {}
+                    for pj, phase in enumerate(phases):
+                        if not isinstance(phase, dict):
+                            warnings.append(f"{label}: phase {pj} must be an object")
+                            continue
+                        pname = (phase.get("name") or "").strip()
+                        if not pname:
+                            warnings.append(f"{label}: phase {pj} missing or empty 'name'")
+                        ptype = (phase.get("type") or "").strip().lower()
+                        if not ptype:
+                            warnings.append(f"{label}: phase {pj} ({pname or '?'}) missing 'type'")
+                        elif ptype not in valid_phase_types:
+                            warnings.append(f"{label}: phase {pj} ({pname or '?'}) invalid type '{ptype}'")
+                        if ptype == "evaluate":
+                            if not (phase.get("criteria") or "").strip():
+                                warnings.append(f"{label}: phase {pj} (evaluate) requires 'criteria'")
+                            if phase.get("on_pass") is None and phase.get("on_fail") is None:
+                                warnings.append(f"{label}: phase {pj} (evaluate) should set 'on_pass' and/or 'on_fail'")
+                        if ptype == "refine":
+                            if not (phase.get("target") or "").strip():
+                                warnings.append(f"{label}: phase {pj} (refine) requires 'target' (phase name)")
+                        if pname:
+                            seen_phase_names.add(pname)
+                            phase_name_to_type[pname] = ptype
+                    _out_ph = step.get("output_phase")
+                    if _out_ph is not None:
+                        if not isinstance(_out_ph, str) or not _out_ph.strip():
+                            warnings.append(
+                                f"{label}: output_phase must be a non-empty string when set "
+                                "(use the Composer default to clear it)"
+                            )
+                        else:
+                            _opn = _out_ph.strip()
+                            if _opn not in seen_phase_names:
+                                warnings.append(f"{label}: output_phase {_opn!r} does not match any defined phase name")
+                            elif phase_name_to_type.get(_opn) == "evaluate":
+                                warnings.append(
+                                    f"{label}: output_phase points at evaluate phase {_opn!r} — "
+                                    "that phase's output is usually JSON gate text; prefer synthesize, refine, or reason"
+                                )
+                    _out_tpl = step.get("output_template")
+                    if _out_tpl is not None and not isinstance(_out_tpl, str):
+                        warnings.append(f"{label}: output_template must be a string when set")
+                    _op_set = isinstance(_out_ph, str) and bool(_out_ph.strip())
+                    _tpl_set = isinstance(_out_tpl, str) and bool(str(_out_tpl).strip())
+                    if _op_set and _tpl_set:
+                        warnings.append(f"{label}: note — output_template takes precedence over output_phase at runtime")
+
+            # Skills/tools warnings (existing)
+            skill_refs = step.get("skill_ids") or step.get("skills")
+            if skill_refs is not None and not isinstance(skill_refs, list):
+                warnings.append(f"{label}: skill_ids/skills must be a list")
+            elif isinstance(skill_refs, list):
+                for ref in skill_refs:
+                    if not isinstance(ref, str) or not ref.strip():
+                        warnings.append(f"{label}: skill_ids/skills must be list of non-empty strings")
+                        break
+            if step_type in ("llm_agent", "deep_agent"):
+                _step_tools = list(step.get("available_tools") or [])
+                _step_skills = list(skill_refs or [])
+                if not _step_tools and not _step_skills and _playbook_step_skill_discovery_off(step):
+                    warnings.append(
+                        f"{label}: {step_type} has no available_tools and no pinned skill_ids, "
+                        "and skill discovery is off — the agent will have no capabilities at runtime. "
+                        "Add tools to available_tools, add skill_ids, or enable skill discovery "
+                        "(set discovery_mode to 'auto' or 'catalog')."
+                    )
+
+            # Fan-out validation (existing)
             fo = step.get("fan_out")
             if fo is not None:
                 if step_type not in ("llm_agent", "deep_agent"):
-                    warnings.append(
-                        f"step {i} ({name_str or '?'}): fan_out is only supported on llm_agent and deep_agent steps"
-                    )
+                    warnings.append(f"{label}: fan_out is only supported on llm_agent and deep_agent steps")
                 elif not isinstance(fo, dict):
-                    warnings.append(f"step {i} ({name_str or '?'}): fan_out must be an object")
+                    warnings.append(f"{label}: fan_out must be an object")
                 else:
                     src = str(fo.get("source") or "").strip()
                     if not src:
-                        warnings.append(
-                            f"step {i} ({name_str or '?'}): fan_out.source is required (dot-path to a list)"
-                        )
-                    iv = fo.get("item_variable")
-                    if iv is not None and str(iv).strip():
-                        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(iv).strip()):
-                            warnings.append(
-                                f"step {i} ({name_str or '?'}): fan_out.item_variable must be a valid identifier"
-                            )
-                    mi = fo.get("max_items")
-                    if mi is not None:
-                        try:
-                            miv = int(mi)
-                            if miv < 1 or miv > 10:
-                                warnings.append(
-                                    f"step {i} ({name_str or '?'}): fan_out.max_items must be 1–10 (got {mi!r})"
-                                )
-                        except (TypeError, ValueError):
-                            warnings.append(
-                                f"step {i} ({name_str or '?'}): fan_out.max_items must be an integer 1–10"
-                            )
-                    mg = fo.get("merge")
-                    if mg is not None and str(mg).strip().lower() not in ("list", "concat", ""):
-                        warnings.append(
-                            f"step {i} ({name_str or '?'}): fan_out.merge must be list or concat (got {mg!r})"
-                        )
-        heading_level = step.get("heading_level")
-        if heading_level is not None:
-            try:
-                hl = int(heading_level)
-                if hl < 1 or hl > 6:
-                    warnings.append(f"step {i} ({name_str or '?'}): heading_level must be 1–6")
-            except (TypeError, ValueError):
-                warnings.append(f"step {i} ({name_str or '?'}): heading_level must be an integer 1–6")
-        inputs = step.get("inputs")
-        if isinstance(inputs, dict):
-            for _k, v in inputs.items():
-                if isinstance(v, str) and v.strip().startswith("{") and v.strip().endswith("}"):
-                    ref = v.strip()[1:-1].strip()
-                    if "." in ref:
-                        step_ref = ref.split(".", 1)[0].strip()
-                        if step_ref and step_ref not in seen_step_names:
-                            warnings.append(f"step {i} ({name_str or '?'}): input references unknown step '{step_ref}'")
-        if name_str:
-            seen_step_names.add(name_str)
-    _warn_missing_exclusive(steps, warnings)
+                        warnings.append(f"{label}: fan_out.source is required (dot-path to a list)")
+
+            heading_level = step.get("heading_level")
+            if heading_level is not None:
+                try:
+                    hl = int(heading_level)
+                    if hl < 1 or hl > 6:
+                        warnings.append(f"{label}: heading_level must be 1–6")
+                except (TypeError, ValueError):
+                    warnings.append(f"{label}: heading_level must be an integer 1–6")
+
+            inputs_obj = step.get("inputs")
+            if isinstance(inputs_obj, dict):
+                for _k, v in inputs_obj.items():
+                    if isinstance(v, str) and v.strip().startswith("{") and v.strip().endswith("}"):
+                        ref = v.strip()[1:-1].strip()
+                        if "." in ref:
+                            step_ref = ref.split(".", 1)[0].strip()
+                            if step_ref and step_ref not in seen_step_names:
+                                warnings.append(f"{label}: input references unknown step '{step_ref}'")
+
+            if name_str:
+                seen_step_names.add(name_str)
+
+            # Recurse into nested steps
+            for child_key in ("then_steps", "else_steps", "parallel_steps", "steps"):
+                children = step.get(child_key)
+                if isinstance(children, list) and children:
+                    _validate_step_list(children, prefix=f"{label}.{child_key} -> ")
+
+        _warn_missing_exclusive(step_list, warnings)
+
+    _validate_step_list(steps, prefix="")
     return warnings
 
 

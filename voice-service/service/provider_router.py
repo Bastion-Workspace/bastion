@@ -12,6 +12,7 @@ from providers.tts.base_tts_provider import BaseTTSProvider
 from providers.tts.elevenlabs_provider import ElevenLabsProvider
 from providers.tts.hedra_provider import HedraProvider
 from providers.tts.openai_provider import OpenAIProvider
+from providers.tts.openrouter_provider import OpenRouterProvider
 from providers.tts.piper_provider import PiperProvider
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ _TTS_REGISTRY = {
     "elevenlabs": ElevenLabsProvider,
     "hedra": HedraProvider,
     "openai": OpenAIProvider,
+    "openrouter": OpenRouterProvider,
     "piper": PiperProvider,
 }
 

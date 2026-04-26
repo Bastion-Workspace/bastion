@@ -4,6 +4,7 @@ Org files on disk are the source of truth. Supports list, create, update, toggle
 """
 
 import logging
+import html
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -300,9 +301,13 @@ class OrgTodoService:
             props_block = [":PROPERTIES:", f":CREATED:  [{ts}]", ":END:"]
             planning_lines: List[str] = []
             if scheduled and scheduled.strip():
-                planning_lines.append(f"SCHEDULED: {scheduled.strip()}")
+                # Sometimes upstream content is HTML-escaped (e.g. "&lt;2026-04-25 Sat&gt;").
+                # Org-mode requires literal angle brackets for active timestamps.
+                sched = html.unescape(scheduled.strip())
+                planning_lines.append(f"SCHEDULED: {sched}")
             if deadline and deadline.strip():
-                planning_lines.append(f"DEADLINE: {deadline.strip()}")
+                dl = html.unescape(deadline.strip())
+                planning_lines.append(f"DEADLINE: {dl}")
             body_block = ""
             if body and body.strip():
                 body_block = body.strip() + "\n" if not body.strip().endswith("\n") else body.strip()

@@ -14,6 +14,7 @@ use tokio::io::AsyncWriteExt;
 pub struct ReadFileCapability;
 pub struct ListDirectoryCapability;
 pub struct WriteFileCapability;
+pub struct PatchFileCapability;
 pub struct CreateDirectoryCapability;
 
 fn mkdir_policy_capability(config: &AppConfig) -> &'static str {
@@ -212,6 +213,95 @@ impl Capability for WriteFileCapability {
 
         Ok(CapabilityResult {
             formatted: format!("Wrote {} bytes to {}", bytes_written, path),
+            result,
+        })
+    }
+}
+
+#[async_trait]
+impl Capability for PatchFileCapability {
+    fn name(&self) -> &str {
+        "patch_file"
+    }
+
+    fn description(&self) -> &str {
+        "Replace a unique substring in a file (args: path, old_string, new_string, replace_all optional). Uses patch_file / write_file / read_file policy."
+    }
+
+    async fn execute(&self, args: Value, config: &AppConfig) -> Result<CapabilityResult, String> {
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing 'path' argument")?;
+        let old_string = args
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing 'old_string' argument")?;
+        let new_string = args
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let replace_all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        if old_string.is_empty() {
+            return Err("old_string must be non-empty".to_string());
+        }
+
+        policy::validate_path_for_write(config, "patch_file", path)?;
+
+        let max_bytes = config
+            .capabilities
+            .get("read_file")
+            .and_then(|c| c.max_file_bytes)
+            .or_else(|| config.capabilities.get("patch_file").and_then(|c| c.max_file_bytes))
+            .or_else(|| config.capabilities.get("write_file").and_then(|c| c.max_file_bytes))
+            .unwrap_or(10 * 1024 * 1024);
+
+        let content = fs::read_to_string(path).await.map_err(|e| e.to_string())?;
+        if content.len() > max_bytes {
+            return Err(format!(
+                "File size {} exceeds max_file_bytes {}",
+                content.len(),
+                max_bytes
+            ));
+        }
+
+        let count = content.matches(old_string).count();
+        if count == 0 {
+            return Err(format!(
+                "old_string not found in file ({} bytes). Check exact whitespace and line endings.",
+                content.len()
+            ));
+        }
+        if count > 1 && !replace_all {
+            return Err(format!(
+                "old_string matched {} times; set replace_all=true to change all, or use a longer unique snippet",
+                count
+            ));
+        }
+
+        let updated = if replace_all {
+            content.replace(old_string, new_string)
+        } else {
+            content.replacen(old_string, new_string, 1)
+        };
+
+        fs::write(path, &updated).await.map_err(|e| e.to_string())?;
+
+        let result = json!({
+            "success": true,
+            "path": path,
+            "replacements": if replace_all { count } else { 1 },
+            "bytes_written": updated.len() as u64
+        });
+
+        Ok(CapabilityResult {
+            formatted: format!(
+                "Patched {} ({} replacement(s), {} bytes)",
+                path,
+                if replace_all { count } else { 1 },
+                updated.len()
+            ),
             result,
         })
     }

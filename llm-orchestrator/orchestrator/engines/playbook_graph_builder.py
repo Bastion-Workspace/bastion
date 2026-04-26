@@ -510,6 +510,20 @@ def _make_tool_node(step: Dict[str, Any]):
         key = step.get("output_key") or step.get("name")
         if key:
             new_ps[key] = result
+        if isinstance(result, dict) and result.get("_needs_human_interaction"):
+            idata = result.get("interaction_data") or {}
+            pending_auth = {
+                "step_name": step.get("name") or step.get("output_key") or "tool",
+                "interaction_type": result.get("interaction_type", "shell_command_approval"),
+                "interaction_data": idata,
+                "approval_id": idata.get("approval_id"),
+                "prompt": result.get("formatted", "Approval required."),
+            }
+            return {
+                **state,
+                "playbook_state": new_ps,
+                "pending_auth": pending_auth,
+            }
         return {
             **state,
             "playbook_state": new_ps,
@@ -921,9 +935,34 @@ def _make_branch_node(step: Dict[str, Any], checkpointer: Optional[AsyncPostgres
 
         condition_met = _evaluate_condition(condition_expr, ps, inputs)
         target_graph = then_graph if condition_met else else_graph
+        branch_selected = "then" if condition_met else "else"
+        key = step.get("output_key") or step.get("name")
+        selected_steps = then_steps if condition_met else else_steps
+        selected_step_names = [
+            (s.get("name") or s.get("output_key") or "").strip()
+            for s in (selected_steps or [])
+            if isinstance(s, dict)
+        ]
+        selected_step_names = [n for n in selected_step_names if n]
+        # Small, high-signal snapshot for common conditions like "{bastion_emails.count} > 0"
+        count_snapshot = None
+        try:
+            if isinstance(ps.get("bastion_emails"), dict):
+                count_snapshot = ps.get("bastion_emails", {}).get("count")
+        except Exception:
+            count_snapshot = None
 
         if target_graph is None:
-            return state
+            new_ps = {**ps}
+            if key:
+                new_ps[key] = {
+                    "branch_condition": condition_expr,
+                    "branch_selected": branch_selected,
+                    "selected_steps": selected_step_names,
+                    "snapshot": {"bastion_emails.count": count_snapshot} if count_snapshot is not None else {},
+                    "formatted": f"Branch selected: {branch_selected} (no steps)",
+                }
+            return {**state, "playbook_state": new_ps}
 
         result = await invoke_with_optional_timeout(
             target_graph.ainvoke(
@@ -936,9 +975,19 @@ def _make_branch_node(step: Dict[str, Any], checkpointer: Optional[AsyncPostgres
             ),
             settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
         )
+        new_ps = result.get("playbook_state") or ps
+        new_ps = {**ps, **new_ps}
+        if key:
+            new_ps[key] = {
+                "branch_condition": condition_expr,
+                "branch_selected": branch_selected,
+                "selected_steps": selected_step_names,
+                "snapshot": {"bastion_emails.count": count_snapshot} if count_snapshot is not None else {},
+                "formatted": f"Branch selected: {branch_selected}",
+            }
         return {
             **state,
-            "playbook_state": result.get("playbook_state") or ps,
+            "playbook_state": new_ps,
         }
 
     return _node
@@ -1029,6 +1078,8 @@ def build_playbook_graph(
                     _pk: str = prev_output_key,
                     _next: str = next_name,
                 ) -> str:
+                    if s.get("pending_auth"):
+                        return "end"
                     ps = s.get("playbook_state") or {}
                     result = ps.get(_pk)
                     if isinstance(result, dict) and result.get("_skipped"):
@@ -1051,7 +1102,18 @@ def build_playbook_graph(
                     {"end": END, next_name: name},
                 )
             else:
-                workflow.add_edge(prev_node_name, name)
+
+                def _route_after_step_pending_auth(
+                    s: PlaybookGraphState,
+                    next_node: str = next_name,
+                ) -> str:
+                    return "end" if s.get("pending_auth") else next_node
+
+                workflow.add_conditional_edges(
+                    prev_node_name,
+                    _route_after_step_pending_auth,
+                    {"end": END, next_name: name},
+                )
         prev_node_name = name
         prev_step_type = step_type
 

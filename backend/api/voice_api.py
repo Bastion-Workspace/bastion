@@ -25,6 +25,7 @@ from services.user_settings_kv_service import get_user_setting
 from utils.auth_middleware import AuthenticatedUserResponse, get_current_user
 from utils.elevenlabs_tts_model import resolve_elevenlabs_tts_model_id_for_user
 from utils.hedra_tts_model import resolve_hedra_tts_model_id_for_user
+from utils.openrouter_tts_model import resolve_openrouter_tts_model_id_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,17 @@ async def _elevenlabs_model_id_resolved(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 
+async def _openrouter_model_id_resolved(
+    user_id: str, request: SynthesizeRequest, use_admin_tts: bool
+) -> str:
+    try:
+        return await resolve_openrouter_tts_model_id_for_user(
+            user_id, request, use_admin_tts
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
 async def _resolve_tts_synthesis_params(
     user_id: str,
     request: SynthesizeRequest,
@@ -71,14 +83,16 @@ async def _resolve_tts_synthesis_params(
     )
 
     if use_admin_tts:
-        admin_prov = (
+        raw_admin = (
             await get_user_setting(user_id, SETTING_USER_ADMIN_TTS_PROVIDER) or ""
         ).strip().lower()
-        if admin_prov == "browser":
+        # Missing / blank = browser (greenfield). Explicit "server" = voice-service deployer default.
+        if raw_admin in ("browser", ""):
             raise HTTPException(
                 status_code=400,
                 detail="Browser TTS is selected in settings; use client speech synthesis.",
             )
+        admin_prov = raw_admin
         if not voice_id:
             if admin_prov == "piper":
                 voice_id = (
@@ -96,7 +110,9 @@ async def _resolve_tts_synthesis_params(
             provider = (
                 await get_user_setting(user_id, SETTING_USER_ADMIN_TTS_PROVIDER) or ""
             ).strip()
-        if admin_prov == "piper":
+        if admin_prov == "server":
+            provider = ""
+        elif admin_prov == "piper":
             provider = "piper"
         prov_lc = (provider or "").strip().lower()
         model_id = ""
@@ -111,6 +127,10 @@ async def _resolve_tts_synthesis_params(
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
+        elif prov_lc == "openrouter":
+            model_id = await _openrouter_model_id_resolved(
+                user_id, request, use_admin_tts=True
+            )
         return voice_id, provider, api_key, base_url, model_id
 
     # BYOK: honor user_byok_tts_engine before get_voice_context. Otherwise a saved
@@ -155,6 +175,15 @@ async def _resolve_tts_synthesis_params(
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
+        elif prov_lc == "openrouter":
+            model_id = await _openrouter_model_id_resolved(
+                user_id, request, use_admin_tts=False
+            )
+            if not (model_id or "").strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Select an OpenRouter TTS model in voice settings (BYOK).",
+                )
         return voice_id, provider, api_key, base_url, model_id
 
     vid = (await get_user_setting(user_id, SETTING_USER_TTS_VOICE_ID) or "").strip()
@@ -177,6 +206,15 @@ async def _resolve_tts_synthesis_params(
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+    elif prov_lc == "openrouter":
+        model_id = await _openrouter_model_id_resolved(
+            user_id, request, use_admin_tts=False
+        )
+        if not (model_id or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Select an OpenRouter TTS model in voice settings.",
+            )
     return voice_id, prov, "", "", model_id
 
 
@@ -255,7 +293,7 @@ async def synthesize_voice_stream(
     prov_lc = (provider or "").strip().lower()
     stream_fmt = (
         "mp3"
-        if prov_lc in ("elevenlabs", "hedra") and out_fmt != "wav"
+        if prov_lc in ("elevenlabs", "hedra", "openrouter") and out_fmt != "wav"
         else out_fmt
     )
     client = await get_voice_service_client()

@@ -102,7 +102,50 @@ def _parse_folders_from_result(result: str) -> List[Dict[str, Any]]:
 def _parse_emails_from_result(result: Any) -> Tuple[List[Dict[str, Any]], str]:
     """Parse backend result into list of email dicts and display text."""
     if isinstance(result, str):
-        return [], result
+        text = result
+        # Best-effort parse of the formatted text produced by backend/services/langgraph_tools/email_tools._format_emails.
+        # This keeps `emails` and `count` consistent even when the backend returns a string-only payload.
+        emails: List[Dict[str, Any]] = []
+        cur: Optional[Dict[str, Any]] = None
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            m = re.match(r"^\d+\.\s*message_id:\s*(.+)$", line)
+            if m:
+                if cur:
+                    emails.append(cur)
+                cur = {
+                    "message_id": m.group(1).strip(),
+                    "subject": "",
+                    "from_address": "",
+                    "to_addresses": "",
+                    "date": None,
+                    "snippet": "",
+                    "thread_id": None,
+                }
+                continue
+            if cur is None:
+                continue
+            if line.lower().startswith("from:"):
+                # Format: From: Name <addr>
+                m2 = re.search(r"<([^>]+)>", line)
+                cur["from_address"] = (m2.group(1).strip() if m2 else line[5:].strip())
+            elif line.lower().startswith("subject:"):
+                cur["subject"] = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("date:"):
+                cur["date"] = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("read:"):
+                v = line.split(":", 1)[1].strip().lower()
+                if v in ("true", "false"):
+                    cur["is_read"] = (v == "true")
+            elif line.lower().startswith("preview:"):
+                cur["snippet"] = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("conversation_id:"):
+                cur["thread_id"] = line.split(":", 1)[1].strip()
+        if cur:
+            emails.append(cur)
+        return emails, text
     items = result.get("emails") or result.get("items") or result.get("messages") or []
     if not items:
         text = result.get("formatted") or result.get("content") or str(result)
@@ -115,6 +158,7 @@ def _parse_emails_from_result(result: Any) -> Tuple[List[Dict[str, Any]], str]:
             "from_address": m.get("from") or m.get("from_address") or "",
             "to_addresses": m.get("to") or m.get("to_addresses") or "",
             "date": m.get("date") or m.get("received_at"),
+            "is_read": m.get("is_read"),
             "snippet": m.get("snippet") or m.get("body_preview") or "",
             "thread_id": m.get("conversation_id") or m.get("thread_id"),
         })

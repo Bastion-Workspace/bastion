@@ -56,7 +56,7 @@ import orgService from '../services/org/OrgService';
 import { devLog } from '../utils/devConsole';
 import exportService from '../services/exportService';
 import settingsService from '../services/settings/SettingsService';
-import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover, Drawer, FormLabel, RadioGroup, Radio, Snackbar } from '@mui/material';
+import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover, Drawer, FormLabel, RadioGroup, Radio, Snackbar, Collapse } from '@mui/material';
 import OrgRenderer from './OrgRenderer';
 import OrgCMEditor from './OrgCMEditor';
 import MarkdownCMEditor from './MarkdownCMEditor';
@@ -617,6 +617,24 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [backlinks, setBacklinks] = useState([]);
   const [loadingBacklinks, setLoadingBacklinks] = useState(false);
   const [orgLinkNotice, setOrgLinkNotice] = useState({ open: false, message: '', severity: 'info' });
+  const [unlinkedMentions, setUnlinkedMentions] = useState([]);
+  const [unlinkedOpen, setUnlinkedOpen] = useState(false);
+  const [zkBacklinksEnabled, setZkBacklinksEnabled] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await apiService.get('/api/zettelkasten/settings');
+        if (!cancelled && r?.settings && r.settings.backlinks_enabled === false) {
+          setZkBacklinksEnabled(false);
+        }
+      } catch {
+        /* optional */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const handleOrgPreviewNavigate = useCallback(
     async (navInfo) => {
@@ -707,12 +725,27 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     [onOpenDocument]
   );
 
+  const handleBacklinkNavigate = useCallback(
+    (backlink) => {
+      if (backlink?.source_document_id && onOpenDocument) {
+        onOpenDocument(String(backlink.source_document_id), backlink.filename || '');
+      } else {
+        openOrgFileByFilename(backlink?.filename);
+      }
+    },
+    [onOpenDocument, openOrgFileByFilename],
+  );
+
   useEffect(() => {
     if (isEditing) setReadonlyFindOpen(false);
   }, [isEditing]);
 
   useEffect(() => {
     setReadonlyFindOpen(false);
+  }, [documentId]);
+
+  useEffect(() => {
+    setUnlinkedOpen(false);
   }, [documentId]);
 
   useEffect(() => {
@@ -2156,34 +2189,70 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     return () => clearTimeout(scrollTimeout);
   }, [document, loading, scrollToLine, scrollToHeading]);
 
-  // Fetch backlinks for org files
+  // Fetch backlinks: org (filename scan) or markdown/txt (document_links)
   useEffect(() => {
     const fetchBacklinks = async () => {
       if (!document || !document.filename) return;
-      
+
       const fname = document.filename.toLowerCase();
-      if (!fname.endsWith('.org')) return;
-      
+      if (!fname.endsWith('.org') && !fname.endsWith('.md') && !fname.endsWith('.txt')) return;
+
       try {
         setLoadingBacklinks(true);
         devLog('🔗 Fetching backlinks for', document.filename);
-        
-        const response = await apiService.get(`/api/org/backlinks?filename=${encodeURIComponent(document.filename)}`);
-        
-        if (response.success && response.backlinks) {
-          setBacklinks(response.backlinks);
-          devLog(`✅ Found ${response.backlinks.length} backlinks`);
+
+        if (fname.endsWith('.org')) {
+          const response = await apiService.get(
+            `/api/org/backlinks?filename=${encodeURIComponent(document.filename)}`,
+          );
+          if (response.success && response.backlinks) {
+            setBacklinks(response.backlinks);
+          } else {
+            setBacklinks([]);
+          }
+        } else if (document.document_id) {
+          const response = await apiService.get(`/api/documents/${document.document_id}/backlinks`);
+          if (response.success && response.backlinks) {
+            setBacklinks(response.backlinks);
+          } else {
+            setBacklinks([]);
+          }
         }
       } catch (err) {
         console.error('Failed to fetch backlinks:', err);
-        // Fail silently - backlinks are supplementary information
+        setBacklinks([]);
       } finally {
         setLoadingBacklinks(false);
       }
     };
-    
+
     fetchBacklinks();
   }, [document]);
+
+  useEffect(() => {
+    const run = async () => {
+      if (!zkBacklinksEnabled || !document?.document_id) {
+        setUnlinkedMentions([]);
+        return;
+      }
+      const fn = (document.filename || '').toLowerCase();
+      if (!fn.endsWith('.md') && !fn.endsWith('.org') && !fn.endsWith('.txt')) {
+        setUnlinkedMentions([]);
+        return;
+      }
+      try {
+        const r = await apiService.get(`/api/documents/${document.document_id}/unlinked-mentions`);
+        if (r?.success && Array.isArray(r.mentions)) {
+          setUnlinkedMentions(r.mentions);
+        } else {
+          setUnlinkedMentions([]);
+        }
+      } catch {
+        setUnlinkedMentions([]);
+      }
+    };
+    run();
+  }, [document?.document_id, document?.filename, zkBacklinksEnabled]);
 
   // Refile hotkey: Ctrl+Shift+M to refile current heading
   useEffect(() => {
@@ -4055,6 +4124,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                           awareness={collabSession?.awareness}
                           undoManager={collabSession?.undoManager}
                           onCollabDocChange={handleCollabDocChange}
+                          onOpenDocumentById={onOpenDocument ? (id, label) => onOpenDocument(id, label) : null}
                         />
                       </Box>
                     </Box>
@@ -4130,6 +4200,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       awareness={collabSession?.awareness}
                       undoManager={collabSession?.undoManager}
                       onCollabDocChange={handleCollabDocChange}
+                      onOpenDocumentById={onOpenDocument ? (id, label) => onOpenDocument(id, label) : null}
                     />
                   </Box>
                 )
@@ -4151,47 +4222,122 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 />
               )
             ) : document.filename && fnameLower.endsWith('.md') ? (
-              <Box sx={(theme) => ({
-                ...markdownPreviewContainerSx(theme),
-              })}>
-                <ReactMarkdown 
-                  components={{ pre: MarkdownPreWithMermaid }}
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[
-                    rehypeRaw,
-                    [
-                      rehypeSanitize,
-                      {
-                        tagNames: [
-                          'details', 'summary', 'div', 'span',
-                          'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-                          'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
-                          'ul', 'ol', 'li',
-                          'blockquote', 'pre', 'code',
-                          'table', 'thead', 'tbody', 'tr', 'th', 'td',
-                          'a', 'img',
-                          'hr'
-                        ],
-                        attributes: {
-                          '*': ['class', 'id', 'align'],
-                          'a': ['href', 'title'],
-                          'img': ['src', 'alt', 'title', 'width', 'height'],
-                          'div': ['style'],
-                          'span': ['style'],
-                          'details': ['open'],
-                          'summary': []
-                        },
-                        protocols: {
-                          href: ['http', 'https', 'mailto'],
-                          src: ['http', 'https', 'data', '']
+              <>
+                <Box sx={(theme) => ({
+                  ...markdownPreviewContainerSx(theme),
+                })}>
+                  <ReactMarkdown 
+                    components={{ pre: MarkdownPreWithMermaid }}
+                    remarkPlugins={[remarkGfm]}
+                    rehypePlugins={[
+                      rehypeRaw,
+                      [
+                        rehypeSanitize,
+                        {
+                          tagNames: [
+                            'details', 'summary', 'div', 'span',
+                            'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                            'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
+                            'ul', 'ol', 'li',
+                            'blockquote', 'pre', 'code',
+                            'table', 'thead', 'tbody', 'tr', 'th', 'td',
+                            'a', 'img',
+                            'hr'
+                          ],
+                          attributes: {
+                            '*': ['class', 'id', 'align'],
+                            'a': ['href', 'title'],
+                            'img': ['src', 'alt', 'title', 'width', 'height'],
+                            'div': ['style'],
+                            'span': ['style'],
+                            'details': ['open'],
+                            'summary': []
+                          },
+                          protocols: {
+                            href: ['http', 'https', 'mailto'],
+                            src: ['http', 'https', 'data', '']
+                          }
                         }
-                      }
-                    ]
-                  ]}
-                >
-                  {markdownPreviewBody(document.content)}
-                </ReactMarkdown>
-              </Box>
+                      ]
+                    ]}
+                  >
+                    {markdownPreviewBody(document.content)}
+                  </ReactMarkdown>
+                </Box>
+                {zkBacklinksEnabled && !isEditing && backlinks.length > 0 && (
+                  <Box sx={{ p: 2, borderTop: '1px solid #e0e0e0', backgroundColor: '#f9f9f9' }}>
+                    <Typography variant="h6" sx={{ mb: 1, fontSize: '1rem', fontWeight: 600, color: 'primary.main' }}>
+                      Backlinks ({backlinks.length})
+                    </Typography>
+                    <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary', fontStyle: 'italic' }}>
+                      Documents that link here
+                    </Typography>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      {backlinks.map((backlink, index) => (
+                        <Paper
+                          key={backlink.source_document_id || index}
+                          elevation={1}
+                          sx={{
+                            p: 1.5,
+                            cursor: 'pointer',
+                            transition: 'all 0.2s',
+                            '&:hover': {
+                              backgroundColor: '#e3f2fd',
+                              transform: 'translateX(4px)',
+                              boxShadow: 2,
+                            },
+                          }}
+                          onClick={() => handleBacklinkNavigate(backlink)}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                            <Description fontSize="small" sx={{ color: 'primary.main' }} />
+                            <Typography variant="body1" sx={{ fontWeight: 500, color: 'primary.main' }}>
+                              {backlink.filename}
+                            </Typography>
+                            {backlink.link_count > 1 && (
+                              <Chip
+                                label={`${backlink.link_count} links`}
+                                size="small"
+                                sx={{ height: 20, fontSize: '0.7rem' }}
+                              />
+                            )}
+                          </Box>
+                          <Typography variant="body2" sx={{ color: 'text.secondary', fontSize: '0.85rem', pl: 3.5 }}>
+                            {backlink.context}
+                          </Typography>
+                        </Paper>
+                      ))}
+                    </Box>
+                  </Box>
+                )}
+                {zkBacklinksEnabled && !isEditing && unlinkedMentions.length > 0 && (
+                  <Box sx={{ px: 2, pb: 2, borderTop: '1px solid #e0e0e0', backgroundColor: '#fafafa' }}>
+                    <Button size="small" onClick={() => setUnlinkedOpen((o) => !o)} sx={{ mt: 1 }}>
+                      Unlinked mentions ({unlinkedMentions.length})
+                    </Button>
+                    <Collapse in={unlinkedOpen}>
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }}>
+                        {unlinkedMentions.map((m) => (
+                          <Paper
+                            key={m.document_id}
+                            elevation={0}
+                            variant="outlined"
+                            sx={{ p: 1, cursor: 'pointer' }}
+                            onClick={() => onOpenDocument && onOpenDocument(String(m.document_id), m.filename || m.title)}
+                          >
+                            <Typography variant="body2" fontWeight={600}>{m.filename || m.title}</Typography>
+                            {m.snippet ? (
+                              <Typography variant="caption" color="text.secondary" display="block">
+                                {m.snippet}
+                              </Typography>
+                            ) : null}
+                          </Paper>
+                        ))}
+                      </Box>
+                    </Collapse>
+                  </Box>
+                )}
+              </>
             ) : document.filename && document.filename.endsWith('.org') ? (
               <>
                 <Box sx={{ p: 1 }}>
@@ -4202,7 +4348,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 </Box>
                 
                 {/* Backlinks Section */}
-                {!isEditing && backlinks.length > 0 && (
+                {zkBacklinksEnabled && !isEditing && backlinks.length > 0 && (
                   <Box sx={{ p: 2, borderTop: '1px solid #e0e0e0', backgroundColor: '#f9f9f9' }}>
                     <Typography variant="h6" sx={{ mb: 1, fontSize: '1rem', fontWeight: 600, color: 'primary.main' }}>
                       🔗 Backlinks ({backlinks.length})
@@ -4225,7 +4371,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                               boxShadow: 2
                             }
                           }}
-                          onClick={() => openOrgFileByFilename(backlink.filename)}
+                          onClick={() => handleBacklinkNavigate(backlink)}
                         >
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
                             <Description fontSize="small" sx={{ color: 'primary.main' }} />
@@ -4246,6 +4392,33 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         </Paper>
                       ))}
                     </Box>
+                  </Box>
+                )}
+                {zkBacklinksEnabled && !isEditing && unlinkedMentions.length > 0 && (
+                  <Box sx={{ px: 2, pb: 2, borderTop: '1px solid #e0e0e0', backgroundColor: '#fafafa' }}>
+                    <Button size="small" onClick={() => setUnlinkedOpen((o) => !o)} sx={{ mt: 1 }}>
+                      Unlinked mentions ({unlinkedMentions.length})
+                    </Button>
+                    <Collapse in={unlinkedOpen}>
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mt: 1 }}>
+                        {unlinkedMentions.map((m) => (
+                          <Paper
+                            key={m.document_id}
+                            elevation={0}
+                            variant="outlined"
+                            sx={{ p: 1, cursor: 'pointer' }}
+                            onClick={() => onOpenDocument && onOpenDocument(String(m.document_id), m.filename || m.title)}
+                          >
+                            <Typography variant="body2" fontWeight={600}>{m.filename || m.title}</Typography>
+                            {m.snippet ? (
+                              <Typography variant="caption" color="text.secondary" display="block">
+                                {m.snippet}
+                              </Typography>
+                            ) : null}
+                          </Paper>
+                        ))}
+                      </Box>
+                    </Collapse>
                   </Box>
                 )}
               </>

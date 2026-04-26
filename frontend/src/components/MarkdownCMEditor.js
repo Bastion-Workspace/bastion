@@ -10,7 +10,29 @@ import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { ACCENT_PALETTES } from '../theme/themeConfig';
 import { parseFrontmatter as parseMarkdownFrontmatter } from '../utils/frontmatterUtils';
-import { Box, TextField, Button, Tooltip, IconButton, Typography, Stack, Switch, FormControlLabel, Menu, MenuItem, ListItemIcon, ListItemText } from '@mui/material';
+import {
+  Box,
+  TextField,
+  Button,
+  Tooltip,
+  IconButton,
+  Typography,
+  Stack,
+  Switch,
+  FormControlLabel,
+  Menu,
+  MenuItem,
+  ListItemIcon,
+  ListItemText,
+  Popper,
+  Paper,
+  ClickAwayListener,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  CircularProgress,
+} from '@mui/material';
 import { Add, Delete, ArrowUpward, ArrowDownward, ArrowDropDown, Article, TableChart } from '@mui/icons-material';
 import { createGhostTextExtension } from './editor/extensions/ghostTextExtension';
 import { createInlineEditSuggestionsExtension } from './editor/extensions/inlineEditSuggestionsExtension';
@@ -24,6 +46,8 @@ import MarkdownTableEditor from './editor/MarkdownTableEditor';
 import ResizableRightDrawer from './editor/ResizableRightDrawer';
 import { detectTableAtCursor, parseMarkdownTable, emptyTableModel } from '../utils/markdownTableUtils';
 import { devLog } from '../utils/devConsole';
+import apiService from '../services/apiService';
+import { createWikilinkExtensions } from './editor/extensions/wikilinkExtension';
 
 const createMdTheme = (darkMode, accentId = 'blue') => {
   const palette = ACCENT_PALETTES[accentId] || ACCENT_PALETTES.blue;
@@ -105,6 +129,12 @@ const createMdTheme = (darkMode, accentId = 'blue') => {
   },
   '.cm-content .cm-url': {
     color: primaryMain
+  },
+  '.cm-content .cm-wikilink': {
+    color: primaryMain,
+    cursor: 'pointer',
+    textDecoration: 'underline',
+    textUnderlineOffset: '2px',
   }
 });
 };
@@ -227,6 +257,7 @@ const MarkdownCMEditor = forwardRef(({
   awareness = null,
   undoManager = null,
   onCollabDocChange = null,
+  onOpenDocumentById = null,
 }, ref) => {
   const { darkMode, accentId } = useTheme();
   const themeSignature = `${darkMode ? 'dark' : 'light'}-${accentId}`;
@@ -558,6 +589,178 @@ const MarkdownCMEditor = forwardRef(({
     { key: 'Mod-Shift-t', run: () => { handleOpenTableEditor(); return true; } }
   ]), [handleOpenTableEditor]);
 
+  const [zkAuthoring, setZkAuthoring] = useState({ wikilink_autocomplete: true });
+  const [wikiPreview, setWikiPreview] = useState({
+    open: false,
+    anchorEl: null,
+    title: '',
+    text: '',
+    loading: false,
+  });
+  const [wikiCreate, setWikiCreate] = useState({ open: false, title: '' });
+  const [wikiCreateLoading, setWikiCreateLoading] = useState(false);
+  const [wikiCreateError, setWikiCreateError] = useState(null);
+  const previewDebounceRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await apiService.get('/api/zettelkasten/settings');
+        if (cancelled || !r?.settings) return;
+        setZkAuthoring({
+          wikilink_autocomplete: r.settings.wikilink_autocomplete !== false,
+        });
+      } catch {
+        /* optional until backend is deployed */
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const resolveTitleToDocumentId = React.useCallback(async (title) => {
+    const stem = String(title || '').trim();
+    if (!stem) return null;
+    try {
+      const resp = await apiService.documents.searchDocuments(stem, {
+        searchMode: 'fulltext',
+        limit: 40,
+        fileTypes: ['md', 'org', 'txt'],
+      });
+      const results = resp?.results || [];
+      const low = stem.toLowerCase();
+      for (let i = 0; i < results.length; i += 1) {
+        const r = results[i];
+        const fn = (r.filename || '').replace(/\.[^.]+$/, '').toLowerCase();
+        if (fn === low) return r.document_id;
+      }
+      for (let i = 0; i < results.length; i += 1) {
+        const r = results[i];
+        const fn = (r.filename || '').toLowerCase();
+        if (fn === `${low}.md` || fn === `${low}.org` || fn === `${low}.txt`) return r.document_id;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const searchDocumentsForCompletion = React.useCallback(async (q) => {
+    const query = String(q || '').trim();
+    if (!query) return [];
+    try {
+      const resp = await apiService.documents.searchDocuments(query, {
+        searchMode: 'fulltext',
+        limit: 20,
+        fileTypes: ['md', 'org', 'txt'],
+      });
+      const results = resp?.results || [];
+      return results.map((r) => {
+        const fn = r.filename || '';
+        const stem = fn.replace(/\.[^.]+$/, '');
+        return { label: stem || fn, detail: fn };
+      });
+    } catch {
+      return [];
+    }
+  }, []);
+
+  const wikilinkExt = useMemo(
+    () =>
+      createWikilinkExtensions({
+        autocompleteEnabled: zkAuthoring.wikilink_autocomplete !== false,
+        resolveTitleToDocumentId,
+        searchDocumentsForCompletion,
+        onNavigate: onOpenDocumentById
+          ? (docId, title) => {
+              onOpenDocumentById(String(docId), title);
+            }
+          : undefined,
+        onUnresolvedClick: (title) => {
+          setWikiCreateError(null);
+          setWikiCreate({ open: true, title: title || '' });
+        },
+        onHoverTitle: (title, anchorEl) => {
+          if (previewDebounceRef.current) clearTimeout(previewDebounceRef.current);
+          previewDebounceRef.current = setTimeout(async () => {
+            previewDebounceRef.current = null;
+            const id = await resolveTitleToDocumentId(title);
+            if (!id) {
+              setWikiPreview({
+                open: true,
+                anchorEl,
+                title,
+                text: 'No matching note yet.',
+                loading: false,
+              });
+              return;
+            }
+            setWikiPreview({ open: true, anchorEl, title, text: '', loading: true });
+            try {
+              const contentResp = await apiService.getDocumentContent(id);
+              const raw = contentResp?.content
+                ?? contentResp?.data?.content
+                ?? (typeof contentResp === 'string' ? contentResp : '');
+              const parsed = parseFrontmatter(String(raw || '').replace(/\r\n/g, '\n'));
+              const body = (parsed.body || raw || '').trim().replace(/\s+/g, ' ');
+              setWikiPreview({
+                open: true,
+                anchorEl,
+                title,
+                text: body.slice(0, 400),
+                loading: false,
+              });
+            } catch {
+              setWikiPreview({
+                open: true,
+                anchorEl,
+                title,
+                text: '(preview unavailable)',
+                loading: false,
+              });
+            }
+          }, 280);
+        },
+        onHoverLeave: () => {
+          if (previewDebounceRef.current) {
+            clearTimeout(previewDebounceRef.current);
+            previewDebounceRef.current = null;
+          }
+          setWikiPreview((p) => ({ ...p, open: false, anchorEl: null }));
+        },
+      }),
+    [
+      onOpenDocumentById,
+      resolveTitleToDocumentId,
+      searchDocumentsForCompletion,
+      zkAuthoring.wikilink_autocomplete,
+    ],
+  );
+
+  const handleWikiCreateConfirm = React.useCallback(async () => {
+    const t = (wikiCreate.title || '').trim();
+    if (!t) {
+      setWikiCreate({ open: false, title: '' });
+      return;
+    }
+    setWikiCreateLoading(true);
+    setWikiCreateError(null);
+    try {
+      const r = await apiService.post('/api/zettelkasten/create-wikilink-note', { title: t });
+      if (r?.success && r?.document_id && onOpenDocumentById) {
+        onOpenDocumentById(String(r.document_id), t);
+        setWikiCreate({ open: false, title: '' });
+      } else {
+        setWikiCreateError(r?.detail || r?.error || 'Could not create note');
+      }
+    } catch (e) {
+      console.error('create wikilink note', e);
+      setWikiCreateError(e?.response?.data?.detail || e?.message || 'Request failed');
+    } finally {
+      setWikiCreateLoading(false);
+    }
+  }, [wikiCreate.title, onOpenDocumentById]);
+
   const extensions = useMemo(() => {
     const hist = isCollaborative ? [] : [history()];
     // y-codemirror.next exports yUndoManagerKeymap as a KeyBinding[] (not a factory); yCollab wires UndoManager via facet.
@@ -576,6 +779,7 @@ const MarkdownCMEditor = forwardRef(({
       tableEditorKeymap,
       markdown({ base: markdownLanguage }),
       EditorView.lineWrapping,
+      ...wikilinkExt,
       mdTheme,
       inlineEditExt,
       liveEditDiffExt,
@@ -593,6 +797,7 @@ const MarkdownCMEditor = forwardRef(({
     ytext,
     awareness,
     undoManager,
+    wikilinkExt,
   ]);
 
   const { setEditorState } = useEditor();
@@ -1530,6 +1735,48 @@ const MarkdownCMEditor = forwardRef(({
         currentDocumentPath={canonicalPath}
         linkFormat="markdown"
       />
+      <Popper
+        open={wikiPreview.open && Boolean(wikiPreview.anchorEl)}
+        anchorEl={wikiPreview.anchorEl}
+        placement="bottom-start"
+        sx={{ zIndex: 1400 }}
+      >
+        <ClickAwayListener onClickAway={() => setWikiPreview((p) => ({ ...p, open: false, anchorEl: null }))}>
+          <Paper elevation={3} sx={{ p: 1.5, maxWidth: 360, maxHeight: 200, overflow: 'auto' }}>
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+              {wikiPreview.title}
+            </Typography>
+            {wikiPreview.loading ? (
+              <CircularProgress size={20} />
+            ) : (
+              <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                {wikiPreview.text || '—'}
+              </Typography>
+            )}
+          </Paper>
+        </ClickAwayListener>
+      </Popper>
+      <Dialog open={wikiCreate.open} onClose={() => !wikiCreateLoading && setWikiCreate({ open: false, title: '' })}>
+        <DialogTitle>Create note</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" sx={{ mb: 1 }}>
+            No document matches &quot;{wikiCreate.title}&quot;. Create a new markdown note with this title?
+          </Typography>
+          {wikiCreateError && (
+            <Typography variant="body2" color="error" sx={{ mt: 1 }}>
+              {typeof wikiCreateError === 'string' ? wikiCreateError : 'Error'}
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => !wikiCreateLoading && setWikiCreate({ open: false, title: '' })} disabled={wikiCreateLoading}>
+            Cancel
+          </Button>
+          <Button variant="contained" onClick={handleWikiCreateConfirm} disabled={wikiCreateLoading}>
+            {wikiCreateLoading ? <CircularProgress size={20} /> : 'Create'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 });

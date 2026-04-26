@@ -32,6 +32,7 @@ const TTS_TYPES = [
   { id: 'elevenlabs', label: 'ElevenLabs' },
   { id: 'hedra', label: 'Hedra' },
   { id: 'openai', label: 'OpenAI TTS' },
+  { id: 'openrouter', label: 'OpenRouter' },
 ];
 const STT_TYPES = [
   { id: 'openai', label: 'OpenAI (Whisper)' },
@@ -106,6 +107,8 @@ export default function UserVoiceProviders() {
         queryClient.invalidateQueries('userVoiceProviders');
         queryClient.invalidateQueries('voiceVoicesAdmin');
         queryClient.invalidateQueries('voiceVoicesByokPiper');
+        queryClient.invalidateQueries('hedraTtsModels');
+        queryClient.invalidateQueries('openrouterTtsModels');
         notifyVoicePrefsChanged();
       },
     }
@@ -176,7 +179,11 @@ export default function UserVoiceProviders() {
   const adminProvRaw = (settingsData?.user_admin_tts_provider ?? '').trim();
   const adminProvLower = adminProvRaw.toLowerCase();
   const adminLocalChipId =
-    adminProvLower === 'piper' || adminProvLower === 'browser' ? adminProvLower : 'server';
+    adminProvLower === 'piper'
+      ? 'piper'
+      : adminProvLower === 'browser' || adminProvLower === ''
+        ? 'browser'
+        : 'server';
   const adminVoicesListProvider =
     adminProvLower === 'browser' ? null : adminProvLower === 'piper' ? 'piper' : '';
   const { data: adminVoices = [], isLoading: adminVoicesLoading } = useQuery(
@@ -219,6 +226,13 @@ export default function UserVoiceProviders() {
     (adminProvLower === 'hedra' ||
       (adminSelectedVoice?.provider || '').toLowerCase() === 'hedra');
 
+  const adminUsesOpenRouter =
+    useAdminTts &&
+    adminLocalChipId !== 'browser' &&
+    adminLocalChipId !== 'piper' &&
+    (adminProvLower === 'openrouter' ||
+      (adminSelectedVoice?.provider || '').toLowerCase() === 'openrouter');
+
   const byokSelectedTtsProvider = useMemo(
     () => ttsProviders.find((p) => String(p.id) === String(ttsProviderId)),
     [ttsProviders, ttsProviderId]
@@ -233,10 +247,17 @@ export default function UserVoiceProviders() {
     byokTtsEngine === 'cloud' &&
     (byokSelectedTtsProvider?.provider_type || '').toLowerCase() === 'hedra';
 
+  const byokUsesOpenRouter =
+    !useAdminTts &&
+    byokTtsEngine === 'cloud' &&
+    (byokSelectedTtsProvider?.provider_type || '').toLowerCase() === 'openrouter';
+
   const userElevenlabsModelId = settingsData?.user_elevenlabs_tts_model_id ?? '';
   const userAdminElevenlabsModelId = settingsData?.user_admin_elevenlabs_tts_model_id ?? '';
   const userHedraModelId = settingsData?.user_hedra_tts_model_id ?? '';
   const userAdminHedraModelId = settingsData?.user_admin_hedra_tts_model_id ?? '';
+  const userOpenrouterModelId = settingsData?.user_openrouter_tts_model_id ?? '';
+  const userAdminOpenrouterModelId = settingsData?.user_admin_openrouter_tts_model_id ?? '';
 
   const hedraModelsEnabled = adminUsesHedra || byokUsesHedra;
   const { data: hedraModelsData, isLoading: hedraModelsLoading } = useQuery(
@@ -245,6 +266,14 @@ export default function UserVoiceProviders() {
     { enabled: hedraModelsEnabled, retry: false }
   );
   const hedraModels = hedraModelsData?.models || [];
+
+  const openrouterModelsEnabled = adminUsesOpenRouter || byokUsesOpenRouter;
+  const { data: openrouterModelsData, isLoading: openrouterModelsLoading } = useQuery(
+    ['openrouterTtsModels', openrouterModelsEnabled, useAdminTts, ttsProviderId],
+    () => apiService.getUserOpenrouterTtsModels(),
+    { enabled: openrouterModelsEnabled, retry: false }
+  );
+  const openrouterModels = openrouterModelsData?.models || [];
 
   const handleAdd = () => {
     setAddError('');
@@ -326,7 +355,8 @@ export default function UserVoiceProviders() {
                       key={id}
                       label={label}
                       onClick={() => {
-                        const prov = id === 'server' ? '' : id;
+                        const prov =
+                          id === 'server' ? 'server' : id === 'browser' ? 'browser' : id;
                         setSettingsMutation.mutate({ user_admin_tts_provider: prov });
                       }}
                       color={selected ? 'primary' : 'default'}
@@ -430,6 +460,34 @@ export default function UserVoiceProviders() {
                           <em>Platform default</em>
                         </MenuItem>
                         {hedraModels.map((m) => (
+                          <MenuItem key={m.id} value={m.id}>
+                            {m.name || m.id}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  )}
+                  {adminUsesOpenRouter && (
+                    <FormControl fullWidth size="small" sx={{ mb: 2, mt: 1 }}>
+                      <InputLabel>OpenRouter TTS model</InputLabel>
+                      <Select
+                        label="OpenRouter TTS model"
+                        value={
+                          openrouterModels.some((m) => m.id === userAdminOpenrouterModelId)
+                            ? userAdminOpenrouterModelId
+                            : ''
+                        }
+                        onChange={(e) =>
+                          setSettingsMutation.mutate({
+                            user_admin_openrouter_tts_model_id: e.target.value,
+                          })
+                        }
+                        disabled={setSettingsMutation.isLoading || openrouterModelsLoading}
+                      >
+                        <MenuItem value="">
+                          <em>Voice-service default (OPENROUTER_TTS_MODEL)</em>
+                        </MenuItem>
+                        {openrouterModels.map((m) => (
                           <MenuItem key={m.id} value={m.id}>
                             {m.name || m.id}
                           </MenuItem>
@@ -636,6 +694,35 @@ export default function UserVoiceProviders() {
                           <em>Platform default</em>
                         </MenuItem>
                         {hedraModels.map((m) => (
+                          <MenuItem key={m.id} value={m.id}>
+                            {m.name || m.id}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  )}
+
+                  {byokUsesOpenRouter && Boolean(ttsProviderId) && (
+                    <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+                      <InputLabel>OpenRouter TTS model</InputLabel>
+                      <Select
+                        label="OpenRouter TTS model"
+                        value={
+                          openrouterModels.some((m) => m.id === userOpenrouterModelId)
+                            ? userOpenrouterModelId
+                            : ''
+                        }
+                        onChange={(e) =>
+                          setSettingsMutation.mutate({
+                            user_openrouter_tts_model_id: e.target.value,
+                          })
+                        }
+                        disabled={setSettingsMutation.isLoading || openrouterModelsLoading}
+                      >
+                        <MenuItem value="">
+                          <em>Select a model (required for BYOK)</em>
+                        </MenuItem>
+                        {openrouterModels.map((m) => (
                           <MenuItem key={m.id} value={m.id}>
                             {m.name || m.id}
                           </MenuItem>

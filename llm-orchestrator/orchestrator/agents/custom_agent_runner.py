@@ -9,6 +9,7 @@ Output is handled by tool steps within the playbook (e.g. send_channel_message).
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -27,6 +28,9 @@ from orchestrator.utils.message_sanitizer import strip_tool_actions_prefix
 from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
 
 logger = logging.getLogger(__name__)
+
+_WIKILINK_PARSE_RE = re.compile(r"\[\[([^\]|]{1,200})(?:\|[^\]]*)?\]\]")
+_WIKILINK_SKIP_PREFIXES = ("file:", "id:", "http://", "https://", "#")
 
 
 async def _await_cancelable_ainvoke(
@@ -665,6 +669,9 @@ class CustomAgentRunner(BaseAgent):
         playbook_config = {"configurable": {"thread_id": playbook_thread_id}}
 
         pipeline_metadata = dict(metadata or {})
+        pipeline_metadata["playbook_config"] = playbook_config
+        pipeline_metadata["thread_id"] = playbook_thread_id
+        pipeline_metadata["langgraph_thread_id"] = playbook_thread_id
         if shared_memory.get("workspace_ids") is not None:
             pipeline_metadata["workspace_ids"] = shared_memory.get("workspace_ids")
         if shared_memory.get("workspace_access_modes") is not None:
@@ -957,6 +964,28 @@ class CustomAgentRunner(BaseAgent):
             inputs["editor_is_first_section"] = ""
             inputs["editor_is_last_section"] = ""
             inputs["editor_toc"] = ""
+
+        # Plain [[wikilinks]] from open file — ambient context for agents (no DB call)
+        if active_editor and active_editor.get("content"):
+            content_wl = active_editor["content"]
+            raw_titles = _WIKILINK_PARSE_RE.findall(content_wl)
+            plain: List[str] = []
+            for t in dict.fromkeys(s.strip() for s in raw_titles):
+                tl = t.lower()
+                if (
+                    t
+                    and not any(tl.startswith(p) for p in _WIKILINK_SKIP_PREFIXES)
+                    and "/" not in t
+                    and "\\" not in t
+                ):
+                    plain.append(t)
+                if len(plain) >= 15:
+                    break
+            inputs["editor_linked_notes"] = (
+                ", ".join(f"[[{t}]]" for t in plain) if plain else ""
+            )
+        else:
+            inputs["editor_linked_notes"] = ""
 
         active_artifact = shared_memory.get("active_artifact", {})
         if active_artifact and active_artifact.get("code"):
@@ -1431,6 +1460,22 @@ class CustomAgentRunner(BaseAgent):
             steps = _definition_steps(playbook)
             user_id = state.get("user_id", "system")
             metadata = state.get("metadata", {})
+            if pending_auth.get("interaction_type") == "shell_command_approval":
+                try:
+                    from orchestrator.backend_tool_client import get_backend_tool_client
+
+                    _idata = pending_auth.get("interaction_data") or {}
+                    _aid = (_idata.get("approval_id") or pending_auth.get("approval_id") or "").strip()
+                    if _aid:
+                        _cli = await get_backend_tool_client()
+                        await _cli.grant_and_consume_shell_approval(
+                            user_id,
+                            approval_id=_aid,
+                            command="",
+                            consume=False,
+                        )
+                except Exception as _shell_grant_err:
+                    logger.warning("shell_command_approval grant failed: %s", _shell_grant_err)
             try:
                 from orchestrator.checkpointer import get_async_postgres_saver
                 checkpointer = await get_async_postgres_saver()

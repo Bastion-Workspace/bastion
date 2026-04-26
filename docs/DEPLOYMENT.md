@@ -36,6 +36,23 @@ The **default** [`docker-compose.yml`](../docker-compose.yml) in this repo assum
 - **JWT** signing and app **SECRET_KEY** must be strong and unique in production.
 - **`INTERNAL_SERVICE_KEY`** must match between **backend**, **connections-service**, and **bbs-server** when those services are used together.
 
+### 2.4 Reverse proxy, WebSockets, and Bastion Local Proxy
+
+Browser and **Bastion Local Proxy** traffic often uses **long-lived WebSockets** (`/api/ws/*`, `/api/messaging/ws/*`, etc.). If something in front of the stack (nginx, Traefik, Caddy, HAProxy, cloud LB, Cloudflare) closes idle TCP or HTTP connections too aggressively, the UI or the daemon can look **offline** even though nothing crashed.
+
+**Do this on your edge proxy:**
+
+1. **Pass the upgrade** — `Upgrade` and `Connection` (or your proxy’s WebSocket mode) must be forwarded to the service that terminates the FastAPI app (usually the bundled **frontend** nginx on **3051**, or the backend if you expose it directly).
+2. **Raise read/send timeouts** for WebSocket paths — many defaults are **60s**; use **hours** or **1d** for `/api/ws/` and messaging WS routes.
+3. **Do not** send `Connection: upgrade` on ordinary REST `/api/` requests; only on real WebSocket handshakes.
+
+The repo’s [`frontend/nginx.conf`](../frontend/nginx.conf) uses **dedicated** `location` blocks for `/api/ws/` and `/api/messaging/ws` with **7d** proxy timeouts and removes blanket `Connection: upgrade` from generic `/api/`.
+
+**Backend process:**
+
+- Keep **`UVICORN_WORKERS=1`** when using the local proxy. Device registration lives in **process memory**; more than one worker means the WebSocket and `invoke-device-tool` can land on **different processes** and the device appears disconnected.
+- The backend entrypoint enables **Uvicorn WebSocket ping** by default (`UVICORN_WS_PING_INTERVAL` / `UVICORN_WS_PING_TIMEOUT` in [`.env.example`](../.env.example)) so **server→client** ping frames flow through middleboxes that need periodic traffic. Set `UVICORN_WS_PING_INTERVAL=0` to turn that off.
+
 ---
 
 ## 3. Configuration sources (avoid drift)
@@ -108,7 +125,7 @@ On **`v*`** tags, CI builds and pushes first-party images (see [`.github/workflo
   `ghcr.io/<owner_lowercase>/bastion-dev-<service>:<tag>`  
   Same services as above, but a separate **private** package family so prerelease images are not mixed with public production packages.
 
-**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/postgres_init` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.6`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/postgres_init`.
+**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/postgres_init` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.7`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/postgres_init`.
 
 **Typical operator pattern:**
 

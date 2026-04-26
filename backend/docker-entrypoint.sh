@@ -74,8 +74,19 @@ echo "✅ Database initialization completed by PostgreSQL container"
 echo "🚀 Starting FastAPI application with optimized configuration..."
 echo "🔧 Using service container architecture for efficient resource usage"
 
+# WebSocket keepalive for reverse proxies / LBs that drop "quiet" long-lived connections.
+# Set UVICORN_WS_PING_INTERVAL=0 to disable. Timeout should exceed interval (default 2x).
+UVICORN_WS_PING_INTERVAL="${UVICORN_WS_PING_INTERVAL:-20}"
+UVICORN_WS_PING_TIMEOUT="${UVICORN_WS_PING_TIMEOUT:-40}"
+WS_ARGS=()
+if [ "${UVICORN_WS_PING_INTERVAL}" != "0" ] && [ -n "${UVICORN_WS_PING_INTERVAL}" ]; then
+  WS_ARGS+=(--ws-ping-interval "${UVICORN_WS_PING_INTERVAL}")
+  WS_ARGS+=(--ws-ping-timeout "${UVICORN_WS_PING_TIMEOUT}")
+fi
+
 exec uvicorn main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers "${UVICORN_WORKERS:-1}" \
-    --log-level info
+    --log-level info \
+    "${WS_ARGS[@]}"

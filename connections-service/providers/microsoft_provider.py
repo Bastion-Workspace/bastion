@@ -3,6 +3,7 @@ Microsoft Graph provider for email and calendar operations.
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -264,8 +265,22 @@ class MicrosoftGraphProvider(MicrosoftDevOpsMixin, MicrosoftGraphM365Mixin, Base
     ) -> Dict[str, Any]:
         try:
             path = "/me/messages"
-            params = {"$top": min(top, 1000), "$search": f'"{query}"'}
-            filters = []
+            q = (query or "").strip()
+            params: Dict[str, Any] = {"$top": min(top, 1000)}
+            filters: List[str] = []
+
+            # Prefer strict subject matching when query is exactly subject:"...".
+            # This avoids Graph $search behavior that can match broadly across fields.
+            m = re.match(r'^subject\s*:\s*"([^"]+)"\s*$', q, flags=re.IGNORECASE)
+            if m:
+                subj = m.group(1).replace("'", "''")  # OData string escape
+                filters.append(f"subject eq '{subj}'")
+            else:
+                # Microsoft Graph $search expects the entire query string wrapped in quotes.
+                # If the user query itself contains quotes, escape them or Graph returns 400.
+                safe_query = q.replace('"', r'\"')
+                if safe_query:
+                    params["$search"] = f'"{safe_query}"'
             if from_address:
                 filters.append(f"from/emailAddress/address eq '{from_address}'")
             if start_date:

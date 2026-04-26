@@ -1,6 +1,6 @@
 {
   "name": "bastion-frontend",
-  "version": "0.70.6",
+  "version": "0.70.7",
   "description": "Bastion AI Workspace - React Frontend",
   "private": true,
   "dependencies": {
@@ -58,6 +58,11 @@
     "@lezer/highlight": "^1.2.0",
     "@uiw/react-codemirror": "^4.23.7",
     "@codemirror/lang-markdown": "^6.2.4",
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/lang-json": "^6.0.1",
+    "@codemirror/lang-python": "^6.1.6",
+    "@codemirror/lang-css": "^6.3.0",
+    "@codemirror/lang-html": "^6.4.9",
     "yjs": "^13.6.0",
     "y-codemirror.next": "^0.3.5",
     "y-websocket": "^2.0.4",

@@ -13,6 +13,66 @@ from typing import FrozenSet, Optional, Tuple
 APP_CHUNK_INDEX_SCHEMA_VERSION: int = 1
 
 # DocumentType values that produce primary body chunks in the current pipeline.
+# File extensions (with leading dot) eligible for local code workspace indexing (local proxy).
+CODE_INDEX_FILE_EXTENSIONS: FrozenSet[str] = frozenset(
+    {
+        ".py",
+        ".rs",
+        ".go",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".java",
+        ".kt",
+        ".kts",
+        ".c",
+        ".h",
+        ".cpp",
+        ".hpp",
+        ".cc",
+        ".cxx",
+        ".cs",
+        ".rb",
+        ".php",
+        ".swift",
+        ".scala",
+        ".sql",
+        ".md",
+        ".yml",
+        ".yaml",
+        ".json",
+        ".toml",
+        ".sh",
+        ".bash",
+        ".proto",
+        ".vue",
+        ".svelte",
+        ".css",
+        ".scss",
+        ".html",
+        ".htm",
+        ".xml",
+        ".gradle",
+        ".properties",
+        ".ini",
+        ".cfg",
+        ".tf",
+        ".nix",
+        ".lua",
+        ".r",
+        ".m",
+        ".ex",
+        ".exs",
+        ".erl",
+        ".hrl",
+        ".clj",
+        ".cljs",
+        ".hs",
+    }
+)
+
+
 CHUNK_INDEX_ELIGIBLE_DOC_TYPES: FrozenSet[str] = frozenset(
     {
         "pdf",

@@ -14,6 +14,7 @@ from .agent_messaging_handlers import AgentMessagingHandlersMixin
 from .rss_handlers import RssHandlersMixin
 from .media_handlers import MediaHandlersMixin
 from .data_workspace_handlers import DataWorkspaceHandlersMixin
+from .code_workspace_handlers import CodeWorkspaceHandlersMixin
 from .navigation_handlers import NavigationHandlersMixin
 from .search_utility_handlers import SearchUtilityHandlersMixin
 from .analysis_handlers import AnalysisHandlersMixin
@@ -29,6 +30,7 @@ from .connector_mcp_handlers import ConnectorMcpHandlersMixin
 from .data_connector_builder_handlers import DataConnectorBuilderHandlersMixin
 from .control_pane_handlers import ControlPaneHandlersMixin
 from .agent_factory_crud_handlers import AgentFactoryCrudHandlersMixin
+from .shell_policy_handlers import ShellPolicyHandlersMixin
 
 __all__ = [
     "OrgTodoHandlersMixin",
@@ -38,6 +40,7 @@ __all__ = [
     "RssHandlersMixin",
     "MediaHandlersMixin",
     "DataWorkspaceHandlersMixin",
+    "CodeWorkspaceHandlersMixin",
     "NavigationHandlersMixin",
     "SearchUtilityHandlersMixin",
     "AnalysisHandlersMixin",
@@ -49,4 +52,5 @@ __all__ = [
     "DataConnectorBuilderHandlersMixin",
     "ControlPaneHandlersMixin",
     "AgentFactoryCrudHandlersMixin",
+    "ShellPolicyHandlersMixin",
 ]

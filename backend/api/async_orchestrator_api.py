@@ -29,6 +29,7 @@ class AsyncOrchestratorRequest(BaseModel):
     query: str
     conversation_id: str
     session_id: str = "default"
+    persist_conversation: bool = True
     priority: str = "normal"  # normal, high, low
     active_editor: Optional[dict] = None  # {is_editable, filename, language, content, content_length, frontmatter}
     editor_preference: Optional[str] = None  # 'prefer' | 'ignore'
@@ -86,6 +87,7 @@ async def stream_orchestrator_response(
             "agent_profile_id": request.agent_profile_id,
             "user_chat_model": request.user_chat_model,
             "code_workspace_id": request.code_workspace_id,
+            "persist_conversation": request.persist_conversation,
         }
         
         # Remove None values

@@ -15,7 +15,7 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 ## Summary
 
 - **A**: 41
-- **B**: 20
+- **B**: 23
 - **C**: 18
 - **R**: 81
 
@@ -183,6 +183,12 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 | `157_remove_rss_and_deep_research_builtin_playbooks.sql` | B | included via \ir from 02-09 wrapper |
 | `158_default_playbook_prompt_and_iterations.sql` | R | UPDATE/seed — brownfield data fix unless seed required |
 | `159_fix_document_folders_global_update_rls.sql` | R | no CREATE TABLE parsed — manual review |
+| `160_admin_tts_empty_means_browser.sql` | B | included via \ir from 02-09 wrapper |
+| `161_add_openrouter_voice_provider.sql` | B | included via \ir from 02-09 wrapper |
+| `162_add_zettelkasten_settings.sql` | B | included via \ir from 02-09 wrapper |
+| `163_code_chunks.sql` | A | tables in 01: code_chunks |
+| `164_user_shell_policy.sql` | A | tables in 01: user_shell_policy |
+| `165_code_workspace_rls.sql` | R | RLS on code_workspaces, code_chunks (merged in 01) |
 
 ## Wrapper `\ir` targets (02-09)
 
@@ -206,3 +212,9 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 - `151_document_processing_resilience.sql`
 - `156_greenfield_agent_line_watches_workspace.sql`
 - `157_remove_rss_and_deep_research_builtin_playbooks.sql`
+- `160_admin_tts_empty_means_browser.sql`
+- `161_add_openrouter_voice_provider.sql`
+- `162_add_zettelkasten_settings.sql`
+- `163_code_chunks.sql`
+- `164_user_shell_policy.sql`
+- `165_code_workspace_rls.sql`

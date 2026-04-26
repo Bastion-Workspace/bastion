@@ -63,6 +63,31 @@ class GetDocumentContentOutputs(BaseModel):
     formatted: str = Field(description="Human-readable content for LLM/chat")
 
 
+class GetDocumentLinksInputs(BaseModel):
+    """Required inputs for get_document_links_tool."""
+    document_id: str = Field(description="Document ID to query the link graph for")
+
+
+class GetDocumentLinksParams(BaseModel):
+    """Optional filters for get_document_links_tool."""
+    direction: str = Field(
+        default="both",
+        description='Edge direction: "outgoing", "incoming", or "both"',
+    )
+    link_types: List[str] = Field(
+        default_factory=list,
+        description='Restrict to link types, e.g. ["wikilink", "frontmatter_ref"]. Empty = all.',
+    )
+    limit: int = Field(default=50, description="Max links per direction (capped server-side)")
+
+
+class GetDocumentLinksOutputs(BaseModel):
+    """Typed outputs for get_document_links_tool."""
+    links: List[Dict[str, Any]] = Field(description="Linked document rows")
+    total: int = Field(description="Number of link rows returned")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
 class SearchByTagsInputs(BaseModel):
     """Required inputs for search_by_tags_tool."""
     tags: List[str] = Field(description="List of tags to filter by")
@@ -387,6 +412,53 @@ async def get_document_content_tool(
         }
 
 
+async def get_document_links_tool(
+    document_id: str,
+    direction: str = "both",
+    link_types: Optional[List[str]] = None,
+    limit: int = 50,
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """
+    List resolved neighbours in the file link graph (wikilinks, org links, frontmatter refs).
+    Use direction='incoming' for backlinks, 'outgoing' for targets this note links to.
+    """
+    try:
+        client = await get_backend_tool_client()
+        result = await client.get_document_links(
+            document_id=document_id,
+            user_id=user_id,
+            direction=direction,
+            link_types=link_types or [],
+            limit=limit,
+        )
+        if result.get("error") == "not_found":
+            return {
+                "links": [],
+                "total": 0,
+                "formatted": f"Document not found: {document_id}",
+            }
+        if result.get("error"):
+            return {
+                "links": [],
+                "total": 0,
+                "formatted": f"Error: {result.get('error')}",
+            }
+        links = result.get("links") or []
+        parts: List[str] = []
+        for l in links:
+            label = (l.get("title") or l.get("filename") or l.get("document_id") or "").strip()
+            did = l.get("document_id") or ""
+            parts.append(
+                f"- [[{label}]] id={did} ({l.get('direction', '')}, {l.get('link_type', '')}, line {l.get('line_number', 0)})"
+            )
+        formatted = "\n".join(parts) if parts else "No resolved links found."
+        return {"links": links, "total": int(result.get("total") or len(links)), "formatted": formatted}
+    except Exception as e:
+        logger.error("get_document_links_tool error: %s", e)
+        return {"links": [], "total": 0, "formatted": f"Error getting document links: {e}"}
+
+
 register_action(
     name="get_document_content",
     category="knowledge",
@@ -394,6 +466,20 @@ register_action(
     inputs_model=GetDocumentContentInputs,
     outputs_model=GetDocumentContentOutputs,
     tool_function=get_document_content_tool,
+)
+
+register_action(
+    name="get_document_links",
+    category="knowledge",
+    description=(
+        "Get outgoing and/or incoming resolved document links from the note graph "
+        "(wikilinks, org file links, markdown links, frontmatter refs). "
+        "Prefer this over search when you need exact graph edges or backlinks."
+    ),
+    inputs_model=GetDocumentLinksInputs,
+    params_model=GetDocumentLinksParams,
+    outputs_model=GetDocumentLinksOutputs,
+    tool_function=get_document_links_tool,
 )
 
 
@@ -869,6 +955,7 @@ DOCUMENT_TOOLS = {
     'search_by_tags': search_by_tags_tool,
     'find_document_by_path': find_document_by_path_tool,
     'get_document_content': get_document_content_tool,
+    'get_document_links': get_document_links_tool,
     'search_within_document': search_within_document_tool,
     'get_document_metadata': get_document_metadata_tool,
 }

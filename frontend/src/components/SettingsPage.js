@@ -69,6 +69,7 @@ import {
   Palette,
   BrightnessAuto,
   Hub,
+  AccountTree,
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -83,6 +84,7 @@ import ClassificationModelSelector from './ClassificationModelSelector';
 import ImageGenerationModelSelector from './ImageGenerationModelSelector';
 import TextCompletionModelSelector from './TextCompletionModelSelector';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
+import ZettelkastenSettingsTab from './ZettelkastenSettingsTab';
 import MediaSettingsTab from './music/MediaSettingsTab';
 import ExternalConnectionsSettings from './ExternalConnectionsSettings';
 import FederationSettings from './FederationSettings';
@@ -1719,6 +1721,7 @@ const SettingsPage = () => {
     { id: 'rss-feeds', label: 'RSS Feeds', icon: <RssFeedIcon /> },
     { id: 'ebooks-opds', label: 'Ebooks (OPDS)', icon: <MenuBook /> },
     { id: 'org', label: 'Org-Mode', icon: <ListAlt /> },
+    { id: 'zettelkasten', label: 'Zettelkasten', icon: <AccountTree /> },
     { id: 'media', label: 'Media', icon: <MusicNote /> },
     { id: 'connections', label: 'Connections', icon: <Email /> },
     { id: 'sessions', label: 'Browser Sessions', icon: <Lock /> },
@@ -3460,8 +3463,18 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
-      {/* Media Settings Tab */}
       {currentTab === 7 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <ZettelkastenSettingsTab />
+        </motion.div>
+      )}
+
+      {/* Media Settings Tab */}
+      {currentTab === 8 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3472,7 +3485,7 @@ const SettingsPage = () => {
       )}
 
       {/* Connections Tab */}
-      {currentTab === 8 && (
+      {currentTab === 9 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3483,7 +3496,7 @@ const SettingsPage = () => {
       )}
 
       {/* Browser Sessions Tab */}
-      {currentTab === 9 && (
+      {currentTab === 10 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3494,7 +3507,7 @@ const SettingsPage = () => {
       )}
 
       {/* Database Management Tab */}
-      {currentTab === 10 && user?.role === 'admin' && (
+      {currentTab === 11 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -3743,7 +3756,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 11 && user?.role === 'admin' && (
+      {currentTab === 12 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -3753,7 +3766,7 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
-      {currentTab === 12 && user?.role === 'admin' && (
+      {currentTab === 13 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

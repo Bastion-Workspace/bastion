@@ -204,6 +204,7 @@ export default function PlaybookEditor({ playbookId }) {
   const [testQuery, setTestQuery] = useState('');
   const [testResult, setTestResult] = useState('');
   const [testLoading, setTestLoading] = useState(false);
+  const [testPersistConversation, setTestPersistConversation] = useState(true);
   const [pendingAuth, setPendingAuth] = useState(null);
   const [testConversationId, setTestConversationId] = useState(null);
   const [versionDrawerOpen, setVersionDrawerOpen] = useState(false);
@@ -691,6 +692,14 @@ export default function PlaybookEditor({ playbookId }) {
 
   const runTest = useCallback(async (overrideConversationId = null, overrideQuery = null) => {
     if (!effectiveProfileId) return;
+    // If runTest is used directly as an onClick handler, React will pass a SyntheticEvent.
+    // Guard against accidentally serializing DOM/event objects into the request payload.
+    if (overrideConversationId && typeof overrideConversationId === 'object') {
+      overrideConversationId = null;
+    }
+    if (overrideQuery && typeof overrideQuery === 'object') {
+      overrideQuery = null;
+    }
     setTestLoading(true);
     setTestResult('');
     setPendingAuth(null);
@@ -711,6 +720,7 @@ export default function PlaybookEditor({ playbookId }) {
             conversation_id: conversationId,
             session_id: 'playbook-test',
             agent_profile_id: effectiveProfileId,
+            persist_conversation: testPersistConversation,
           }),
         });
         if (!response.ok) {
@@ -1122,11 +1132,21 @@ export default function PlaybookEditor({ playbookId }) {
                 variant="contained"
                 startIcon={testLoading ? <CircularProgress size={20} /> : <PlayArrow />}
                 disabled={testLoading}
-                onClick={runTest}
+                onClick={() => runTest()}
                 sx={{ mb: 2 }}
               >
                 Run
               </Button>
+              <FormControlLabel
+                control={(
+                  <Checkbox
+                    checked={testPersistConversation}
+                    onChange={(e) => setTestPersistConversation(e.target.checked)}
+                  />
+                )}
+                label="Save test run to chat (conversation history)"
+                sx={{ mb: 2 }}
+              />
               {testResult !== '' && (
                 <Paper
                   variant="outlined"

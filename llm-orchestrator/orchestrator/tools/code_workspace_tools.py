@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 from orchestrator.backend_tool_client import get_backend_tool_client
+from orchestrator.tools.local_proxy_tools import resolve_local_proxy_device_id
 from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
@@ -34,13 +35,15 @@ async def code_open_workspace_tool(
     device_id: Optional[str] = None,
     timeout_seconds: int = 30,
     user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Set the device-side active workspace root for relative path resolution."""
     try:
         client = await get_backend_tool_client()
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
         result = await client.set_device_workspace(
             user_id=user_id,
-            device_id=device_id or "",
+            device_id=target_dev or "",
             workspace_root=workspace_root,
             timeout=timeout_seconds,
         )
@@ -108,10 +111,12 @@ async def code_file_tree_tool(
     device_id: Optional[str] = None,
     timeout_seconds: int = 60,
     user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Get a recursive file tree from the device."""
     try:
         client = await get_backend_tool_client()
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
         args: Dict[str, Any] = {
             "path": path,
             "max_depth": int(max_depth),
@@ -121,7 +126,7 @@ async def code_file_tree_tool(
             args["ignore_patterns"] = ignore_patterns
         result = await client.invoke_device_tool(
             user_id=user_id,
-            device_id=device_id or "",
+            device_id=target_dev or "",
             tool="file_tree",
             args=args,
             timeout=timeout_seconds,
@@ -187,10 +192,12 @@ async def code_search_files_tool(
     device_id: Optional[str] = None,
     timeout_seconds: int = 60,
     user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Search file contents on the device."""
     try:
         client = await get_backend_tool_client()
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
         args: Dict[str, Any] = {
             "pattern": pattern,
             "path": path,
@@ -203,7 +210,7 @@ async def code_search_files_tool(
             args["glob"] = glob
         result = await client.invoke_device_tool(
             user_id=user_id,
-            device_id=device_id or "",
+            device_id=target_dev or "",
             tool="search_files",
             args=args,
             timeout=timeout_seconds,
@@ -263,10 +270,12 @@ async def code_git_info_tool(
     device_id: Optional[str] = None,
     timeout_seconds: int = 60,
     user_id: str = "system",
+    _pipeline_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a read-only git operation on the device via the local proxy."""
     try:
         client = await get_backend_tool_client()
+        target_dev = resolve_local_proxy_device_id(device_id, _pipeline_metadata)
         args: Dict[str, Any] = {"path": path, "operation": operation}
         if file:
             args["file"] = file
@@ -276,7 +285,7 @@ async def code_git_info_tool(
             args["commit"] = commit
         result = await client.invoke_device_tool(
             user_id=user_id,
-            device_id=device_id or "",
+            device_id=target_dev or "",
             tool="git_info",
             args=args,
             timeout=timeout_seconds,
@@ -301,3 +310,329 @@ register_action(
     tool_function=code_git_info_tool,
 )
 
+
+# ── code_list_workspaces ───────────────────────────────────────────────────
+
+
+class CodeListWorkspacesInputs(BaseModel):
+    pass
+
+
+class CodeListWorkspacesOutputs(BaseModel):
+    workspaces: List[Dict[str, Any]] = Field(default_factory=list)
+    total: int = Field(default=0)
+    formatted: str = Field(default="")
+
+
+async def code_list_workspaces_tool(user_id: str = "system") -> Dict[str, Any]:
+    """List saved code workspaces (name, path, device) from Bastion."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.list_code_workspaces(user_id=user_id)
+        if res.get("error"):
+            return {
+                "workspaces": [],
+                "total": 0,
+                "formatted": res.get("error", "list failed"),
+            }
+        rows = res.get("workspaces") or []
+        lines = [f"Found {len(rows)} code workspace(s):"]
+        for w in rows:
+            lines.append(
+                f"- {w.get('name') or '?'}  id={w.get('workspace_id')}  path={w.get('workspace_path')}  device={w.get('device_id')}"
+            )
+        return {"workspaces": rows, "total": int(res.get("total") or len(rows)), "formatted": "\n".join(lines)}
+    except Exception as e:
+        logger.error("code_list_workspaces_tool error: %s", e)
+        return {"workspaces": [], "total": 0, "formatted": str(e)}
+
+
+register_action(
+    name="code_list_workspaces",
+    category="code_workspace",
+    description="List the user's saved local code workspaces (id, name, path, device_id).",
+    inputs_model=CodeListWorkspacesInputs,
+    params_model=None,
+    outputs_model=CodeListWorkspacesOutputs,
+    tool_function=code_list_workspaces_tool,
+)
+
+
+# ── code_get_workspace ─────────────────────────────────────────────────────
+
+
+class CodeGetWorkspaceInputs(BaseModel):
+    workspace_id: str = Field(description="UUID of the saved code workspace")
+
+
+class CodeGetWorkspaceOutputs(BaseModel):
+    success: bool = Field(default=False)
+    workspace: Dict[str, Any] = Field(default_factory=dict)
+    formatted: str = Field(default="")
+
+
+async def code_get_workspace_tool(workspace_id: str, user_id: str = "system") -> Dict[str, Any]:
+    """Get details for one saved code workspace."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.get_code_workspace(workspace_id=workspace_id, user_id=user_id)
+        if not res.get("success"):
+            err = res.get("error", "not found")
+            return {"success": False, "workspace": {}, "formatted": err}
+        w = res.get("workspace") or {}
+        return {
+            "success": True,
+            "workspace": w,
+            "formatted": f"{w.get('name')}: {w.get('workspace_path')} (device {w.get('device_id')})",
+        }
+    except Exception as e:
+        logger.error("code_get_workspace_tool error: %s", e)
+        return {"success": False, "workspace": {}, "formatted": str(e)}
+
+
+register_action(
+    name="code_get_workspace",
+    category="code_workspace",
+    description="Get one saved code workspace by id (path, device_id, settings).",
+    inputs_model=CodeGetWorkspaceInputs,
+    params_model=None,
+    outputs_model=CodeGetWorkspaceOutputs,
+    tool_function=code_get_workspace_tool,
+)
+
+
+# ── code_index_workspace ────────────────────────────────────────────────────
+
+
+class CodeIndexWorkspaceInputs(BaseModel):
+    workspace_id: str = Field(description="UUID of the saved code workspace to index")
+    replace_index: bool = Field(
+        default=True,
+        description="If true, clears existing indexed chunks for this workspace before the first batch",
+    )
+    max_batches: int = Field(default=30, description="Safety cap on index_workspace round-trips")
+    device_id: Optional[str] = Field(default=None, description="Override device id (default from workspace record)")
+    timeout_seconds: int = Field(default=120, description="Timeout per device index_workspace call")
+
+
+class CodeIndexWorkspaceOutputs(BaseModel):
+    success: bool = Field(default=False)
+    batches: int = Field(default=0)
+    total_chunks_upserted: int = Field(default=0)
+    total_embedded: int = Field(default=0)
+    formatted: str = Field(default="")
+
+
+async def code_index_workspace_tool(
+    workspace_id: str,
+    replace_index: bool = True,
+    max_batches: int = 30,
+    device_id: Optional[str] = None,
+    timeout_seconds: int = 120,
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """
+    Walk the device workspace, chunk source files via local proxy, upsert into Bastion for semantic search.
+    """
+    try:
+        client = await get_backend_tool_client()
+        meta = await client.get_code_workspace(workspace_id=workspace_id, user_id=user_id)
+        if not meta.get("success"):
+            return {
+                "success": False,
+                "batches": 0,
+                "total_chunks_upserted": 0,
+                "total_embedded": 0,
+                "formatted": meta.get("error", "workspace not found"),
+            }
+        w = meta.get("workspace") or {}
+        root = (w.get("workspace_path") or "").strip()
+        dev = (device_id or w.get("device_id") or "").strip()
+        if not root or not dev:
+            return {
+                "success": False,
+                "batches": 0,
+                "total_chunks_upserted": 0,
+                "total_embedded": 0,
+                "formatted": "workspace_path or device_id missing on record",
+            }
+
+        batches = 0
+        total_ins = 0
+        total_emb = 0
+        resume_from: Optional[str] = None
+        resume_line = 1
+        first_replace = bool(replace_index)
+
+        while batches < int(max_batches):
+            batches += 1
+            args: Dict[str, Any] = {"path": root, "max_chunks": 200, "max_files": 120}
+            if resume_from:
+                args["resume_from_path"] = resume_from
+                args["resume_start_line"] = int(resume_line)
+            inv = await client.invoke_device_tool(
+                user_id=user_id,
+                device_id=dev,
+                tool="index_workspace",
+                args=args,
+                timeout=int(timeout_seconds),
+            )
+            if not inv.get("success"):
+                return {
+                    "success": False,
+                    "batches": batches,
+                    "total_chunks_upserted": total_ins,
+                    "total_embedded": total_emb,
+                    "formatted": inv.get("error") or inv.get("formatted") or "index_workspace failed",
+                }
+            data = inv.get("result") or {}
+            raw_chunks = data.get("chunks") or []
+            chunks: List[Dict[str, Any]] = []
+            for c in raw_chunks:
+                if isinstance(c, dict):
+                    chunks.append(
+                        {
+                            "file_path": c.get("file_path", ""),
+                            "chunk_index": int(c.get("chunk_index", 0)),
+                            "start_line": int(c.get("start_line", 1)),
+                            "end_line": int(c.get("end_line", 1)),
+                            "content": c.get("content", "") or "",
+                            "language": c.get("language", "") or "",
+                            "git_sha": c.get("git_sha", "") or "",
+                        }
+                    )
+            up = await client.upsert_code_workspace_chunks(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                replace_workspace=first_replace,
+                chunks=chunks,
+            )
+            first_replace = False
+            if up.get("success"):
+                total_ins += int(up.get("inserted") or 0)
+                total_emb += int(up.get("embedded") or 0)
+            else:
+                return {
+                    "success": False,
+                    "batches": batches,
+                    "total_chunks_upserted": total_ins,
+                    "total_embedded": total_emb,
+                    "formatted": up.get("error") or "upsert failed",
+                }
+
+            if not data.get("truncated"):
+                break
+            nxt = data.get("next_resume_path")
+            resume_from = nxt if nxt else None
+            rl = data.get("next_resume_line")
+            if rl is not None:
+                try:
+                    resume_line = int(rl)
+                except (TypeError, ValueError):
+                    resume_line = 1
+            else:
+                resume_line = 1
+            if not resume_from:
+                break
+
+        return {
+            "success": True,
+            "batches": batches,
+            "total_chunks_upserted": total_ins,
+            "total_embedded": total_emb,
+            "formatted": f"Indexed in {batches} batch(es): {total_ins} chunk row(s), {total_emb} embedded",
+        }
+    except Exception as e:
+        logger.error("code_index_workspace_tool error: %s", e)
+        return {
+            "success": False,
+            "batches": 0,
+            "total_chunks_upserted": 0,
+            "total_embedded": 0,
+            "formatted": str(e),
+        }
+
+
+register_action(
+    name="code_index_workspace",
+    category="code_workspace",
+    description="Index a saved code workspace for semantic search (local proxy walk + server-side vectors).",
+    inputs_model=CodeIndexWorkspaceInputs,
+    params_model=None,
+    outputs_model=CodeIndexWorkspaceOutputs,
+    tool_function=code_index_workspace_tool,
+)
+
+
+# ── code_semantic_search ────────────────────────────────────────────────────
+
+
+class CodeSemanticSearchInputs(BaseModel):
+    workspace_id: str = Field(description="UUID of the saved code workspace")
+    query: str = Field(description="Natural language or keyword query")
+    limit: int = Field(default=20, ge=1, le=100)
+    file_glob: Optional[str] = Field(default=None, description="Optional path substring or glob-style filter")
+
+
+class CodeSemanticSearchOutputs(BaseModel):
+    success: bool = Field(default=False)
+    hits: List[Dict[str, Any]] = Field(default_factory=list)
+    formatted: str = Field(default="")
+
+
+async def code_semantic_search_tool(
+    workspace_id: str,
+    query: str,
+    limit: int = 20,
+    file_glob: Optional[str] = None,
+    user_id: str = "system",
+) -> Dict[str, Any]:
+    """Hybrid semantic + full-text search over indexed chunks for a workspace."""
+    try:
+        client = await get_backend_tool_client()
+        res = await client.code_semantic_search(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            query=query,
+            limit=limit,
+            file_glob=file_glob or "",
+        )
+        if not res.get("success"):
+            return {
+                "success": False,
+                "hits": [],
+                "formatted": res.get("error", "search failed"),
+            }
+        hits = res.get("hits") or []
+        lines = [f"{len(hits)} hit(s):"]
+        for h in hits[:30]:
+            lines.append(
+                f"- {h.get('file_path')}:{h.get('start_line')}-{h.get('end_line')}  score={h.get('score')}"
+            )
+        return {"success": True, "hits": hits, "formatted": "\n".join(lines)}
+    except Exception as e:
+        logger.error("code_semantic_search_tool error: %s", e)
+        return {"success": False, "hits": [], "formatted": str(e)}
+
+
+register_action(
+    name="code_semantic_search",
+    category="code_workspace",
+    description="Search indexed code in a workspace (semantic + keyword hybrid).",
+    inputs_model=CodeSemanticSearchInputs,
+    params_model=None,
+    outputs_model=CodeSemanticSearchOutputs,
+    tool_function=code_semantic_search_tool,
+)
+
+
+CODE_WORKSPACE_TOOLS = {
+    "code_open_workspace": code_open_workspace_tool,
+    "code_file_tree": code_file_tree_tool,
+    "code_search_files": code_search_files_tool,
+    "code_git_info": code_git_info_tool,
+    "code_list_workspaces": code_list_workspaces_tool,
+    "code_get_workspace": code_get_workspace_tool,
+    "code_index_workspace": code_index_workspace_tool,
+    "code_semantic_search": code_semantic_search_tool,
+}

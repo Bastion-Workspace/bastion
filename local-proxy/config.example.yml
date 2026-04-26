@@ -1,5 +1,10 @@
 # Bastion Local Proxy - Example configuration
 # Copy to ~/.config/bastion-proxy/config.yml (Linux) or %APPDATA%\bastion-proxy\config.yml (Windows)
+#
+# Filesystem: read_file + allowed_paths also enables remote writes to those paths (write_file + patch_file)
+# unless you add an explicit write_file block with enabled: false.
+# If the GUI ever unchecked "Write file", your config may contain write_file: enabled: false — remove that
+# stanza or set enabled: true so agents can save changes.
 
 device_id: "my-workstation"
 bastion_url: "https://bastion.example.com"
@@ -9,3 +14,52 @@ auto_connect: true
 capabilities:
   screenshot:
     enabled: true
+
+  # Code workspace: browsing + reading + writing under these prefixes (use your real project roots).
+  read_file:
+    enabled: true
+    allowed_paths:
+      - "/home/youruser/projects"
+      - "/opt/dev/GIFer"
+  list_directory:
+    enabled: true
+    allowed_paths:
+      - "/home/youruser/projects"
+      - "/opt/dev/GIFer"
+  file_tree:
+    enabled: true
+    allowed_paths:
+      - "/home/youruser/projects"
+      - "/opt/dev/GIFer"
+  search_files:
+    enabled: true
+    allowed_paths:
+      - "/home/youruser/projects"
+      - "/opt/dev/GIFer"
+  git_info:
+    enabled: true
+    allowed_paths:
+      - "/home/youruser/projects"
+      - "/opt/dev/GIFer"
+
+  # Optional: explicit write policy (otherwise inherits read_file allowed_paths / denied_paths).
+  # write_file:
+  #   enabled: true
+  #   allowed_paths:
+  #     - "/home/youruser/projects"
+
+  # Optional: substring replace on disk (same path policy as write_file). Safer than rewriting whole files.
+  # patch_file:
+  #   enabled: true
+
+  shell_execute:
+    enabled: true
+    allowed_paths: []
+    allowed_commands: []
+    denied_patterns: ["rm -rf /", "mkfs", "dd if="]
+
+  # Enable for Bastion code workspace indexing / search (path allowlists apply).
+  index_workspace:
+    enabled: true
+    allowed_paths:
+      - "/home/youruser/projects"

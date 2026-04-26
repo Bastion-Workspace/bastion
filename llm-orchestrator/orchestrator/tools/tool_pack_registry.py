@@ -572,22 +572,36 @@ TOOL_PACKS: Dict[str, ToolPack] = {
     ),
     "code_workspace": ToolPack(
         name="code_workspace",
-        description="Coding workspace tools: file tree, content search, git info, and workspace root selection (local proxy-backed).",
+        description=(
+            "Coding workspace tools: list/get/open workspaces, index & semantic search, tree, regex search, git, "
+            "local file/shell (proxy-backed), and document patch proposals (patch_file/append_to_file for document_id)."
+        ),
         tools=[
+            "code_list_workspaces_tool",
+            "code_get_workspace_tool",
             "code_open_workspace_tool",
             "code_file_tree_tool",
             "code_search_files_tool",
             "code_git_info_tool",
+            "code_index_workspace_tool",
+            "code_semantic_search_tool",
             "local_read_file_tool",
             "local_write_file_tool",
+            "local_patch_file_tool",
             "local_list_directory_tool",
             "local_shell_execute_tool",
+            "patch_file_tool",
+            "append_to_file_tool",
         ],
         read_tools=[
+            "code_list_workspaces_tool",
+            "code_get_workspace_tool",
             "code_open_workspace_tool",
             "code_file_tree_tool",
             "code_search_files_tool",
             "code_git_info_tool",
+            "code_index_workspace_tool",
+            "code_semantic_search_tool",
             "local_read_file_tool",
             "local_list_directory_tool",
         ],

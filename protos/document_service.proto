@@ -19,6 +19,7 @@ service DocumentService {
   rpc FindDocumentsByTags(tool_service.FindDocumentsByTagsRequest) returns (tool_service.FindDocumentsByTagsResponse);
   rpc GetDocument(tool_service.DocumentRequest) returns (tool_service.DocumentResponse);
   rpc GetDocumentContent(tool_service.DocumentRequest) returns (tool_service.DocumentContentResponse);
+  rpc GetDocumentLinks(tool_service.GetDocumentLinksRequest) returns (tool_service.GetDocumentLinksResponse);
   rpc GetDocumentChunks(tool_service.DocumentRequest) returns (tool_service.DocumentChunksResponse);
   rpc FindDocumentByPath(tool_service.FindDocumentByPathRequest) returns (tool_service.FindDocumentByPathResponse);
   rpc RerankDocuments(tool_service.RerankRequest) returns (tool_service.RerankResponse);

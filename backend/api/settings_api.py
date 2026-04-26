@@ -1360,23 +1360,8 @@ async def set_vision_features_enabled(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/api/settings/{category}")
-async def get_settings_by_category(category: str):
-    """Get settings by category"""
-    try:
-        logger.info(f"⚙️ Getting settings for category: {category}")
-        settings = await settings_service.get_settings_by_category(category)
-        return {
-            "category": category,
-            "settings": settings,
-            "count": len(settings)
-        }
-    except Exception as e:
-        logger.error(f"❌ Failed to get settings for category {category}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # --- Device tokens (Bastion Local Proxy) ---
+# Registered before GET /api/settings/{category} so "device-tokens" is not captured as a category slug.
 
 class DeviceTokenCreateRequest(BaseModel):
     device_name: str = Field(..., min_length=1, max_length=255)
@@ -1436,4 +1421,20 @@ async def revoke_device_token(
         return {"success": True, "message": "Token revoked"}
     except Exception as e:
         logger.error(f"Failed to revoke device token: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/{category}")
+async def get_settings_by_category(category: str):
+    """Get settings by category"""
+    try:
+        logger.info(f"⚙️ Getting settings for category: {category}")
+        settings = await settings_service.get_settings_by_category(category)
+        return {
+            "category": category,
+            "settings": settings,
+            "count": len(settings)
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get settings for category {category}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

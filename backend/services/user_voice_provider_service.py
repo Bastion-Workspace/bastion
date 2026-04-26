@@ -17,7 +17,7 @@ from services.database_manager.database_helpers import execute, fetch_all, fetch
 
 logger = logging.getLogger(__name__)
 
-VOICE_PROVIDER_TYPES_TTS = frozenset({"elevenlabs", "openai", "hedra"})
+VOICE_PROVIDER_TYPES_TTS = frozenset({"elevenlabs", "openai", "hedra", "openrouter"})
 VOICE_PROVIDER_TYPES_STT = frozenset({"openai", "deepgram", "whisper_api"})
 VOICE_PROVIDER_TYPES = VOICE_PROVIDER_TYPES_TTS | VOICE_PROVIDER_TYPES_STT
 
@@ -37,6 +37,8 @@ SETTING_USER_ELEVENLABS_TTS_MODEL_ID = "user_elevenlabs_tts_model_id"
 SETTING_USER_ADMIN_ELEVENLABS_TTS_MODEL_ID = "user_admin_elevenlabs_tts_model_id"
 SETTING_USER_HEDRA_TTS_MODEL_ID = "user_hedra_tts_model_id"
 SETTING_USER_ADMIN_HEDRA_TTS_MODEL_ID = "user_admin_hedra_tts_model_id"
+SETTING_USER_OPENROUTER_TTS_MODEL_ID = "user_openrouter_tts_model_id"
+SETTING_USER_ADMIN_OPENROUTER_TTS_MODEL_ID = "user_admin_openrouter_tts_model_id"
 
 
 def _truthy_setting(raw: Optional[str]) -> bool:
@@ -126,6 +128,23 @@ class UserVoiceProviderService:
                         url,
                         headers={"Authorization": f"Bearer {key}"},
                     )
+                    return r.status_code == 200
+
+                if provider_type == "openrouter" and provider_role == "tts":
+                    root = bu or "https://openrouter.ai/api/v1"
+                    if not root.endswith("/v1"):
+                        root = f"{root.rstrip('/')}/v1"
+                    url = f"{root}/models"
+                    r = await client.get(
+                        url,
+                        headers={"Authorization": f"Bearer {key}"},
+                        params={"output_modalities": "speech"},
+                    )
+                    if r.status_code != 200:
+                        r = await client.get(
+                            url,
+                            headers={"Authorization": f"Bearer {key}"},
+                        )
                     return r.status_code == 200
 
                 if provider_type == "deepgram" and provider_role == "stt":
@@ -226,6 +245,8 @@ class UserVoiceProviderService:
             return "openai"
         if provider_type == "hedra":
             return "hedra"
+        if provider_type == "openrouter":
+            return "openrouter"
         return provider_type
 
     async def get_linked_tts_provider_type_name(self, user_id: str) -> str:

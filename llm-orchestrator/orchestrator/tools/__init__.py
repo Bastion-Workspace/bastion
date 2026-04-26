@@ -5,6 +5,7 @@ Orchestrator Tools - LangGraph tools using backend gRPC services
 from orchestrator.tools.document_tools import (
     search_documents_tool,
     get_document_content_tool,
+    get_document_links_tool,
     find_document_by_path_tool,
     search_by_tags_tool,
     pick_random_file_tool,
@@ -334,6 +335,7 @@ from orchestrator.tools.local_proxy_tools import (
     local_read_file_tool,
     local_list_directory_tool,
     local_write_file_tool,
+    local_patch_file_tool,
     local_list_processes_tool,
     local_open_url_tool,
     get_available_local_proxy_tools,
@@ -343,6 +345,11 @@ from orchestrator.tools.code_workspace_tools import (
     code_file_tree_tool,
     code_search_files_tool,
     code_git_info_tool,
+    code_list_workspaces_tool,
+    code_get_workspace_tool,
+    code_index_workspace_tool,
+    code_semantic_search_tool,
+    CODE_WORKSPACE_TOOLS,
 )
 import orchestrator.tools.reference_file_loader  # noqa: F401 - register_action at load
 import orchestrator.tools.file_analysis_tools  # noqa: F401 - register_action at load
@@ -367,6 +374,7 @@ __all__ = [
     # Document tools
     'search_documents_tool',
     'get_document_content_tool',
+    'get_document_links_tool',
     'find_document_by_path_tool',
     'search_by_tags_tool',
     'pick_random_file_tool',
@@ -581,6 +589,7 @@ __all__ = [
     'local_read_file_tool',
     'local_list_directory_tool',
     'local_write_file_tool',
+    'local_patch_file_tool',
     'local_list_processes_tool',
     'local_open_url_tool',
     'get_available_local_proxy_tools',
@@ -589,5 +598,10 @@ __all__ = [
     'code_file_tree_tool',
     'code_search_files_tool',
     'code_git_info_tool',
+    'code_list_workspaces_tool',
+    'code_get_workspace_tool',
+    'code_index_workspace_tool',
+    'code_semantic_search_tool',
+    'CODE_WORKSPACE_TOOLS',
 ]
 

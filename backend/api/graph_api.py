@@ -6,12 +6,13 @@ Documents and links are filtered by user_id so file relations never leak across 
 """
 
 import logging
-from typing import Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from models.api_models import AuthenticatedUserResponse
-from services.database_manager.database_helpers import fetch_all
+from services.database_manager.database_helpers import fetch_all, fetch_one
 from services.link_extraction_service import get_link_extraction_service
 from services.service_container import get_service_container
 from utils.auth_middleware import get_current_user, require_admin
@@ -559,6 +560,146 @@ async def get_entity_detail(
     except Exception as e:
         logger.error("Entity detail failed for %s: %s", entity_name, e)
         raise
+
+
+@router.get("/api/documents/{document_id}/backlinks")
+async def get_document_backlinks(
+    document_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """
+    Incoming file links from document_links (markdown, wikilinks, org, frontmatter)
+    for a target document. Scoped to the current user.
+    """
+    user_id = current_user.user_id
+    rls_context = {"user_id": user_id, "user_role": "user"}
+    meta = await fetch_one(
+        """
+        SELECT document_id, filename FROM document_metadata
+        WHERE document_id = $1 AND user_id = $2
+        """,
+        document_id,
+        user_id,
+        rls_context=rls_context,
+    )
+    if not meta:
+        raise HTTPException(status_code=404, detail="Document not found")
+    rows = await fetch_all(
+        """
+        SELECT dm.document_id AS source_document_id,
+               dm.filename AS source_filename,
+               COUNT(*)::int AS link_count,
+               MAX(dl.link_type) AS link_type,
+               MIN(dl.line_number) AS first_line
+        FROM document_links dl
+        INNER JOIN document_metadata dm ON dm.document_id = dl.source_document_id
+        WHERE dl.target_document_id = $1 AND dl.user_id = $2
+        GROUP BY dm.document_id, dm.filename
+        ORDER BY dm.filename
+        """,
+        document_id,
+        user_id,
+        rls_context=rls_context,
+    )
+    backlinks: List[Dict[str, Any]] = []
+    for r in rows or []:
+        line = r.get("first_line") or 0
+        ctx = f"Line {line}" if line else ""
+        backlinks.append(
+            {
+                "source_document_id": r.get("source_document_id"),
+                "filename": r.get("source_filename") or "",
+                "link_count": r.get("link_count") or 1,
+                "link_type": r.get("link_type"),
+                "context": ctx,
+            }
+        )
+    return {"success": True, "backlinks": backlinks, "count": len(backlinks)}
+
+
+@router.get("/api/documents/{document_id}/unlinked-mentions")
+async def get_unlinked_mentions(
+    document_id: str,
+    limit: int = Query(30, ge=1, le=100),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """
+    Documents whose search text matches this note's title stem but have no
+    resolved link row to this document in document_links.
+    """
+    user_id = current_user.user_id
+    rls_context = {"user_id": user_id, "user_role": "user"}
+    meta = await fetch_one(
+        """
+        SELECT document_id, filename, COALESCE(title, filename) AS doc_title
+        FROM document_metadata
+        WHERE document_id = $1 AND user_id = $2
+        """,
+        document_id,
+        user_id,
+        rls_context=rls_context,
+    )
+    if not meta:
+        raise HTTPException(status_code=404, detail="Document not found")
+    fname = meta.get("filename") or ""
+    stem = Path(fname).stem if fname else (meta.get("doc_title") or "")
+    if not stem.strip():
+        return {"success": True, "mentions": [], "count": 0}
+    query_text = stem.strip()
+    from services.direct_search_service import DirectSearchService
+
+    search = DirectSearchService()
+    team_ids = None
+    try:
+        from services.team_service import TeamService
+
+        team_svc = TeamService()
+        await team_svc.initialize()
+        teams = await team_svc.list_user_teams(user_id)
+        team_ids = [t["team_id"] for t in teams] if teams else None
+    except Exception:
+        pass
+    result = await search.search_documents(
+        query=query_text,
+        limit=limit * 3,
+        search_mode="fulltext",
+        user_id=user_id,
+        team_ids=team_ids,
+        file_types=["md", "org", "txt"],
+        include_metadata=True,
+    )
+    candidates = result.get("results") or []
+    mentions: List[Dict[str, Any]] = []
+    for c in candidates:
+        src_id = c.get("document_id")
+        if not src_id or src_id == document_id:
+            continue
+        linked = await fetch_one(
+            """
+            SELECT 1 FROM document_links
+            WHERE source_document_id = $1 AND target_document_id = $2 AND user_id = $3
+            LIMIT 1
+            """,
+            src_id,
+            document_id,
+            user_id,
+            rls_context=rls_context,
+        )
+        if linked:
+            continue
+        snippet = (c.get("highlighted_snippet") or c.get("snippet") or "")[:400]
+        title = c.get("title") or c.get("filename") or src_id
+        mentions.append(
+            {
+                "document_id": src_id,
+                "filename": c.get("filename") or "",
+                "title": title,
+                "snippet": snippet,
+            }
+        )
+        if len(mentions) >= limit:
+            break
+    return {"success": True, "mentions": mentions, "count": len(mentions)}
 
 
 @router.post("/api/admin/rebuild-all-links")

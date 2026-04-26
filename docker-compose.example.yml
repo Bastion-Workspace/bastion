@@ -159,6 +159,7 @@ services:
       - CRAWL4AI_SERVICE_PORT=50055
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
       - OSRM_BASE_URL=${OSRM_BASE_URL:-http://osrm:5000}
@@ -495,7 +496,7 @@ services:
         - BUILDKIT_INLINE_CACHE=1
         - VITE_API_URL=${VITE_API_URL:-}
         - VITE_APP_NAME=${VITE_APP_NAME:-Bastion}
-        - VITE_VERSION=${VITE_VERSION:-0.70.6}
+        - VITE_VERSION=${VITE_VERSION:-0.70.7}
         - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
         - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
         - VITE_MAP_DARK_STYLE=${VITE_MAP_DARK_STYLE:-}
@@ -512,7 +513,7 @@ services:
       - "0.0.0.0:3051:80"
     environment:
       - VITE_APP_NAME=Bastion
-      - VITE_VERSION=0.70.6
+      - VITE_VERSION=0.70.7
       - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
       - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
     volumes:
@@ -544,7 +545,7 @@ services:
     environment:
       - VITE_API_URL=${VITE_API_URL:-}
       - VITE_APP_NAME=${VITE_APP_NAME:-Bastion}
-      - VITE_VERSION=${VITE_VERSION:-0.70.6}
+      - VITE_VERSION=${VITE_VERSION:-0.70.7}
       - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
       - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
       - VITE_MAP_DARK_STYLE=${VITE_MAP_DARK_STYLE:-}
@@ -807,7 +808,7 @@ services:
     environment:
       - SERVICE_NAME=image-vision-service
       - GRPC_PORT=50056
-      - SERVICE_VERSION=0.70.6
+      - SERVICE_VERSION=0.70.7
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEVICE=${IMAGE_VISION_DEVICE:-auto}
       - MAX_WORKERS=4
@@ -888,6 +889,11 @@ services:
       - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
       - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - HEDRA_API_KEY=${HEDRA_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_TTS_MODEL=${OPENROUTER_TTS_MODEL}
+      - OPENROUTER_TTS_VOICE=${OPENROUTER_TTS_VOICE:-alloy}
       - PIPER_VOICE=${PIPER_VOICE:-en_US-arctic-medium}
       - PIPER_BOOTSTRAP=${PIPER_BOOTSTRAP:-1}
     ports:
