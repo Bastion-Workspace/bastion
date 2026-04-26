@@ -98,9 +98,9 @@ jobs:
 
             **Version:** ${{ steps.version.outputs.version }}
 
-            Install the APK on a device or emulator. Set **Bastion server URL** via `EXPO_PUBLIC_API_BASE_URL` at build time, or use a dev client pointed at your server.
+            Install the APK on a device or emulator. The bundle is **embedded** in this debug APK (no Metro required). Set **API base URL** via `EXPO_PUBLIC_API_BASE_URL` at build time (see `mobile/env.example`).
 
-            Debug builds use the default debug keystore (not for Play Store). For release signing, add keystore secrets and switch the workflow to `assembleRelease` / `bundleRelease`.
+            Debug builds use the default debug keystore (not for Play Store). For Play Store signing, add keystore secrets and switch the workflow to `assembleRelease` / `bundleRelease`.
 
       - name: Build summary
         run: |

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: **Mobile Android debug APK** — embed JavaScript at Gradle build time (`debuggableVariants = []` via config plugin) so CI artifacts install without Metro; default Expo/RN debug skips bundling and expects port 8081.
+
 ## [0.70.8] - 2026-04-26
 
 - Feature: **Bastion Mobile** — new `mobile/` Expo (React Native) app: Tier 1 (auth, todos, read-only documents) and Tier 2 (in-app messaging WebSockets, orchestrator streaming chat); GitHub Actions `build-mobile-android.yml` (debug APK) and manual `build-mobile-ios.yml` placeholder; mobile app version aligned with monorepo (`0.70.8`).

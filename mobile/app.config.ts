@@ -18,7 +18,7 @@ const config: ExpoConfig = {
     },
     package: 'com.bastion.mobile',
   },
-  plugins: ['expo-router'],
+  plugins: ['expo-router', './plugins/withAndroidEmbeddedDebugBundle'],
   experiments: {
     typedRoutes: true,
   },
