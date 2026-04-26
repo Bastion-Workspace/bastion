@@ -305,3 +305,11 @@ processed/
 
 # User Documentation (wiki content; not committed to repo)
 User Documentation/
+
+# Bastion mobile (Expo / React Native)
+mobile/node_modules/
+mobile/.expo/
+mobile/android/
+mobile/ios/
+mobile/dist/
+mobile/web-build/

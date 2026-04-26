@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Feature: **Bastion Mobile** — new `mobile/` Expo (React Native) app: Tier 1 (auth, todos, read-only documents) and Tier 2 (in-app messaging WebSockets, orchestrator streaming chat); GitHub Actions `build-mobile-android.yml` (debug APK) and manual `build-mobile-ios.yml` placeholder.
+- Feature: **Settings — Local proxy (devices)** — live Online/Offline from server WebSocket state, optional live device ID when it differs from the label, refresh control and periodic refetch while the panel is open.
+
 ## [0.70.7] - 2026-04-26
 
 - Fix: **LLM agent tool results** — `llm_agent` steps only passed `formatted` to the model as `ToolMessage` content, so **`local_read_file`** (and similar tools) dropped **`content`**, **`entries`**, etc. Pipeline executor now appends JSON for remaining payload keys (with truncation via existing `MAX_TOOL_RESULT_CHARS`).

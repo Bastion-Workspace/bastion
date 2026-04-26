@@ -1,0 +1,23 @@
+# iOS builds require Apple Developer Program credentials (certificates, provisioning profile,
+# or App Store Connect API key). Run manually when ready; add macOS steps (expo prebuild,
+# xcodebuild, or EAS) and repository secrets, then replace the step below with a real build.
+
+name: Build Bastion Mobile (iOS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios-not-yet-configured:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Note
+        run: |
+          echo "## Bastion Mobile iOS" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Apple Developer signing is not wired in this workflow yet." >> $GITHUB_STEP_SUMMARY
+          echo "Use **Run workflow** after adding secrets and Xcode/EAS build steps." >> $GITHUB_STEP_SUMMARY
+          echo "Same mobile/ app as Android; see build-mobile-android.yml for the Node/Expo pattern." >> $GITHUB_STEP_SUMMARY
