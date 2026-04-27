@@ -11,7 +11,8 @@ module.exports = function withAndroidEmbeddedDebugBundle(config) {
       return mod;
     }
     let contents = mod.modResults.contents;
-    if (contents.includes('debuggableVariants')) {
+    // Expo template comments mention debuggableVariants; do not use includes() or we skip injection.
+    if (/^\s*debuggableVariants\s*=/m.test(contents)) {
       return mod;
     }
     mod.modResults.contents = contents.replace(
