@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fix: **Mobile Android debug APK** — embed JavaScript at Gradle build time (`debuggableVariants = []` via config plugin) so CI artifacts install without Metro; default Expo/RN debug skips bundling and expects port 8081. Plugin must not treat Expo’s **commented** `debuggableVariants` line as present, or injection is skipped and the APK still has no bundle.
+- Fix: **Mobile Android CI** — add **`expo-asset`** (~11.0.5) so `export:embed` / `createBundleDebugJsAndAssets` can load `@expo/metro-config`; set **`NODE_ENV=production`** for the Gradle assemble step (Expo CLI requires it when bundling outside `expo start`).
 
 ## [0.70.8] - 2026-04-26
 

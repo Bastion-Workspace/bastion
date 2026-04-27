@@ -76,6 +76,8 @@ jobs:
 
       - name: Assemble debug APK
         working-directory: ./mobile/android
+        env:
+          NODE_ENV: production
         run: chmod +x gradlew && ./gradlew assembleDebug --no-daemon
 
       - name: Upload APK artifact
