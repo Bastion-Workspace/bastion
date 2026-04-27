@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import { Redirect, useRouter } from 'expo-router';
+import { getApiBaseUrl } from '../../src/api/config';
 import { useAuth } from '../../src/context/AuthContext';
 
 export default function LoginScreen() {
@@ -22,6 +23,10 @@ export default function LoginScreen() {
 
   if (isReady && token) {
     return <Redirect href="/home" />;
+  }
+
+  if (isReady && !apiConfigured) {
+    return <Redirect href="/(auth)/server" />;
   }
 
   async function onSubmit() {
@@ -47,9 +52,12 @@ export default function LoginScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <Text style={styles.title}>Bastion</Text>
-      {!apiConfigured ? (
-        <Text style={styles.hint}>Configure EXPO_PUBLIC_API_BASE_URL in .env</Text>
-      ) : null}
+      <Text style={styles.serverLine} numberOfLines={2}>
+        {getApiBaseUrl()}
+      </Text>
+      <Pressable onPress={() => router.push('/(auth)/server')} style={styles.linkWrap}>
+        <Text style={styles.link}>Change server</Text>
+      </Pressable>
       <TextInput
         style={styles.input}
         placeholder="Username"
@@ -74,8 +82,10 @@ export default function LoginScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: 'center', padding: 24, backgroundColor: '#f5f5f5' },
-  title: { fontSize: 28, fontWeight: '700', marginBottom: 24, textAlign: 'center' },
-  hint: { textAlign: 'center', marginBottom: 16, color: '#666' },
+  title: { fontSize: 28, fontWeight: '700', marginBottom: 8, textAlign: 'center' },
+  serverLine: { textAlign: 'center', fontSize: 13, color: '#555', marginBottom: 4, paddingHorizontal: 8 },
+  linkWrap: { alignSelf: 'center', marginBottom: 20 },
+  link: { fontSize: 15, color: '#1a1a2e', fontWeight: '600', textDecorationLine: 'underline' },
   input: {
     backgroundColor: '#fff',
     borderRadius: 8,

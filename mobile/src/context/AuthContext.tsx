@@ -7,7 +7,8 @@ import React, {
   useState,
 } from 'react';
 import { getCurrentUser, login as apiLogin, logout as apiLogout, type MeResponse } from '../api/auth';
-import { getApiBaseUrl } from '../api/config';
+import { getApiBaseUrl, normalizeBastionOrigin, setRuntimeApiBaseUrl } from '../api/config';
+import { getStoredBaseUrl, setStoredBaseUrl } from '../session/baseUrlStore';
 import { clearStoredToken, getStoredToken } from '../session/tokenStore';
 
 type AuthContextValue = {
@@ -18,6 +19,8 @@ type AuthContextValue = {
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  /** Persist origin, apply for API calls, and clear session when the origin changes. */
+  setServerUrl: (rawUrl: string) => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -26,10 +29,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
   const [user, setUser] = useState<Record<string, unknown> | null>(null);
   const [isReady, setIsReady] = useState(false);
+  /** Bumps when server URL is loaded or saved so apiConfigured recomputes. */
+  const [serverEpoch, setServerEpoch] = useState(0);
 
-  const apiConfigured = !!getApiBaseUrl();
+  const apiConfigured = useMemo(() => !!getApiBaseUrl(), [serverEpoch, isReady]);
 
   const loadSession = useCallback(async () => {
+    const storedBase = await getStoredBaseUrl();
+    setRuntimeApiBaseUrl(storedBase ?? '');
+    setServerEpoch((n) => n + 1);
+
     const t = await getStoredToken();
     setToken(t);
     if (t) {
@@ -56,6 +65,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void loadSession();
   }, [loadSession]);
+
+  const setServerUrl = useCallback(async (rawUrl: string) => {
+    const prev = getApiBaseUrl();
+    const normalized = normalizeBastionOrigin(rawUrl);
+    await setStoredBaseUrl(normalized);
+    setRuntimeApiBaseUrl(normalized);
+    setServerEpoch((n) => n + 1);
+    if (normalized !== prev) {
+      await clearStoredToken();
+      setToken(null);
+      setUser(null);
+    }
+  }, []);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await apiLogin(username, password);
@@ -94,8 +116,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       login,
       logout,
       refreshUser,
+      setServerUrl,
     }),
-    [token, user, isReady, apiConfigured, login, logout, refreshUser]
+    [token, user, isReady, apiConfigured, login, logout, refreshUser, setServerUrl]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

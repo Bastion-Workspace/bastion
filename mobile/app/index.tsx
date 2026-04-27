@@ -1,5 +1,5 @@
 import { Redirect } from 'expo-router';
-import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { useAuth } from '../src/context/AuthContext';
 
 export default function Index() {
@@ -14,11 +14,7 @@ export default function Index() {
   }
 
   if (!apiConfigured) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.warn}>Set EXPO_PUBLIC_API_BASE_URL to your Bastion server.</Text>
-      </View>
-    );
+    return <Redirect href="/(auth)/server" />;
   }
 
   if (!token) {
@@ -29,5 +25,4 @@ export default function Index() {
 
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  warn: { textAlign: 'center', fontSize: 16 },
 });
