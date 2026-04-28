@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: **Mobile Android** — Android 15 / 16 KB native ELF alignment (`expo-build-properties` with NDK `27.1.12297006`; CI installs matching `ndk` package).
+- Refactor: **Document service** — split phase-2 gRPC into focused mixins, lazy `FolderService` singleton on handler base, typed admin RPCs (`AdminGetDocument`, `FilterDocuments`, etc.) with shared `document_admin_ops`; backend facade and team cleanup call typed clients instead of `DocumentMirror` JSON actions.
 - Feature: **Agent Factory playbooks** — optional per-step **`enabled: false`** skips the step at runtime (with `_skipped` / `_reason` in state) before evaluating **`condition`**; Workflow Composer toggle and validation updates.
 - Fix: **Mobile Android debug APK** — embed JavaScript at Gradle build time (`debuggableVariants = []` via config plugin) so CI artifacts install without Metro; default Expo/RN debug skips bundling and expects port 8081. Plugin must not treat Expo’s **commented** `debuggableVariants` line as present, or injection is skipped and the APK still has no bundle.
 - Fix: **Mobile Android CI** — add **`expo-asset`** (~11.0.5) so `export:embed` / `createBundleDebugJsAndAssets` can load `@expo/metro-config`; set **`NODE_ENV=production`** for the Gradle assemble step (Expo CLI requires it when bundling outside `expo start`).
 - Feature: **Bastion Mobile** — first-run **Server** screen to enter and persist Bastion origin (SecureStore); login shows current URL and **Change server**; saved URL overrides build-time `EXPO_PUBLIC_API_BASE_URL` when set.
 - Feature: **Bastion Mobile UX** — bottom **tab bar** (Todos, Docs, Messages, AI, Profile); nested stacks for document and room detail; **Profile** tab (server URL, change server, sign out); AI chat **Markdown** + scroll-to-end; room chat **self/other** bubbles and formatted times; **dayjs** relative times on room list; inline **error** banners on lists and **Alert** on todo toggle failure.
+- Feature: **Bastion Mobile — Todos** — list matches **GET /api/todos** shape (`heading`, `todo_state`, `preview`, tags, planning lines); **All org files / Inbox** scope, debounced search, state chips, **Mark done / Reopen**; typed **`OrgTodoListItem`** in `mobile/src/api/todos.ts`.
 
 ## [0.70.8] - 2026-04-26
 

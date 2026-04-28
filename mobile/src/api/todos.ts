@@ -1,5 +1,23 @@
 import { apiRequest } from './client';
 
+/** One row from GET /api/todos — matches org search / org_todo_service list shape. */
+export type OrgTodoListItem = {
+  filename: string;
+  file_path: string;
+  heading: string;
+  line_number: number;
+  level?: number;
+  todo_state?: string | null;
+  tags?: string[];
+  preview?: string;
+  body_preview?: string;
+  scheduled?: string | null;
+  deadline?: string | null;
+  priority?: string | null;
+  document_id?: string | null;
+  closed?: string | null;
+};
+
 export type TodoListOptions = {
   scope?: string;
   states?: string[];
@@ -11,9 +29,10 @@ export type TodoListOptions = {
 
 export type TodoListResult = {
   success?: boolean;
-  results?: unknown[];
+  results?: OrgTodoListItem[];
   count?: number;
   files_searched?: number;
+  total_matches?: number;
 };
 
 export async function listTodos(options: TodoListOptions = {}): Promise<TodoListResult> {

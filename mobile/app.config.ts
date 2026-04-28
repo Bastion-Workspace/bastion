@@ -18,7 +18,18 @@ const config: ExpoConfig = {
     },
     package: 'com.bastion.mobile',
   },
-  plugins: ['expo-router', './plugins/withAndroidEmbeddedDebugBundle'],
+  plugins: [
+    'expo-router',
+    './plugins/withAndroidEmbeddedDebugBundle',
+    [
+      'expo-build-properties',
+      {
+        android: {
+          ndkVersion: '27.1.12297006',
+        },
+      },
+    ],
+  ],
   experiments: {
     typedRoutes: true,
   },
