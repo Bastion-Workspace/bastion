@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -22,10 +23,17 @@ export default function TodosScreen() {
   const [data, setData] = useState<TodoListResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await listTodos({ scope: 'all', limit: 200 });
-    setData(res);
+    setError(null);
+    try {
+      const res = await listTodos({ scope: 'all', limit: 200 });
+      setData(res);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load todos');
+      setData(null);
+    }
   }, []);
 
   const onRefresh = useCallback(async () => {
@@ -39,11 +47,8 @@ export default function TodosScreen() {
 
   useEffect(() => {
     void (async () => {
-      try {
-        await load();
-      } finally {
-        setLoading(false);
-      }
+      await load();
+      setLoading(false);
     })();
   }, [load]);
 
@@ -63,6 +68,13 @@ export default function TodosScreen() {
       keyExtractor={(item, index) => `${item.file_path}-${item.line_number}-${index}`}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       contentContainerStyle={styles.list}
+      ListHeaderComponent={
+        error ? (
+          <Text style={styles.errorBanner} accessibilityRole="alert">
+            {error}
+          </Text>
+        ) : null
+      }
       ListEmptyComponent={<Text style={styles.empty}>No todos found.</Text>}
       renderItem={({ item }) => (
         <View style={styles.card}>
@@ -83,8 +95,11 @@ export default function TodosScreen() {
                     heading_text: item.heading_text ?? null,
                   });
                   await load();
-                } catch {
-                  /* toast optional */
+                } catch (e) {
+                  Alert.alert(
+                    'Could not update todo',
+                    e instanceof Error ? e.message : 'Request failed'
+                  );
                 }
               }}
             >
@@ -100,6 +115,14 @@ export default function TodosScreen() {
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { padding: 16, paddingBottom: 32 },
+  errorBanner: {
+    backgroundColor: '#fee',
+    color: '#a00',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    fontSize: 14,
+  },
   empty: { textAlign: 'center', marginTop: 48, color: '#666' },
   card: {
     backgroundColor: '#fff',

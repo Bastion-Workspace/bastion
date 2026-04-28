@@ -10,6 +10,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import Markdown from 'react-native-markdown-display';
 import {
   addUserMessage,
   createConversation,
@@ -22,6 +23,30 @@ import { streamOrchestrator } from '../../src/api/orchestratorStream';
 
 type Row = { id: string; role: string; content: string };
 
+const assistantMarkdownStyles = {
+  body: { color: '#111', fontSize: 15, lineHeight: 22 },
+  paragraph: { marginTop: 0, marginBottom: 8 },
+  bullet_list: { marginBottom: 8 },
+  ordered_list: { marginBottom: 8 },
+  code_inline: { backgroundColor: '#eee', fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }) },
+  code_block: {
+    backgroundColor: '#f0f0f0',
+    padding: 8,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+    fontSize: 13,
+  },
+  fence: {
+    backgroundColor: '#f0f0f0',
+    padding: 8,
+    fontFamily: Platform.select({ ios: 'Menlo', android: 'monospace', default: 'monospace' }),
+    fontSize: 13,
+  },
+  link: { color: '#1a5090' },
+  heading1: { fontSize: 20, fontWeight: '700', marginBottom: 8 },
+  heading2: { fontSize: 18, fontWeight: '700', marginBottom: 6 },
+  heading3: { fontSize: 16, fontWeight: '700', marginBottom: 4 },
+};
+
 export default function AiChatScreen() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -30,6 +55,7 @@ export default function AiChatScreen() {
   const [loadingList, setLoadingList] = useState(true);
   const [streaming, setStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const listRef = useRef<FlatList<Row>>(null);
 
   const loadConversations = useCallback(async () => {
     const res = await listConversations(0, 30);
@@ -174,9 +200,15 @@ export default function AiChatScreen() {
         />
       </View>
       <FlatList
+        ref={listRef}
         data={rows}
         keyExtractor={(r) => r.id}
         contentContainerStyle={styles.list}
+        onContentSizeChange={() => {
+          requestAnimationFrame(() => {
+            listRef.current?.scrollToEnd({ animated: true });
+          });
+        }}
         renderItem={({ item }) => (
           <View
             style={[
@@ -184,8 +216,13 @@ export default function AiChatScreen() {
               item.role === 'user' ? styles.bubbleUser : styles.bubbleAsst,
             ]}
           >
-            <Text style={[styles.role, item.role === 'user' && styles.msgUser]}>{item.role}</Text>
-            <Text style={[styles.msg, item.role === 'user' && styles.msgUser]}>{item.content}</Text>
+            {item.role === 'assistant' ? (
+              <Markdown style={assistantMarkdownStyles}>
+                {item.content.trim() ? item.content : '\u00a0'}
+              </Markdown>
+            ) : (
+              <Text style={[styles.msg, styles.msgUser]}>{item.content}</Text>
+            )}
           </View>
         )}
       />
@@ -238,7 +275,6 @@ const styles = StyleSheet.create({
   },
   bubbleUser: { alignSelf: 'flex-end', backgroundColor: '#1a1a2e' },
   bubbleAsst: { alignSelf: 'flex-start', backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd' },
-  role: { fontSize: 10, color: '#888', marginBottom: 4 },
   msg: { fontSize: 15, color: '#111' },
   msgUser: { color: '#fff' },
   composer: { flexDirection: 'row', padding: 8, gap: 8, borderTopWidth: 1, borderColor: '#ddd' },

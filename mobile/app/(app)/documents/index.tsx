@@ -16,19 +16,23 @@ export default function DocumentsListScreen() {
   const [docs, setDocs] = useState<DocumentInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const res = await listUserDocuments(0, 100);
-    setDocs(res.documents ?? []);
+    setError(null);
+    try {
+      const res = await listUserDocuments(0, 100);
+      setDocs(res.documents ?? []);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load documents');
+      setDocs([]);
+    }
   }, []);
 
   useEffect(() => {
     void (async () => {
-      try {
-        await load();
-      } finally {
-        setLoading(false);
-      }
+      await load();
+      setLoading(false);
     })();
   }, [load]);
 
@@ -55,6 +59,13 @@ export default function DocumentsListScreen() {
       keyExtractor={(item) => item.document_id}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       contentContainerStyle={styles.list}
+      ListHeaderComponent={
+        error ? (
+          <Text style={styles.errorBanner} accessibilityRole="alert">
+            {error}
+          </Text>
+        ) : null
+      }
       ListEmptyComponent={<Text style={styles.empty}>No documents.</Text>}
       renderItem={({ item }) => (
         <Pressable
@@ -72,6 +83,14 @@ export default function DocumentsListScreen() {
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { padding: 16 },
+  errorBanner: {
+    backgroundColor: '#fee',
+    color: '#a00',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    fontSize: 14,
+  },
   empty: { textAlign: 'center', marginTop: 48, color: '#666' },
   row: {
     backgroundColor: '#fff',

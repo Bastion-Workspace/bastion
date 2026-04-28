@@ -8,6 +8,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import dayjs from 'dayjs';
 import { useRouter } from 'expo-router';
 import { getUserRooms, type Room } from '../../../src/api/messaging';
 
@@ -16,19 +17,23 @@ export default function MessagesListScreen() {
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const list = await getUserRooms(50);
-    setRooms(list);
+    setError(null);
+    try {
+      const list = await getUserRooms(50);
+      setRooms(list);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load rooms');
+      setRooms([]);
+    }
   }, []);
 
   useEffect(() => {
     void (async () => {
-      try {
-        await load();
-      } finally {
-        setLoading(false);
-      }
+      await load();
+      setLoading(false);
     })();
   }, [load]);
 
@@ -55,6 +60,13 @@ export default function MessagesListScreen() {
       keyExtractor={(item) => item.room_id}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
       contentContainerStyle={styles.list}
+      ListHeaderComponent={
+        error ? (
+          <Text style={styles.errorBanner} accessibilityRole="alert">
+            {error}
+          </Text>
+        ) : null
+      }
       ListEmptyComponent={<Text style={styles.empty}>No rooms yet.</Text>}
       renderItem={({ item }) => (
         <Pressable
@@ -63,7 +75,7 @@ export default function MessagesListScreen() {
         >
           <Text style={styles.title}>{item.room_name || item.name || 'Room'}</Text>
           {item.last_message_at ? (
-            <Text style={styles.sub}>{item.last_message_at}</Text>
+            <Text style={styles.sub}>{dayjs(item.last_message_at).fromNow()}</Text>
           ) : null}
         </Pressable>
       )}
@@ -74,6 +86,14 @@ export default function MessagesListScreen() {
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { padding: 16 },
+  errorBanner: {
+    backgroundColor: '#fee',
+    color: '#a00',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 12,
+    fontSize: 14,
+  },
   empty: { textAlign: 'center', marginTop: 48, color: '#666' },
   row: {
     backgroundColor: '#fff',

@@ -1,6 +1,10 @@
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
+import dayjs from 'dayjs';
+import relativeTime from 'dayjs/plugin/relativeTime';
 import { AuthProvider } from '../src/context/AuthContext';
+
+dayjs.extend(relativeTime);
 
 export default function RootLayout() {
   return (

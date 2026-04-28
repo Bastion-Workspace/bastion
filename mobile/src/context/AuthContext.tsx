@@ -6,7 +6,7 @@ import React, {
   useMemo,
   useState,
 } from 'react';
-import { getCurrentUser, login as apiLogin, logout as apiLogout, type MeResponse } from '../api/auth';
+import { getCurrentUser, login as apiLogin, logout as apiLogout } from '../api/auth';
 import { getApiBaseUrl, normalizeBastionOrigin, setRuntimeApiBaseUrl } from '../api/config';
 import { getStoredBaseUrl, setStoredBaseUrl } from '../session/baseUrlStore';
 import { clearStoredToken, getStoredToken } from '../session/tokenStore';

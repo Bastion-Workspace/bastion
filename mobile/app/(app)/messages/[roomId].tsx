@@ -10,6 +10,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import dayjs from 'dayjs';
 import { useLocalSearchParams } from 'expo-router';
 import {
   getRoomMessages,
@@ -18,15 +19,19 @@ import {
   sendTyping,
   type MessagingMessage,
 } from '../../../src/api/messaging';
+import { useAuth } from '../../../src/context/AuthContext';
 
 export default function RoomChatScreen() {
   const { roomId } = useLocalSearchParams<{ roomId: string }>();
+  const { user } = useAuth();
   const [messages, setMessages] = useState<MessagingMessage[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const listRef = useRef<FlatList<MessagingMessage>>(null);
+
+  const myUserId = user?.user_id != null ? String(user.user_id) : '';
 
   const load = useCallback(async () => {
     if (!roomId) return;
@@ -98,12 +103,23 @@ export default function RoomChatScreen() {
         keyExtractor={(item) => item.message_id}
         contentContainerStyle={styles.list}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-        renderItem={({ item }) => (
-          <View style={styles.bubble}>
-            <Text style={styles.msg}>{item.content}</Text>
-            <Text style={styles.time}>{item.created_at}</Text>
-          </View>
-        )}
+        renderItem={({ item }) => {
+          const isMe =
+            myUserId.length > 0 && item.user_id != null && String(item.user_id) === myUserId;
+          return (
+            <View
+              style={[
+                styles.bubble,
+                isMe ? styles.bubbleMe : styles.bubbleOther,
+              ]}
+            >
+              <Text style={[styles.msg, isMe && styles.msgMe]}>{item.content}</Text>
+              <Text style={[styles.time, isMe && styles.timeMe]}>
+                {dayjs(item.created_at).format('h:mm A')}
+              </Text>
+            </View>
+          );
+        }}
       />
       <View style={styles.composer}>
         <TextInput
@@ -129,15 +145,25 @@ const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   list: { padding: 12, paddingBottom: 8 },
   bubble: {
-    alignSelf: 'flex-start',
     maxWidth: '90%',
-    backgroundColor: '#fff',
     padding: 10,
     borderRadius: 10,
     marginBottom: 8,
   },
-  msg: { fontSize: 15 },
+  bubbleOther: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  bubbleMe: {
+    alignSelf: 'flex-end',
+    backgroundColor: '#1a1a2e',
+  },
+  msg: { fontSize: 15, color: '#111' },
+  msgMe: { color: '#fff' },
   time: { fontSize: 10, color: '#888', marginTop: 4 },
+  timeMe: { color: '#ccc' },
   composer: { flexDirection: 'row', padding: 8, gap: 8, borderTopWidth: 1, borderColor: '#ddd' },
   input: {
     flex: 1,
