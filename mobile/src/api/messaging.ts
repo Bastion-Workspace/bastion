@@ -2,11 +2,25 @@ import { apiRequest } from './client';
 import { wsUrlFromHttpBase } from './config';
 import { getStoredToken } from '../session/tokenStore';
 
+export type RoomParticipant = {
+  user_id: string;
+  username?: string | null;
+  display_name?: string | null;
+  avatar_url?: string | null;
+};
+
+/** Matches GET /api/messaging/rooms when include_participants=true. */
 export type Room = {
   room_id: string;
   room_name?: string | null;
+  /** Legacy / alternate field name */
   name?: string | null;
+  /** Server-computed label (direct rooms = other user; else room_name or fallback). */
+  display_name?: string | null;
+  room_type?: string | null;
   last_message_at?: string | null;
+  message_count?: number;
+  participants?: RoomParticipant[];
 };
 
 export async function getUserRooms(limit = 50): Promise<Room[]> {

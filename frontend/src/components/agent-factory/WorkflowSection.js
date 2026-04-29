@@ -203,6 +203,7 @@ export default function WorkflowSection({
       ? (String(step.condition).length > 32 ? String(step.condition).slice(0, 32) + '…' : step.condition)
       : null;
     const pc = typeof parallelChildCount === 'number' ? parallelChildCount : (step.parallel_steps || []).length;
+    const stepDisabled = step.enabled === false;
 
     return (
       <>
@@ -237,6 +238,9 @@ export default function WorkflowSection({
               </Typography>
             </Box>
             <Chip size="small" label={label} sx={{ fontWeight: 500 }} />
+            {stepDisabled && (
+              <Chip size="small" color="default" variant="outlined" label="Off" sx={{ flexShrink: 0 }} />
+            )}
             <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
               {actionName}
             </Typography>
@@ -307,6 +311,7 @@ export default function WorkflowSection({
   const stepCardPaperSx = (step, isDragging) => {
     const { bg } = stepTypeInfo(step);
     const hasCondition = !!(step.condition && String(step.condition).trim());
+    const stepDisabled = step.enabled === false;
     return {
       width: '100%',
       bgcolor: bg,
@@ -314,6 +319,7 @@ export default function WorkflowSection({
       overflow: 'hidden',
       boxShadow: isDragging ? 2 : 0,
       ...(hasCondition && { borderStyle: 'dashed', borderWidth: 1.5 }),
+      ...(stepDisabled && { opacity: 0.72 }),
     };
   };
 
@@ -447,15 +453,19 @@ export default function WorkflowSection({
                                   const childInfo = stepTypeInfo(child);
                                   const ChildIcon = childInfo.Icon;
                                   const childName = child.name || child.output_key || child.action || `Step ${cIdx + 1}`;
+                                  const childOff = child.enabled === false;
                                   return (
                                     <ListItemButton
                                       key={cIdx}
                                       onClick={() => !readOnly && onStepClick && onStepClick(cIdx, child, { parentLoopIndex: idx })}
-                                      sx={{ py: 0.75, borderRadius: 1 }}
+                                      sx={{ py: 0.75, borderRadius: 1, ...(childOff && { opacity: 0.72 }) }}
                                     >
                                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
                                         <ChildIcon sx={{ fontSize: 16, color: 'text.secondary' }} />
                                         <Chip size="small" label={childInfo.label} sx={{ fontWeight: 500 }} />
+                                        {childOff && (
+                                          <Chip size="small" variant="outlined" label="Off" sx={{ flexShrink: 0 }} />
+                                        )}
                                         <Typography variant="body2" noWrap sx={{ flex: 1 }}>
                                           {childName}
                                         </Typography>
@@ -537,14 +547,16 @@ export default function WorkflowSection({
                                       const childInfo = stepTypeInfo(child);
                                       const ThenIcon = childInfo.Icon;
                                       const childName = child.name || child.output_key || child.action || `Step ${cIdx + 1}`;
+                                      const childOff = child.enabled === false;
                                       return (
                                         <ListItemButton
                                           key={cIdx}
                                           onClick={() => !readOnly && onStepClick && onStepClick(cIdx, child, { parentBranchIndex: idx, branchPath: 'then' })}
-                                          sx={{ py: 0.5, px: 0, minHeight: 32 }}
+                                          sx={{ py: 0.5, px: 0, minHeight: 32, ...(childOff && { opacity: 0.72 }) }}
                                         >
                                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, width: '100%' }}>
                                             <ThenIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+                                            {childOff && <Chip size="small" variant="outlined" label="Off" sx={{ height: 20, fontSize: '0.65rem' }} />}
                                             <Typography variant="body2" noWrap sx={{ flex: 1 }}>{childName}</Typography>
                                           </Box>
                                         </ListItemButton>
@@ -562,14 +574,16 @@ export default function WorkflowSection({
                                       const childInfo = stepTypeInfo(child);
                                       const ElseIcon = childInfo.Icon;
                                       const childName = child.name || child.output_key || child.action || `Step ${cIdx + 1}`;
+                                      const childOff = child.enabled === false;
                                       return (
                                         <ListItemButton
                                           key={cIdx}
                                           onClick={() => !readOnly && onStepClick && onStepClick(cIdx, child, { parentBranchIndex: idx, branchPath: 'else' })}
-                                          sx={{ py: 0.5, px: 0, minHeight: 32 }}
+                                          sx={{ py: 0.5, px: 0, minHeight: 32, ...(childOff && { opacity: 0.72 }) }}
                                         >
                                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, width: '100%' }}>
                                             <ElseIcon sx={{ fontSize: 14, color: 'text.secondary' }} />
+                                            {childOff && <Chip size="small" variant="outlined" label="Off" sx={{ height: 20, fontSize: '0.65rem' }} />}
                                             <Typography variant="body2" noWrap sx={{ flex: 1 }}>{childName}</Typography>
                                           </Box>
                                         </ListItemButton>

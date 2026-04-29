@@ -16,6 +16,9 @@ export type StreamOrchestratorParams = {
   session_id?: string;
   user_chat_model?: string;
   agent_profile_id?: string;
+  /** Same shape as web: active document for orchestrator context (filename, content, …). */
+  active_editor?: Record<string, unknown> | null;
+  editor_preference?: string | null;
   signal?: AbortSignal;
   onChunk: (chunk: StreamChunk) => void;
 };
@@ -29,6 +32,8 @@ export async function streamOrchestrator({
   session_id = 'bastion-mobile',
   user_chat_model,
   agent_profile_id,
+  active_editor,
+  editor_preference,
   signal,
   onChunk,
 }: StreamOrchestratorParams): Promise<void> {
@@ -38,7 +43,7 @@ export async function streamOrchestrator({
     throw new Error('Not authenticated');
   }
 
-  const body = {
+  const body: Record<string, unknown> = {
     query,
     conversation_id,
     session_id,
@@ -46,6 +51,10 @@ export async function streamOrchestrator({
     user_chat_model: user_chat_model || undefined,
     agent_profile_id: agent_profile_id || undefined,
   };
+  if (active_editor && Object.keys(active_editor).length > 0) {
+    body.active_editor = active_editor;
+    body.editor_preference = editor_preference ?? 'prefer';
+  }
 
   const res = await fetch(`${base}/api/async/orchestrator/stream`, {
     method: 'POST',

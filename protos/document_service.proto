@@ -91,7 +91,29 @@ service DocumentService {
 
   rpc FlushCollaborativeDocument(FlushCollaborativeDocumentRequest) returns (FlushCollaborativeDocumentResponse);
   rpc ScanAndRecoverFiles(JsonToolRequest) returns (JsonToolResponse);
-  // Backend facade: JSON dispatch to document-service ParallelDocumentService (metadata, imports, ZIP ops).
+
+  // Typed admin / facade operations (payload_json matches former DocumentMirror bodies without "action").
+  rpc AdminGetDocument(JsonToolRequest) returns (JsonToolResponse);
+  rpc CheckDocumentExists(JsonToolRequest) returns (JsonToolResponse);
+  rpc ListDocuments(JsonToolRequest) returns (JsonToolResponse);
+  rpc FilterDocuments(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetDocumentStatus(JsonToolRequest) returns (JsonToolResponse);
+  rpc UpdateDocumentMetadataAdmin(JsonToolRequest) returns (JsonToolResponse);
+  rpc BulkCategorizeDocuments(JsonToolRequest) returns (JsonToolResponse);
+  rpc DeleteDocumentDatabaseOnly(JsonToolRequest) returns (JsonToolResponse);
+  rpc CleanupOrphanedEmbeddings(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetDuplicateDocuments(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetDocumentsStats(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetDocumentCategoriesOverview(JsonToolRequest) returns (JsonToolResponse);
+  rpc ImportFromUrl(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetDocumentsWithHierarchy(JsonToolRequest) returns (JsonToolResponse);
+  rpc GetZipHierarchy(JsonToolRequest) returns (JsonToolResponse);
+  rpc DeleteZipWithChildren(JsonToolRequest) returns (JsonToolResponse);
+  rpc ProcessUrlAsync(JsonToolRequest) returns (JsonToolResponse);
+  rpc ResumeIncompleteProcessing(JsonToolRequest) returns (JsonToolResponse);
+  rpc RemoveTeamUploadDirectory(JsonToolRequest) returns (JsonToolResponse);
+
+  // Deprecated: use typed Admin* RPCs above. Kept for backwards compatibility during rollout.
   rpc DocumentMirror(JsonToolRequest) returns (JsonToolResponse);
 }
 

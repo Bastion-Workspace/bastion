@@ -1,7 +1,8 @@
 """
 Document Service gRPC Client
 
-Entity extraction (spaCy), upload/reprocess, and Phase 2 file/folder I/O via gRPC.
+Entity extraction (spaCy), upload/reprocess, Phase 2 document/search/folder/file I/O,
+typed admin JSON RPCs, and streaming helpers via gRPC.
 """
 
 import json
@@ -515,9 +516,142 @@ class DocumentServiceClient:
     async def document_mirror_json(
         self, user_id: str, payload: Dict[str, Any], *, timeout: float = 600.0
     ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
-        """Dispatch to document-service DocumentMirror (metadata, URL reprocess, ZIP helpers)."""
+        """Deprecated: prefer typed admin_*_json methods. DocumentMirror JSON dispatch."""
         return await self.json_tool_call(
             self.stub.DocumentMirror, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def admin_get_document_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.AdminGetDocument, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def check_document_exists_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.CheckDocumentExists, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def list_documents_admin_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.ListDocuments, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def filter_documents_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 180.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.FilterDocuments, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def get_document_status_admin_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.GetDocumentStatus, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def update_document_metadata_admin_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.UpdateDocumentMetadataAdmin, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def bulk_categorize_documents_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 300.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.BulkCategorizeDocuments, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def delete_document_database_only_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.DeleteDocumentDatabaseOnly, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def cleanup_orphaned_embeddings_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 600.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.CleanupOrphanedEmbeddings, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def get_duplicate_documents_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 300.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.GetDuplicateDocuments, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def get_documents_stats_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.GetDocumentsStats, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def get_document_categories_overview_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.GetDocumentCategoriesOverview, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def import_from_url_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.ImportFromUrl, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def get_documents_with_hierarchy_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.GetDocumentsWithHierarchy, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def get_zip_hierarchy_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.GetZipHierarchy, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def delete_zip_with_children_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 300.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.DeleteZipWithChildren, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def process_url_async_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 30.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.ProcessUrlAsync, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def resume_incomplete_processing_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 600.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.ResumeIncompleteProcessing, user_id=user_id, payload=payload, timeout=timeout
+        )
+
+    async def remove_team_upload_directory_json(
+        self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Optional[str]]:
+        return await self.json_tool_call(
+            self.stub.RemoveTeamUploadDirectory, user_id=user_id, payload=payload, timeout=timeout
         )
 
     async def get_document_grpc(

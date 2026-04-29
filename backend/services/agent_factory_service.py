@@ -747,6 +747,11 @@ def _step_exclusive_set(step: Dict[str, Any]) -> bool:
     return bool(step.get("exclusive"))
 
 
+def _step_is_disabled(step: Dict[str, Any]) -> bool:
+    """True when the step explicitly sets enabled to False (JSON false)."""
+    return step.get("enabled") is False
+
+
 def _step_type_for_exclusive_warn(step: Dict[str, Any]) -> str:
     return str(step.get("step_type") or step.get("type") or "").strip().lower()
 
@@ -772,11 +777,13 @@ def _warn_missing_exclusive(steps: List[Any], warnings: List[str]) -> None:
             s = steps[j]
             if not isinstance(s, dict) or not _step_has_nonempty_condition(s) or _step_exclusive_set(s):
                 break
+            if _step_is_disabled(s):
+                break
             run_indices.append(j)
             j += 1
         if len(run_indices) >= 2 and j < n:
             nxt = steps[j]
-            if isinstance(nxt, dict) and not _step_has_nonempty_condition(nxt):
+            if isinstance(nxt, dict) and not _step_has_nonempty_condition(nxt) and not _step_is_disabled(nxt):
                 if not all(_step_type_for_exclusive_warn(steps[k]) == "branch" for k in run_indices):
                     names: List[str] = []
                     for k in run_indices:
@@ -827,6 +834,9 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
                 warnings.append(f"{label}: missing 'step_type'")
             elif step_type not in VALID_STEP_TYPES:
                 warnings.append(f"{label}: invalid step_type '{step_type}'")
+
+            if "enabled" in step and step.get("enabled") is not None and not isinstance(step.get("enabled"), bool):
+                warnings.append(f"{label}: 'enabled' must be a boolean when set (JSON true/false)")
 
             # Guardrails for common authoring mistakes discovered in the wild.
             if "loop_over" in step:

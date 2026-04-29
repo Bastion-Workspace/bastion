@@ -573,6 +573,40 @@ def _evaluate_condition(
     return False
 
 
+def is_playbook_step_disabled(step: Dict[str, Any]) -> bool:
+    """True only when the step dict explicitly sets enabled to False (JSON false)."""
+    return step.get("enabled") is False
+
+
+def playbook_step_skip_assignments(
+    step: Dict[str, Any],
+    playbook_state: Dict[str, Any],
+    inputs: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    If the step should not run (disabled, or condition false), return playbook_state keys
+    to merge: each maps to {_skipped: True, _reason: ...}. Empty dict means run the step.
+    Evaluates enabled before condition; when disabled, condition is not evaluated.
+    """
+    name = step.get("name", "") or ""
+    output_key = step.get("output_key")
+    if is_playbook_step_disabled(step):
+        sentinel: Dict[str, Any] = {"_skipped": True, "_reason": "disabled"}
+    else:
+        condition = step.get("condition")
+        if condition and not _evaluate_condition(condition, playbook_state, inputs):
+            sentinel = {"_skipped": True, "_reason": "condition"}
+        else:
+            return {}
+    out: Dict[str, Any] = {}
+    key = output_key or name
+    if key:
+        out[key] = sentinel
+    if name:
+        out[name] = sentinel
+    return out
+
+
 def _get_input_types_for_action(action_name: str) -> Dict[str, str]:
     """Return input field name -> type from Action I/O Registry, or empty dict."""
     from orchestrator.utils.action_io_registry import get_action
@@ -2577,6 +2611,11 @@ async def execute_pipeline(
                 skip_until_resumed = False
             continue
 
+        skip_updates = playbook_step_skip_assignments(step, playbook_state, inputs)
+        if skip_updates:
+            playbook_state.update(skip_updates)
+            continue
+
         if step_type == "approval":
             preview = playbook_state.get(output_key or name) if (output_key or name) else None
             return playbook_state, {
@@ -2622,10 +2661,15 @@ async def execute_pipeline(
             async def _run_one(child: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
                 st = _step_type(child)
                 child_ps = dict(playbook_state)
+                child_skip = playbook_step_skip_assignments(child, child_ps, inputs_ref)
+                if child_skip:
+                    return child, next(iter(child_skip.values()))
                 if st == "llm_task":
                     result = await _execute_llm_step(child, child_ps, inputs_ref, user_id_ref, metadata=metadata_ref)
                 elif st == "llm_agent":
                     result = await _execute_llm_agent_step(child, child_ps, inputs_ref, user_id_ref, metadata=metadata_ref)
+                elif st == "deep_agent":
+                    result = await _execute_deep_agent_step(child, child_ps, inputs_ref, user_id_ref, metadata=metadata_ref)
                 else:
                     result = await execute_step(child, child_ps, inputs_ref, user_id=user_id_ref, metadata=metadata_ref)
                 return child, result
@@ -2654,15 +2698,6 @@ async def execute_pipeline(
                 playbook_state.update(child_state)
                 if child_pending:
                     return playbook_state, child_pending
-            continue
-
-        condition = step.get("condition")
-        if condition and not _evaluate_condition(condition, playbook_state, inputs):
-            key = step.get("output_key") or name
-            if key:
-                playbook_state[key] = {"_skipped": True}
-            if name:
-                playbook_state[name] = {"_skipped": True}
             continue
 
         logger.info(

@@ -61,6 +61,28 @@ export function assertApiBaseUrl(): string {
   return base;
 }
 
+/** Turn a relative `/api/...` path into an absolute URL for images and links. */
+export function resolveAbsoluteApiUrl(pathOrUrl: string): string {
+  const s = (pathOrUrl || '').trim();
+  if (!s) return '';
+  if (/^https?:\/\//i.test(s)) return s;
+  const base = getApiBaseUrl();
+  if (!base) return s;
+  if (s.startsWith('/')) return `${base}${s}`;
+  return s;
+}
+
+/** Rewrite markdown/HTML so asset paths use the configured API origin. */
+export function absolutizeMessageMediaRefs(content: string): string {
+  const base = getApiBaseUrl();
+  if (!base || !content) return content;
+  let out = content;
+  out = out.replace(/]\(\//g, `](${base}/`);
+  out = out.replace(/src="(\/[^"]+)"/gi, (_m, p: string) => `src="${base}${p}"`);
+  out = out.replace(/src='(\/[^']+)'/gi, (_m, p: string) => `src='${base}${p}'`);
+  return out;
+}
+
 export function wsUrlFromHttpBase(pathWithLeadingSlash: string, query: Record<string, string>): string {
   const base = assertApiBaseUrl();
   const u = new URL(base);

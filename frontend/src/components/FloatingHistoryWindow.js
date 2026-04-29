@@ -26,10 +26,10 @@ import {
   Close,
   Search,
   PushPin,
-  Chat,
   MoreVert,
   Delete,
 } from '@mui/icons-material';
+import { alpha, useTheme } from '@mui/material/styles';
 import { useQuery, useQueryClient } from 'react-query';
 import apiService from '../services/apiService';
 
@@ -37,12 +37,13 @@ const FloatingHistoryWindow = ({
   onClose, 
   onSelectConversation, 
   onNewChat,
-  onClearCurrentConversation, // Add prop to handle clearing current conversation
+  onClearCurrentConversation,
   activeConversationId,
   anchorEl,
   anchorOrigin = { vertical: 'top', horizontal: 'left' },
   transformOrigin = { vertical: 'top', horizontal: 'right' }
 }) => {
+  const theme = useTheme();
   const [searchQuery, setSearchQuery] = useState('');
   const [filteredConversations, setFilteredConversations] = useState([]);
   const [menuAnchorEl, setMenuAnchorEl] = useState(null);
@@ -317,14 +318,6 @@ const FloatingHistoryWindow = ({
               Chats
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Button
-                variant="contained"
-                size="small"
-                onClick={onNewChat}
-                sx={{ py: 0.5 }}
-              >
-                New
-              </Button>
               {filteredConversations.length > 0 && (
                 <Button
                   variant="outlined"
@@ -375,7 +368,10 @@ const FloatingHistoryWindow = ({
               </Box>
             ) : (
               <List sx={{ p: 0 }}>
-                {filteredConversations.map((conversation, index) => (
+                {filteredConversations.map((conversation, index) => {
+                  const isActive = activeConversationId != null &&
+                    String(conversation.conversation_id) === String(activeConversationId);
+                  return (
                   <React.Fragment key={conversation.conversation_id}>
                     <ListItem sx={{ p: 0 }}>
                       <ListItemButton
@@ -383,7 +379,18 @@ const FloatingHistoryWindow = ({
                         sx={{
                           py: 1.5,
                           px: 2,
-                          '&:hover': { backgroundColor: 'action.hover' },
+                          boxSizing: 'border-box',
+                          borderLeftWidth: 3,
+                          borderLeftStyle: 'solid',
+                          borderLeftColor: isActive ? 'primary.main' : 'transparent',
+                          bgcolor: isActive
+                            ? alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.16 : 0.12)
+                            : 'transparent',
+                          '&:hover': {
+                            backgroundColor: isActive
+                              ? alpha(theme.palette.primary.main, theme.palette.mode === 'dark' ? 0.22 : 0.16)
+                              : 'action.hover',
+                          },
                         }}
                       >
                         <ListItemText
@@ -431,7 +438,8 @@ const FloatingHistoryWindow = ({
                       <Divider sx={{ mx: 2 }} />
                     )}
                   </React.Fragment>
-                ))}
+                );
+                })}
               </List>
             )}
           </Box>
@@ -472,6 +480,13 @@ const FloatingHistoryWindow = ({
             Are you sure you want to delete "{selectedConversation?.title || 'Untitled Conversation'}"? 
             This action cannot be undone and will permanently remove all messages in this conversation.
           </Typography>
+          {activeConversationId != null &&
+            selectedConversation &&
+            String(selectedConversation.conversation_id) === String(activeConversationId) && (
+            <Typography variant="body2" color="primary" sx={{ mt: 1.5 }}>
+              This is the conversation currently open in the sidebar.
+            </Typography>
+          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={handleDeleteCancel} disabled={isDeleting}>

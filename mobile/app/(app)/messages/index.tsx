@@ -10,10 +10,32 @@ import {
 } from 'react-native';
 import dayjs from 'dayjs';
 import { useRouter } from 'expo-router';
-import { getUserRooms, type Room } from '../../../src/api/messaging';
+import { getUserRooms, type Room, type RoomParticipant } from '../../../src/api/messaging';
+import { useAuth } from '../../../src/context/AuthContext';
+
+function roomTitle(room: Room): string {
+  const d = room.display_name?.trim();
+  if (d) return d;
+  const n = room.room_name?.trim() || room.name?.trim();
+  if (n) return n;
+  return 'Chat';
+}
+
+function participantSubtitle(room: Room, myUserId: string | undefined): string | null {
+  const parts = room.participants;
+  if (!parts?.length) return null;
+  const names = parts.map((p: RoomParticipant) => {
+    if (myUserId && p.user_id === myUserId) return 'You';
+    return (p.display_name || p.username || 'Member').trim();
+  });
+  const unique = [...new Set(names)];
+  return unique.join(', ');
+}
 
 export default function MessagesListScreen() {
   const router = useRouter();
+  const { user } = useAuth();
+  const myUserId = typeof user?.user_id === 'string' ? user.user_id : undefined;
   const [rooms, setRooms] = useState<Room[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -68,17 +90,21 @@ export default function MessagesListScreen() {
         ) : null
       }
       ListEmptyComponent={<Text style={styles.empty}>No rooms yet.</Text>}
-      renderItem={({ item }) => (
-        <Pressable
-          style={styles.row}
-          onPress={() => router.push(`/messages/${item.room_id}`)}
-        >
-          <Text style={styles.title}>{item.room_name || item.name || 'Room'}</Text>
-          {item.last_message_at ? (
-            <Text style={styles.sub}>{dayjs(item.last_message_at).fromNow()}</Text>
-          ) : null}
-        </Pressable>
-      )}
+      renderItem={({ item }) => {
+        const sub = participantSubtitle(item, myUserId);
+        return (
+          <Pressable
+            style={styles.row}
+            onPress={() => router.push(`/messages/${item.room_id}`)}
+          >
+            <Text style={styles.title}>{roomTitle(item)}</Text>
+            {sub ? <Text style={styles.participants}>{sub}</Text> : null}
+            {item.last_message_at ? (
+              <Text style={styles.sub}>{dayjs(item.last_message_at).fromNow()}</Text>
+            ) : null}
+          </Pressable>
+        );
+      }}
     />
   );
 }
@@ -104,5 +130,6 @@ const styles = StyleSheet.create({
     borderColor: '#e0e0e0',
   },
   title: { fontSize: 16, fontWeight: '600' },
+  participants: { fontSize: 13, color: '#555', marginTop: 2 },
   sub: { fontSize: 12, color: '#666', marginTop: 4 },
 });

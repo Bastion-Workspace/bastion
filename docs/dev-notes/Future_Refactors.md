@@ -59,7 +59,7 @@ Large files increase merge conflicts, slow code review, and hide boundaries betw
 | `ds_services/folder_service.py` | ~1700 | Folder operations |
 | `ds_langgraph_tools/document_editing_tools.py` | ~1500 | Editing tools; mirror backend/orchestrator boundaries |
 | `ds_processing/parallel_document_processor.py` | ~1200 | Parallel ingest |
-| `ds_handlers/phase2_handlers.py` | ~1100 | gRPC phase-2 handlers |
+| `ds_handlers/folder_crud_handlers_mixin.py` (and sibling phase-2 mixins) | ~450 each | gRPC phase-2 handlers split from former `phase2_handlers.py` |
 | `ds_services/knowledge_graph_service.py` | ~1100 | KG operations |
 | `ds_services/file_manager_service.py` | ~1100 | File manager |
 | `ds_clients/vector_service_client.py` | ~990 | Vector client |

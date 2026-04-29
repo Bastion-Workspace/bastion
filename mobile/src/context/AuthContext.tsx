@@ -11,7 +11,7 @@ import { getApiBaseUrl, normalizeBastionOrigin, setRuntimeApiBaseUrl } from '../
 import { getStoredBaseUrl, setStoredBaseUrl } from '../session/baseUrlStore';
 import { clearStoredToken, getStoredToken } from '../session/tokenStore';
 
-type AuthContextValue = {
+export type AuthContextValue = {
   token: string | null;
   user: Record<string, unknown> | null;
   isReady: boolean;

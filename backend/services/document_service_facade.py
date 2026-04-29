@@ -102,11 +102,7 @@ class DocumentServiceFacade:
         await dsc.initialize(required=True)
         if not skip_incomplete_resume:
             try:
-                ok, _, err = await dsc.document_mirror_json(
-                    "",
-                    {"action": "resume_incomplete_processing"},
-                    timeout=600.0,
-                )
+                ok, _, err = await dsc.resume_incomplete_processing_json("", {}, timeout=600.0)
                 if not ok:
                     logger.warning("document-service resume_incomplete_processing: %s", err)
             except Exception as e:
@@ -116,20 +112,18 @@ class DocumentServiceFacade:
     async def close(self) -> None:
         logger.debug("DocumentServiceFacade.close (no-op; shared resources owned by container)")
 
-    async def _mirror(self, user_id: str, payload: Dict[str, Any], *, timeout: float = 120.0) -> Dict[str, Any]:
+    async def _admin_json(self, call_coro, rpc_label: str) -> Dict[str, Any]:
         t0 = time.monotonic()
-        dsc = self._dsc_get()
-        await dsc.initialize(required=True)
-        ok, data, err = await dsc.document_mirror_json(user_id or "", payload, timeout=timeout)
+        ok, data, err = await call_coro
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.debug(
-            "DS_CALL_LATENCY action=%s elapsed_ms=%.1f ok=%s",
-            payload.get("action"),
+            "DS_CALL_LATENCY rpc=%s elapsed_ms=%.1f ok=%s",
+            rpc_label,
             elapsed_ms,
             ok,
         )
         if not ok:
-            raise RuntimeError(err or "DocumentMirror failed")
+            raise RuntimeError(err or f"{rpc_label} failed")
         return data or {}
 
     async def _emit_document_status_update(
@@ -175,7 +169,11 @@ class DocumentServiceFacade:
         hit = self._cache_get_hit(document_id)
         if hit is not _DOC_CACHE_MISS:
             return hit
-        data = await self._mirror("", {"action": "get_document", "document_id": document_id})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.admin_get_document_json("", {"document_id": document_id}),
+            "AdminGetDocument",
+        )
         raw = data.get("document")
         if not raw:
             self._cache_set(document_id, None)
@@ -185,24 +183,40 @@ class DocumentServiceFacade:
         return doc
 
     async def check_document_exists(self, doc_id: str) -> bool:
-        data = await self._mirror("", {"action": "check_document_exists", "doc_id": doc_id})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.check_document_exists_json("", {"doc_id": doc_id}),
+            "CheckDocumentExists",
+        )
         return bool(data.get("exists"))
 
     async def list_documents(self, skip: int = 0, limit: int = 100) -> List[DocumentInfo]:
-        data = await self._mirror("", {"action": "list_documents", "skip": skip, "limit": limit})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.list_documents_admin_json("", {"skip": skip, "limit": limit}),
+            "ListDocuments",
+        )
         docs = data.get("documents") or []
         return [DocumentInfo.model_validate(d) for d in docs]
 
     async def filter_documents(self, filter_request: DocumentFilterRequest) -> DocumentListResponse:
-        payload = {
-            "action": "filter_documents",
-            "filter_request": filter_request.model_dump(mode="json"),
-        }
-        data = await self._mirror("", payload, timeout=180.0)
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.filter_documents_json(
+                "",
+                {"filter_request": filter_request.model_dump(mode="json")},
+                timeout=180.0,
+            ),
+            "FilterDocuments",
+        )
         return DocumentListResponse.model_validate(data["response"])
 
     async def get_document_status(self, doc_id: str) -> Optional[DocumentStatus]:
-        data = await self._mirror("", {"action": "get_document_status", "doc_id": doc_id})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.get_document_status_admin_json("", {"doc_id": doc_id}),
+            "GetDocumentStatus",
+        )
         st = data.get("status")
         if not st:
             return None
@@ -211,41 +225,55 @@ class DocumentServiceFacade:
     async def update_document_metadata(
         self, document_id: str, update_request: DocumentUpdateRequest
     ) -> bool:
-        data = await self._mirror(
-            "",
-            {
-                "action": "update_document_metadata",
-                "document_id": document_id,
-                "update_request": update_request.model_dump(mode="json"),
-            },
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.update_document_metadata_admin_json(
+                "",
+                {
+                    "document_id": document_id,
+                    "update_request": update_request.model_dump(mode="json"),
+                },
+            ),
+            "UpdateDocumentMetadataAdmin",
         )
         self._cache_invalidate(document_id)
         return bool(data.get("success"))
 
     async def bulk_categorize_documents(self, bulk_request: BulkCategorizeRequest) -> BulkOperationResponse:
-        data = await self._mirror(
-            "",
-            {
-                "action": "bulk_categorize_documents",
-                "bulk_request": bulk_request.model_dump(mode="json"),
-            },
-            timeout=300.0,
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.bulk_categorize_documents_json(
+                "",
+                {"bulk_request": bulk_request.model_dump(mode="json")},
+                timeout=300.0,
+            ),
+            "BulkCategorizeDocuments",
         )
         return BulkOperationResponse.model_validate(data["response"])
 
     async def delete_document_database_only(self, document_id: str) -> bool:
-        data = await self._mirror(
-            "", {"action": "delete_document_database_only", "document_id": document_id}
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.delete_document_database_only_json("", {"document_id": document_id}),
+            "DeleteDocumentDatabaseOnly",
         )
         self._cache_invalidate(document_id)
         return bool(data.get("success"))
 
     async def cleanup_orphaned_embeddings(self) -> int:
-        data = await self._mirror("", {"action": "cleanup_orphaned_embeddings"}, timeout=600.0)
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.cleanup_orphaned_embeddings_json("", {}, timeout=600.0),
+            "CleanupOrphanedEmbeddings",
+        )
         return int(data.get("cleaned_count", 0))
 
     async def get_duplicate_documents(self) -> Dict[str, List[DocumentInfo]]:
-        data = await self._mirror("", {"action": "get_duplicate_documents"}, timeout=300.0)
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.get_duplicate_documents_json("", {}, timeout=300.0),
+            "GetDuplicateDocuments",
+        )
         out: Dict[str, List[DocumentInfo]] = {}
         for k, v in (data.get("duplicates") or {}).items():
             if isinstance(v, list):
@@ -253,43 +281,66 @@ class DocumentServiceFacade:
         return out
 
     async def get_documents_stats(self) -> Dict[str, Any]:
-        data = await self._mirror("", {"action": "get_documents_stats"})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.get_documents_stats_json("", {}),
+            "GetDocumentsStats",
+        )
         return dict(data.get("stats") or {})
 
     async def get_document_categories_overview(self) -> DocumentCategoriesResponse:
-        data = await self._mirror("", {"action": "get_document_categories_overview"})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.get_document_categories_overview_json("", {}),
+            "GetDocumentCategoriesOverview",
+        )
         return DocumentCategoriesResponse.model_validate(data["overview"])
 
     async def import_from_url(self, url: str, content_type: str = "html") -> DocumentUploadResponse:
-        data = await self._mirror(
-            "",
-            {"action": "import_from_url", "url": url, "content_type": content_type},
-            timeout=120.0,
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.import_from_url_json(
+                "",
+                {"url": url, "content_type": content_type},
+                timeout=120.0,
+            ),
+            "ImportFromUrl",
         )
         return DocumentUploadResponse.model_validate(data["upload"])
 
     async def get_documents_with_hierarchy(self, limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-        data = await self._mirror(
-            "",
-            {"action": "get_documents_with_hierarchy", "limit": limit, "offset": offset},
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.get_documents_with_hierarchy_json(
+                "",
+                {"limit": limit, "offset": offset},
+            ),
+            "GetDocumentsWithHierarchy",
         )
         return dict(data.get("data") or {})
 
     async def get_zip_hierarchy(self, document_id: str) -> Dict[str, Any]:
-        data = await self._mirror("", {"action": "get_zip_hierarchy", "document_id": document_id})
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.get_zip_hierarchy_json("", {"document_id": document_id}),
+            "GetZipHierarchy",
+        )
         return dict(data.get("data") or {})
 
     async def delete_zip_with_children(
         self, parent_document_id: str, delete_children: bool = True
     ) -> Dict[str, Any]:
-        data = await self._mirror(
-            "",
-            {
-                "action": "delete_zip_with_children",
-                "parent_document_id": parent_document_id,
-                "delete_children": delete_children,
-            },
-            timeout=300.0,
+        dsc = self._dsc_get()
+        data = await self._admin_json(
+            dsc.delete_zip_with_children_json(
+                "",
+                {
+                    "parent_document_id": parent_document_id,
+                    "delete_children": delete_children,
+                },
+                timeout=300.0,
+            ),
+            "DeleteZipWithChildren",
         )
         return dict(data.get("data") or {})
 
@@ -445,10 +496,9 @@ class DocumentServiceFacade:
     ) -> None:
         dsc = self._dsc_get()
         await dsc.initialize(required=True)
-        ok, _, err = await dsc.document_mirror_json(
+        ok, _, err = await dsc.process_url_async_json(
             user_id or "",
             {
-                "action": "process_url_async",
                 "document_id": document_id,
                 "url": url,
                 "content_type": content_type,

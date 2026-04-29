@@ -146,6 +146,7 @@ function sanitizeDefinition(def) {
     'agent_memory_policy',
     'history_policy',
     'exclusive',
+    'enabled',
   ];
   const PHASE_KEYS = [
     'name', 'type', 'prompt', 'search_tools', 'available_tools', 'strategy',
@@ -854,13 +855,15 @@ export default function PlaybookEditor({ playbookId }) {
       <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 2, flexWrap: 'wrap', gap: 1 }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <Tooltip title="Version history">
-            <IconButton
-              onClick={() => setVersionDrawerOpen(true)}
-              aria-label="Version history"
-              disabled={!playbookId}
-            >
-              <History />
-            </IconButton>
+            <span>
+              <IconButton
+                onClick={() => setVersionDrawerOpen(true)}
+                aria-label="Version history"
+                disabled={!playbookId}
+              >
+                <History />
+              </IconButton>
+            </span>
           </Tooltip>
           <Button
             size="small"

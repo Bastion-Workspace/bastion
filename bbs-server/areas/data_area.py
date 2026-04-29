@@ -7,8 +7,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List
 
 from rendering.paginator import paginate_text
-from rendering.tables import render_table
-from rendering.text import format_header_context, section_header, word_wrap
+from rendering.tables import (
+    fit_column_widths,
+    ordered_column_names,
+    render_table,
+    table_line_width,
+)
+from rendering.text import format_header_context, section_header
 
 if TYPE_CHECKING:
     from session import BBSSession
@@ -134,30 +139,154 @@ async def _tables_menu(session: "BBSSession", workspace_id: str, database_id: st
         if data.get("error"):
             await session._write(f"Error: {data['error'][:200]}\r\n")
             continue
-        rows_raw = data.get("rows") or []
-        lines_out: List[str] = []
-        for rd in rows_raw:
-            if isinstance(rd, dict):
-                row_data = rd.get("row_data") or rd
-                if isinstance(row_data, dict):
-                    for k, v in list(row_data.items())[:12]:
-                        lines_out.append(f"  {k}: {v}")
-            lines_out.append("  ---")
-        text = "\n".join(lines_out) if lines_out else "(empty)"
-        wlines = word_wrap(text, session.term_width - 2)
-        page_h = max(5, session.term_height - 3)
+        await _view_table_data_session(session, data)
 
-        async def wl(s: str) -> None:
-            await session._write(s)
 
-        await paginate_text(
-            wlines,
-            page_h,
-            t,
-            wl,
-            session.read_pager_key,
-            after_line_input_drain=session.drain_stray_line_terminators,
+def _parse_table_rows(rows_raw: List[Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for rd in rows_raw:
+        if isinstance(rd, dict):
+            row_data = rd.get("row_data") or rd
+            if isinstance(row_data, dict):
+                out.append(dict(row_data))
+    return out
+
+
+def _columns_fitting_terminal(
+    cols_full: List[str],
+    parsed: List[Dict[str, Any]],
+    term_width: int,
+) -> tuple[List[str], str | None]:
+    """
+    Use a prefix of cols_full so the rendered table fits term_width after width fitting.
+    Returns (columns_to_show, optional footer line).
+    """
+    if not cols_full:
+        return [], None
+    tw = max(40, term_width)
+    for k in range(len(cols_full), 0, -1):
+        use = cols_full[:k]
+        headers = ["#"] + use
+        display_rows = [
+            [str(i + 1)] + [str(r.get(c, "")) for c in use] for i, r in enumerate(parsed)
+        ]
+        widths = fit_column_widths(headers, display_rows, tw)
+        if table_line_width(len(headers), widths) <= tw:
+            if k < len(cols_full):
+                omitted = len(cols_full) - k
+                return use, f"... (+{omitted} columns not shown)"
+            return use, None
+    use = cols_full[:1]
+    headers = ["#"] + use
+    display_rows = [
+        [str(i + 1)] + [str(r.get(c, "")) for c in use] for i, r in enumerate(parsed)
+    ]
+    widths = fit_column_widths(headers, display_rows, tw)
+    note = None
+    if len(cols_full) > 1:
+        note = f"... (+{len(cols_full) - 1} columns not shown)"
+    return use, note
+
+
+async def _view_table_browse(
+    session: "BBSSession", rows_raw: List[Any], table_schema: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """Render dBASE-style horizontal table; return parsed rows for detail view."""
+    t = session.theme
+    parsed = _parse_table_rows(rows_raw)
+    if not parsed:
+        await session._write("\r\n(empty)\r\n")
+        return []
+
+    cols_full = ordered_column_names(table_schema, parsed)
+    if not cols_full:
+        await session._write("\r\n(no columns)\r\n")
+        return []
+
+    cols_use, width_note = _columns_fitting_terminal(cols_full, parsed, session.term_width)
+    headers = ["#"] + cols_use
+    display_rows = [
+        [str(i + 1)] + [str(r.get(c, "")) for c in cols_use]
+        for i, r in enumerate(parsed)
+    ]
+    widths = fit_column_widths(headers, display_rows, session.term_width)
+    tbl = render_table(headers, display_rows, col_widths=widths, max_width=session.term_width)
+    wlines = tbl.split("\n")
+    if width_note:
+        wlines.append(width_note)
+
+    page_h = max(5, session.term_height - 3)
+
+    async def wl(s: str) -> None:
+        await session._write(s)
+
+    await paginate_text(
+        wlines,
+        page_h,
+        t,
+        wl,
+        session.read_pager_key,
+        after_line_input_drain=session.drain_stray_line_terminators,
+    )
+    await session.drain_stray_line_terminators()
+    return parsed
+
+
+async def _view_row_detail(session: "BBSSession", row: Dict[str, Any]) -> None:
+    t = session.theme
+    tw = max(20, session.term_width - 2)
+    lines: List[str] = []
+    for k in sorted(row.keys()):
+        v = row[k]
+        s = f"  {k}: {v}"
+        if len(s) > tw:
+            s = s[: tw - 1] + "."
+        lines.append(s)
+    if not lines:
+        await session._write("\r\n(empty row)\r\n")
+        return
+    page_h = max(5, session.term_height - 3)
+
+    async def wl(s: str) -> None:
+        await session._write(s)
+
+    await paginate_text(
+        lines,
+        page_h,
+        t,
+        wl,
+        session.read_pager_key,
+        after_line_input_drain=session.drain_stray_line_terminators,
+    )
+    await session.drain_stray_line_terminators()
+
+
+async def _view_table_data_session(session: "BBSSession", data: Dict[str, Any]) -> None:
+    rows_raw = data.get("rows") or []
+    schema = data.get("table_schema") if isinstance(data.get("table_schema"), dict) else {}
+    t = session.theme
+    parsed = await _view_table_browse(session, rows_raw, schema)
+    if not parsed:
+        return
+    nrows = len(parsed)
+    while True:
+        await session._write(
+            f"\r\n{t.fg_bright_green}[#]{t.reset} record detail (1-{nrows})  "
+            f"{t.fg_bright_green}[B]{t.reset}ack to tables: "
         )
+        choice = (
+            await session.read_menu_choice(allow_digit_suffix=True)
+        ).strip().lower()
+        if choice in ("b", "back"):
+            break
+        if not choice.isdigit():
+            await session._write("\r\nInvalid choice.\r\n")
+            continue
+        idx = int(choice)
+        if idx < 1 or idx > nrows:
+            await session._write("\r\nRow out of range.\r\n")
+            continue
+        await _view_row_detail(session, parsed[idx - 1])
 
 
 async def _sql_prompt(session: "BBSSession", workspace_id: str) -> None:

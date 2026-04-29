@@ -28,6 +28,7 @@ from orchestrator.engines.pipeline_executor import (
     _evaluate_condition,
     _get_llm_for_pipeline,
     _resolve_inputs,
+    playbook_step_skip_assignments,
 )
 from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
 from orchestrator.engines.playbook_ui_progress import emit_playbook_ui_progress
@@ -348,18 +349,15 @@ class PlaybookGraphState(TypedDict, total=False):
 
 
 def _wrap_node_with_condition(step: Dict[str, Any], node_impl):
-    """Wrap a node so it is skipped when step.condition evaluates to false."""
+    """Wrap a node so it is skipped when step.enabled is false or step.condition evaluates to false."""
     async def _node(state: PlaybookGraphState) -> Dict[str, Any]:
-        cond = step.get("condition")
-        if cond:
-            ps = state.get("playbook_state") or {}
-            inputs = state.get("inputs") or {}
-            if not _evaluate_condition(cond, ps, inputs):
-                key = step.get("output_key") or step.get("name")
-                new_ps = {**(state.get("playbook_state") or {})}
-                if key:
-                    new_ps[key] = {"_skipped": True}
-                return {**state, "playbook_state": new_ps}
+        ps = state.get("playbook_state") or {}
+        inputs = state.get("inputs") or {}
+        skip_updates = playbook_step_skip_assignments(step, ps, inputs)
+        if skip_updates:
+            new_ps = {**(state.get("playbook_state") or {})}
+            new_ps.update(skip_updates)
+            return {**state, "playbook_state": new_ps}
         return await node_impl(state)
     return _node
 
@@ -849,10 +847,15 @@ def _make_parallel_node(step: Dict[str, Any]):
         async def _run_child(child: Dict[str, Any]) -> tuple:
             st = _step_type(child)
             child_ps = dict(ps)
+            child_skip = playbook_step_skip_assignments(child, child_ps, inputs)
+            if child_skip:
+                return child, next(iter(child_skip.values()))
             if st == "llm_task":
                 result = await _execute_llm_step(child, child_ps, inputs, user_id, metadata=metadata)
             elif st == "llm_agent":
                 result = await _execute_llm_agent_step(child, child_ps, inputs, user_id, metadata=metadata)
+            elif st == "deep_agent":
+                result = await _execute_deep_agent_step(child, child_ps, inputs, user_id, metadata=metadata)
             else:
                 result = await execute_step(child, child_ps, inputs, user_id=user_id, metadata=metadata)
             return child, result

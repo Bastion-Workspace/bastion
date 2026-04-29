@@ -154,6 +154,7 @@ class BastionSSHSession(asyncssh.SSHServerSession):
             session.term_height = self._th
             self._bbs = session
             session.apply_login_result(self._login_result)
+            await session.show_welcome()
             await session.run_after_authenticated()
         except asyncio.CancelledError:
             raise

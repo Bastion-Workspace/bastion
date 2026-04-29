@@ -1,15 +1,303 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Ionicons } from '@expo/vector-icons';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   FlatList,
+  Modal,
+  Platform,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { listUserDocuments, type DocumentInfo } from '../../../src/api/documents';
+import {
+  getFolderContents,
+  getFolderTree,
+  type DocumentFolderNode,
+  type FolderContentsApiResponse,
+  type FolderDocumentRow,
+  type FolderTreeApiResponse,
+} from '../../../src/api/folders';
+
+type ScopeFilter = 'all' | 'user' | 'team' | 'global';
+
+type StackEntry =
+  | { kind: 'roots' }
+  | { kind: 'folder'; folderId: string; title: string };
+
+function scopeLabel(s: ScopeFilter): string {
+  switch (s) {
+    case 'user':
+      return 'My';
+    case 'team':
+      return 'Team';
+    case 'global':
+      return 'Global';
+    default:
+      return 'All';
+  }
+}
+
+function filterRoots(roots: DocumentFolderNode[], scope: ScopeFilter): DocumentFolderNode[] {
+  if (scope === 'all') return roots;
+  return roots.filter((f) => (f.collection_type || 'user') === scope);
+}
+
+function FolderBrowseModal({
+  visible,
+  onClose,
+  onOpenDocument,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  onOpenDocument: (documentId: string, title: string) => void;
+}) {
+  const [scope, setScope] = useState<ScopeFilter>('all');
+  const [stack, setStack] = useState<StackEntry[]>([{ kind: 'roots' }]);
+  const [tree, setTree] = useState<FolderTreeApiResponse | null>(null);
+  const [treeError, setTreeError] = useState<string | null>(null);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const [contents, setContents] = useState<FolderContentsApiResponse | null>(null);
+  const [contentsLoading, setContentsLoading] = useState(false);
+  const [contentsError, setContentsError] = useState<string | null>(null);
+
+  const top = stack[stack.length - 1];
+  const atRoots = top.kind === 'roots';
+
+  const loadTree = useCallback(async () => {
+    setTreeError(null);
+    setTreeLoading(true);
+    try {
+      const res = await getFolderTree();
+      setTree(res);
+    } catch (e) {
+      setTreeError(e instanceof Error ? e.message : 'Failed to load folders');
+      setTree(null);
+    } finally {
+      setTreeLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    void loadTree();
+  }, [visible, loadTree]);
+
+  const openFolderId = visible && !atRoots && top.kind === 'folder' ? top.folderId : null;
+
+  useEffect(() => {
+    if (!visible) {
+      setStack([{ kind: 'roots' }]);
+      setScope('all');
+      setTree(null);
+      setTreeError(null);
+      setContents(null);
+      setContentsError(null);
+      setContentsLoading(false);
+      return;
+    }
+    if (openFolderId == null) {
+      setContents(null);
+      setContentsError(null);
+      setContentsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setContentsLoading(true);
+    setContentsError(null);
+    void (async () => {
+      try {
+        const c = await getFolderContents(openFolderId);
+        if (!cancelled) setContents(c);
+      } catch (e) {
+        if (!cancelled) {
+          setContentsError(e instanceof Error ? e.message : 'Failed to load folder');
+          setContents(null);
+        }
+      } finally {
+        if (!cancelled) setContentsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, openFolderId]);
+
+  const filteredRoots = useMemo(
+    () => filterRoots(tree?.folders ?? [], scope),
+    [tree, scope]
+  );
+
+  type FolderListRow = { type: 'subfolder'; sf: DocumentFolderNode } | { type: 'doc'; d: FolderDocumentRow };
+
+  const folderContentsRows = useMemo((): FolderListRow[] => {
+    if (!contents) return [];
+    return [
+      ...(contents.subfolders ?? []).map((sf) => ({ type: 'subfolder' as const, sf })),
+      ...(contents.documents ?? []).map((d) => ({ type: 'doc' as const, d })),
+    ];
+  }, [contents]);
+
+  function closeAndReset() {
+    setStack([{ kind: 'roots' }]);
+    setScope('all');
+    setContents(null);
+    setTreeError(null);
+    setContentsError(null);
+    onClose();
+  }
+
+  function goBack() {
+    if (stack.length <= 1) {
+      closeAndReset();
+      return;
+    }
+    setStack((s) => s.slice(0, -1));
+  }
+
+  const scopes: ScopeFilter[] = ['all', 'user', 'team', 'global'];
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="slide"
+      presentationStyle={Platform.OS === 'ios' ? 'pageSheet' : undefined}
+      onRequestClose={goBack}
+    >
+      <SafeAreaView style={styles.modalSafe} edges={['top', 'left', 'right']}>
+        <View style={styles.modalHeader}>
+          <Pressable onPress={goBack} hitSlop={12} style={styles.modalBackBtn} accessibilityRole="button">
+            <Ionicons name="chevron-back" size={28} color="#1a1a2e" />
+          </Pressable>
+          <Text style={styles.modalTitle} numberOfLines={1}>
+            {atRoots ? 'Browse folders' : top.kind === 'folder' ? top.title : 'Browse'}
+          </Text>
+          <Pressable onPress={closeAndReset} hitSlop={12} accessibilityRole="button" accessibilityLabel="Close">
+            <Ionicons name="close" size={26} color="#1a1a2e" />
+          </Pressable>
+        </View>
+
+        {atRoots ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.scopeScroll}
+            contentContainerStyle={styles.scopeScrollInner}
+            keyboardShouldPersistTaps="handled"
+          >
+            {scopes.map((s) => (
+              <Pressable
+                key={s}
+                style={[styles.scopeChip, scope === s && styles.scopeChipOn]}
+                onPress={() => setScope(s)}
+              >
+                <Text style={[styles.scopeChipText, scope === s && styles.scopeChipTextOn]}>{scopeLabel(s)}</Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        ) : null}
+
+        {treeError ? (
+          <Text style={styles.modalError} accessibilityRole="alert">
+            {treeError}
+          </Text>
+        ) : null}
+
+        {atRoots ? (
+          treeLoading ? (
+            <View style={styles.modalCenter}>
+              <ActivityIndicator size="large" />
+            </View>
+          ) : (
+            <FlatList
+              data={filteredRoots}
+              keyExtractor={(item) => item.folder_id}
+              contentContainerStyle={styles.modalList}
+              ListEmptyComponent={
+                <Text style={styles.modalEmpty}>No folders in this scope.</Text>
+              }
+              renderItem={({ item }) => (
+                <Pressable
+                  style={styles.folderRow}
+                  onPress={() =>
+                    setStack((prev) => [...prev, { kind: 'folder', folderId: item.folder_id, title: item.name }])
+                  }
+                >
+                  <Ionicons name="folder-outline" size={22} color="#5c6bc0" style={styles.folderRowIcon} />
+                  <View style={styles.folderRowText}>
+                    <Text style={styles.folderRowTitle} numberOfLines={2}>
+                      {item.name}
+                    </Text>
+                    {item.document_count != null && item.document_count > 0 ? (
+                      <Text style={styles.folderRowMeta}>{item.document_count} document(s)</Text>
+                    ) : null}
+                  </View>
+                  <Ionicons name="chevron-forward" size={20} color="#999" />
+                </Pressable>
+              )}
+            />
+          )
+        ) : contentsLoading ? (
+          <View style={styles.modalCenter}>
+            <ActivityIndicator size="large" />
+          </View>
+        ) : contentsError ? (
+          <Text style={styles.modalError}>{contentsError}</Text>
+        ) : (
+          <FlatList
+            data={folderContentsRows}
+            keyExtractor={(item) =>
+              item.type === 'subfolder' ? `sf-${item.sf.folder_id}` : `doc-${item.d.document_id}`
+            }
+            contentContainerStyle={styles.modalList}
+            ListEmptyComponent={<Text style={styles.modalEmpty}>This folder is empty.</Text>}
+            renderItem={({ item }) =>
+              item.type === 'subfolder' ? (
+                <Pressable
+                  style={styles.folderRow}
+                  onPress={() =>
+                    setStack((prev) => [
+                      ...prev,
+                      { kind: 'folder', folderId: item.sf.folder_id, title: item.sf.name },
+                    ])
+                  }
+                >
+                  <Ionicons name="folder-outline" size={22} color="#5c6bc0" style={styles.folderRowIcon} />
+                  <Text style={styles.folderRowTitle}>{item.sf.name}</Text>
+                  <Ionicons name="chevron-forward" size={20} color="#999" />
+                </Pressable>
+              ) : (
+                <Pressable
+                  style={styles.docRow}
+                  onPress={() => {
+                    const title = item.d.title || item.d.filename || 'Document';
+                    onOpenDocument(item.d.document_id, title);
+                    closeAndReset();
+                  }}
+                >
+                  <Ionicons name="document-text-outline" size={22} color="#1a1a2e" style={styles.folderRowIcon} />
+                  <View style={styles.folderRowText}>
+                    <Text style={styles.docRowTitle} numberOfLines={2}>
+                      {item.d.title || item.d.filename}
+                    </Text>
+                    <Text style={styles.folderRowMeta} numberOfLines={1}>
+                      {item.d.filename}
+                    </Text>
+                  </View>
+                </Pressable>
+              )
+            }
+          />
+        )}
+      </SafeAreaView>
+    </Modal>
+  );
+}
 
 export default function DocumentsListScreen() {
   const router = useRouter();
@@ -17,6 +305,7 @@ export default function DocumentsListScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [browseOpen, setBrowseOpen] = useState(false);
 
   const load = useCallback(async () => {
     setError(null);
@@ -54,41 +343,81 @@ export default function DocumentsListScreen() {
   }
 
   return (
-    <FlatList
-      data={docs}
-      keyExtractor={(item) => item.document_id}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-      contentContainerStyle={styles.list}
-      ListHeaderComponent={
-        error ? (
-          <Text style={styles.errorBanner} accessibilityRole="alert">
-            {error}
-          </Text>
-        ) : null
-      }
-      ListEmptyComponent={<Text style={styles.empty}>No documents.</Text>}
-      renderItem={({ item }) => (
-        <Pressable
-          style={styles.row}
-          onPress={() => router.push(`/documents/${item.document_id}`)}
-        >
-          <Text style={styles.title}>{item.title || item.filename}</Text>
-          <Text style={styles.sub}>{item.filename}</Text>
-        </Pressable>
-      )}
-    />
+    <>
+      <FlatList
+        data={docs}
+        keyExtractor={(item) => item.document_id}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+        contentContainerStyle={styles.list}
+        ListHeaderComponent={
+          <View style={styles.listHeader}>
+            <View style={styles.titleRow}>
+              <Text style={styles.screenTitle}>Documents</Text>
+              <Pressable
+                onLongPress={() => setBrowseOpen(true)}
+                delayLongPress={400}
+                hitSlop={10}
+                style={styles.browseIconBtn}
+                accessibilityRole="button"
+                accessibilityLabel="Browse folder tree"
+              >
+                <Ionicons name="folder-open-outline" size={26} color="#1a1a2e" />
+              </Pressable>
+            </View>
+            {error ? (
+              <Text style={styles.errorBanner} accessibilityRole="alert">
+                {error}
+              </Text>
+            ) : null}
+          </View>
+        }
+        ListEmptyComponent={<Text style={styles.empty}>No documents.</Text>}
+        renderItem={({ item }) => (
+          <Pressable
+            style={styles.row}
+            onPress={() =>
+              router.push({
+                pathname: `/documents/${item.document_id}`,
+                params: { documentTitle: item.title || item.filename || 'Document' },
+              })
+            }
+          >
+            <Text style={styles.title}>{item.title || item.filename}</Text>
+            <Text style={styles.sub}>{item.filename}</Text>
+          </Pressable>
+        )}
+      />
+      <FolderBrowseModal
+        visible={browseOpen}
+        onClose={() => setBrowseOpen(false)}
+        onOpenDocument={(documentId, documentTitle) => {
+          router.push({
+            pathname: `/documents/${documentId}`,
+            params: { documentTitle },
+          });
+        }}
+      />
+    </>
   );
 }
 
 const styles = StyleSheet.create({
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  list: { padding: 16 },
+  list: { padding: 16, paddingTop: 8 },
+  listHeader: { marginBottom: 12 },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  screenTitle: { fontSize: 22, fontWeight: '700', color: '#1a1a2e' },
+  browseIconBtn: { padding: 6 },
   errorBanner: {
     backgroundColor: '#fee',
     color: '#a00',
     padding: 12,
     borderRadius: 8,
-    marginBottom: 12,
     fontSize: 14,
   },
   empty: { textAlign: 'center', marginTop: 48, color: '#666' },
@@ -102,4 +431,63 @@ const styles = StyleSheet.create({
   },
   title: { fontSize: 16, fontWeight: '600' },
   sub: { fontSize: 13, color: '#666', marginTop: 4 },
+  modalSafe: { flex: 1, backgroundColor: '#fff' },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#e0e0e0',
+  },
+  modalBackBtn: { padding: 4, width: 44 },
+  modalTitle: { flex: 1, fontSize: 17, fontWeight: '700', color: '#1a1a2e', textAlign: 'center' },
+  scopeScroll: { maxHeight: 48, marginBottom: 8 },
+  scopeScrollInner: { paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' },
+  scopeChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: '#e8e8e8',
+    marginRight: 8,
+  },
+  scopeChipOn: { backgroundColor: '#1a1a2e' },
+  scopeChipText: { fontSize: 14, fontWeight: '600', color: '#424242' },
+  scopeChipTextOn: { color: '#fff' },
+  modalError: {
+    marginHorizontal: 16,
+    marginBottom: 8,
+    padding: 12,
+    backgroundColor: '#fee',
+    color: '#a00',
+    borderRadius: 8,
+    fontSize: 14,
+  },
+  modalCenter: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  modalList: { paddingHorizontal: 12, paddingBottom: 24 },
+  modalEmpty: { textAlign: 'center', marginTop: 32, color: '#666', paddingHorizontal: 24 },
+  folderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#eee',
+    backgroundColor: '#fafafa',
+    marginBottom: 4,
+    borderRadius: 8,
+  },
+  docRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: '#eee',
+  },
+  folderRowIcon: { marginRight: 12 },
+  folderRowText: { flex: 1 },
+  folderRowTitle: { fontSize: 16, fontWeight: '600', color: '#111' },
+  folderRowMeta: { fontSize: 12, color: '#757575', marginTop: 4 },
+  docRowTitle: { fontSize: 15, fontWeight: '600', color: '#1a1a2e' },
 });

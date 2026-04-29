@@ -356,6 +356,7 @@ export default function DeepAgentPhaseEditor({
                   seedPrompt={phase?.prompt ?? ''}
                   onCommit={(val) => updatePhase(idx, { prompt: val })}
                   readOnly={readOnly}
+                  debounceMs={380}
                   label="Prompt"
                   minLines={2}
                   upstreamSteps={upstreamSteps}
@@ -377,6 +378,7 @@ export default function DeepAgentPhaseEditor({
                   seedPrompt={phase?.criteria ?? ''}
                   onCommit={(val) => updatePhase(idx, { criteria: val })}
                   readOnly={readOnly}
+                  debounceMs={380}
                   label="Criteria"
                   minLines={2}
                   upstreamSteps={upstreamSteps}
@@ -697,6 +699,7 @@ export default function DeepAgentPhaseEditor({
             })
           }
           readOnly={readOnly}
+          debounceMs={380}
           label="Output template"
           minLines={2}
           upstreamSteps={upstreamSteps}

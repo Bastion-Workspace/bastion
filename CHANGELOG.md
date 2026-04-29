@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Feature: **Bastion Mobile** — global **voice FAB** (all tabs): mic opens a modal, auto-starts recording, **Stop** transcribes and fire-and-forgets to `streamOrchestrator` (`session_id: bastion-mobile-voice`, new `Voice Note` conversation); Chat Send is text-only again. `SafeAreaProvider` at app root for FAB insets (requires `expo-av`).
+- Feature: **BBS Data Workspace** — table browse (`render_table` + schema column order, terminal width fit, optional column truncation note) and per-row detail view after paging.
+- Update: **Bastion Mobile ToDos** — tab label "ToDos"; compact file context and formatted scheduled/deadline; state changes use `/api/org/settings/todo-states` (tap default, long-press full list) with confirmation; org `update_todo` writes `CLOSED` for any user-configured done keyword.
+- Fix: **BBS SSH** — show welcome art after protocol auth; start idle screen-blank watcher in `run_after_authenticated` so `BBS_SCREEN_BLANK_AFTER_SECONDS` applies to SSH and telnet.
+- Feature: **Bastion Mobile** — Messages use server `display_name` and participant line; **Bastion Chat** tab (model picker via `/api/user/models/*`, long-press New chat for recent threads, document context banner + FAB from document reader); todos **org file** picker (long-press file chip) and **tag** filter row.
 - Fix: **Mobile Android** — Android 15 / 16 KB native ELF alignment (`expo-build-properties` with NDK `27.1.12297006`; CI installs matching `ndk` package).
 - Refactor: **Document service** — split phase-2 gRPC into focused mixins, lazy `FolderService` singleton on handler base, typed admin RPCs (`AdminGetDocument`, `FilterDocuments`, etc.) with shared `document_admin_ops`; backend facade and team cleanup call typed clients instead of `DocumentMirror` JSON actions.
 - Feature: **Agent Factory playbooks** — optional per-step **`enabled: false`** skips the step at runtime (with `_skipped` / `_reason` in state) before evaluating **`condition`**; Workflow Composer toggle and validation updates.

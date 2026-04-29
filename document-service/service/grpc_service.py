@@ -11,12 +11,18 @@ sys.path.insert(0, "/app")
 import grpc
 from protos import document_service_pb2, document_service_pb2_grpc
 
+from ds_handlers.document_admin_handlers_mixin import DocumentAdminHandlersMixin
 from ds_handlers.document_edit_handlers_mixin import DocumentEditHandlersMixin
 from ds_handlers.document_handlers_mixin import DocumentHandlersMixin
 from ds_handlers.ds_entity_search_mixin import DsEntitySearchMixin
+from ds_handlers.encryption_handlers_mixin import EncryptionHandlersMixin
 from ds_handlers.file_creation_handlers_mixin import FileCreationHandlersMixin
+from ds_handlers.file_io_handlers_mixin import FileIoHandlersMixin
+from ds_handlers.file_manager_handlers_mixin import FileManagerHandlersMixin
+from ds_handlers.folder_crud_handlers_mixin import FolderCrudHandlersMixin
 from ds_handlers.grpc_handler_base import DocumentGrpcHandlerBase
-from ds_handlers.phase2_handlers import Phase2HandlersMixin
+from ds_handlers.streaming_handlers_mixin import StreamingHandlersMixin
+from ds_handlers.version_handlers_mixin import VersionHandlersMixin
 from service.entity_extractor import EntityExtractor
 from service.processing.pipeline import DocumentProcessingPipeline
 
@@ -26,7 +32,13 @@ SERVICE_VERSION = "1.0.0"
 
 
 class DocumentServiceImplementation(
-    Phase2HandlersMixin,
+    StreamingHandlersMixin,
+    FileManagerHandlersMixin,
+    FolderCrudHandlersMixin,
+    VersionHandlersMixin,
+    EncryptionHandlersMixin,
+    FileIoHandlersMixin,
+    DocumentAdminHandlersMixin,
     DocumentEditHandlersMixin,
     FileCreationHandlersMixin,
     DsEntitySearchMixin,

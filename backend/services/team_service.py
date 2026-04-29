@@ -456,10 +456,9 @@ class TeamService:
                             err,
                         )
 
-                ok_rm, _data_rm, err_rm = await dsc.document_mirror_json(
+                ok_rm, _data_rm, err_rm = await dsc.remove_team_upload_directory_json(
                     user_id,
                     {
-                        "action": "remove_team_upload_directory",
                         "team_id": str(team_id),
                         "user_id": user_id,
                     },

@@ -715,10 +715,14 @@ class BBSSession:
             + self.theme.reset
             + "\r\n"
             + self.theme.dim
-            + "Bastion text interface - login required.\r\n"
+            + "Bastion text interface.\r\n"
             + self.theme.reset
             + "\r\n"
         )
+
+    async def show_welcome(self) -> None:
+        """Show welcome art (telnet before login; SSH after protocol-level auth)."""
+        await self._show_welcome()
 
     async def login_flow(self) -> bool:
         for attempt in range(3):
@@ -764,12 +768,26 @@ class BBSSession:
         """Post-auth menu (used after telnet login_flow or SSH password auth)."""
         # SSH skips login_flow (no _touch there); reset idle baseline before slow summary HTTP.
         self._touch()
-        if settings.BBS_MOTD.strip():
-            await self._write("\r\n" + settings.BBS_MOTD.strip() + "\r\n\r\n")
-        await self._show_post_login_summary()
-        from menu_system import main_menu
+        if self.screen_blank_after_seconds > 0 and self._blank_watcher_task is None:
+            from screen_blank_guard import idle_blank_watcher_loop
 
-        await main_menu(self)
+            self._blank_watcher_task = asyncio.create_task(idle_blank_watcher_loop(self))
+        try:
+            if settings.BBS_MOTD.strip():
+                await self._write("\r\n" + settings.BBS_MOTD.strip() + "\r\n\r\n")
+            await self._show_post_login_summary()
+            from menu_system import main_menu
+
+            await main_menu(self)
+        finally:
+            t = self._blank_watcher_task
+            if t is not None:
+                t.cancel()
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+                self._blank_watcher_task = None
 
     async def _show_post_login_summary(self) -> None:
         t = self.theme
@@ -792,13 +810,9 @@ class BBSSession:
     async def run(self) -> None:
         self._blank_watcher_task = None
         try:
-            await self._show_welcome()
+            await self.show_welcome()
             if not await self.login_flow():
                 return
-            if self.screen_blank_after_seconds > 0:
-                from screen_blank_guard import idle_blank_watcher_loop
-
-                self._blank_watcher_task = asyncio.create_task(idle_blank_watcher_loop(self))
             await self.run_after_authenticated()
         except ConnectionError:
             pass

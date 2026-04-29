@@ -13,6 +13,7 @@ class DocumentGrpcHandlerBase:
         self._search_service: Optional[object] = None
         self._document_repo: Optional[object] = None
         self._embedding_manager: Optional[object] = None
+        self._folder_service: Optional[object] = None
 
     async def _get_search_service(self):
         if not self._search_service:
@@ -34,3 +35,11 @@ class DocumentGrpcHandlerBase:
 
             self._embedding_manager = await get_embedding_service()
         return self._embedding_manager
+
+    async def _get_folder_service(self):
+        if not self._folder_service:
+            from ds_services.folder_service import FolderService
+
+            self._folder_service = FolderService()
+            await self._folder_service.initialize()
+        return self._folder_service

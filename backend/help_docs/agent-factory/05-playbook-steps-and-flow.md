@@ -154,12 +154,22 @@ Common use: route by document type (`{editor_document_type} == "fiction"`), by s
 
 ---
 
+## Step enabled (disable)
+
+Any step may set **`enabled`** to the JSON boolean **`false`**. When **`enabled` is false**, the step **does not run**; its **`output_key`** (and **`name`**, if set) are written to playbook state as **`{"_skipped": true, "_reason": "disabled"}`**, and the workflow continues. Omit **`enabled`** or set it to **`true`** for normal behavior (the Composer omits the field when the step is on).
+
+**Order:** **`enabled` is evaluated before `condition`**. If the step is disabled, **`condition` is not evaluated**.
+
+Use **`enabled: false`** to turn a step off while editing, for prompt experiments, or to keep an alternate path in the JSON without deleting it. Use **`condition`** when whether the step runs should depend on runtime data (inputs, prior step outputs, editor context).
+
+---
+
 ## Condition on any step
 
 Many step types (**tool**, **llm_task**, **llm_agent**, **deep_agent**) support an optional **condition** field. The condition uses the same expression syntax as **branch_condition** (e.g. `{editor_document_type} == "fiction"` or `{query} matches "proofread|grammar|typo"`). At runtime:
 
 - If the **condition** is **true** — the step runs normally and its output is stored under its **output_key**.
-- If the **condition** is **false** — the step is **skipped**. Its output key is set to `{"_skipped": true}` and execution continues to the next step.
+- If the **condition** is **false** — the step is **skipped**. Its output key is set to `{"_skipped": true, "_reason": "condition"}` and execution continues to the next step.
 
 This lets you build **multi-way routing** without nesting branch steps. For example, to do different work depending on the open file's frontmatter type:
 

@@ -36,6 +36,7 @@ import {
   ToggleButton,
   Paper,
   Grid,
+  Switch,
 } from '@mui/material';
 import { Close, Delete, Add, Extension, ExpandMore, ExpandLess, Lens, RadioButtonUnchecked, Schedule } from '@mui/icons-material';
 import StepCapabilitiesPanel from './StepCapabilitiesPanel';
@@ -449,12 +450,12 @@ export default function StepConfigDrawer({
   const { data: plugins = [], isLoading: pluginsLoading } = useQuery(
     'agentFactoryPlugins',
     () => apiService.agentFactory.getPlugins(),
-    { enabled: open && !!profileId, staleTime: 60_000, retry: false }
+    { enabled: open && !!profileId && !!pluginName, staleTime: 60_000, retry: false }
   );
   const { data: pluginConfigs = [] } = useQuery(
     ['agentFactoryPluginConfigs', profileId],
     () => apiService.agentFactory.listPluginConfigs(profileId),
-    { enabled: open && !!profileId, staleTime: 30_000, retry: false }
+    { enabled: open && !!profileId && !!pluginName, staleTime: 30_000, retry: false }
   );
   const upsertPluginConfigsMutation = useMutation(
     ({ profileId: id, body }) => apiService.agentFactory.upsertPluginConfigs(id, body),
@@ -667,6 +668,31 @@ export default function StepConfigDrawer({
               helperText="State key; wiring uses this first in {key.field}."
               disabled={readOnly}
             />
+          </Grid>
+          <Grid item xs={12}>
+            <FormControlLabel
+              control={(
+                <Switch
+                  checked={step.enabled !== false}
+                  onChange={(e) => {
+                    setStep((s) => {
+                      const next = { ...s };
+                      if (e.target.checked) {
+                        delete next.enabled;
+                      } else {
+                        next.enabled = false;
+                      }
+                      return next;
+                    });
+                  }}
+                  disabled={readOnly}
+                />
+              )}
+              label="Step enabled"
+            />
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: -0.5 }}>
+              When off, the step is skipped at runtime (same as a false condition). Omitted when enabled.
+            </Typography>
           </Grid>
           <Grid item xs={6} sx={{ minWidth: 0, display: 'flex', flexDirection: 'column' }}>
             {showUserFactsPolicy ? (
@@ -1065,6 +1091,7 @@ export default function StepConfigDrawer({
               seedPrompt={step.prompt_template || step.prompt || ''}
               onCommit={commitPromptDraftToStep}
               promptDraftRef={promptDraftRef}
+              debounceMs={380}
               label="Prompt template"
               minLines={3}
               upstreamSteps={upstreamSteps}
@@ -1097,6 +1124,7 @@ export default function StepConfigDrawer({
               seedPrompt={step.prompt_template || step.prompt || ''}
               onCommit={commitPromptDraftToStep}
               promptDraftRef={promptDraftRef}
+              debounceMs={380}
               label="Prompt template"
               minLines={3}
               upstreamSteps={upstreamSteps}
@@ -1288,6 +1316,7 @@ export default function StepConfigDrawer({
               seedValue={step.prompt || ''}
               onCommit={commitApprovalPromptToStep}
               draftRef={approvalPromptDraftRef}
+              debounceMs={380}
               label="Prompt text"
               placeholder="Approve to continue?"
               minRows={2}

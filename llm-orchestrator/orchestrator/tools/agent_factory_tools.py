@@ -716,6 +716,10 @@ def _step_exclusive_set(step: Dict[str, Any]) -> bool:
     return bool(step.get("exclusive"))
 
 
+def _step_is_disabled(step: Dict[str, Any]) -> bool:
+    return step.get("enabled") is False
+
+
 def _step_type_for_exclusive_warn(step: Dict[str, Any]) -> str:
     return str(step.get("step_type") or step.get("type") or "").strip().lower()
 
@@ -741,11 +745,13 @@ def _warn_missing_exclusive(steps: List[Any], warnings: List[str]) -> None:
             s = steps[j]
             if not isinstance(s, dict) or not _step_has_nonempty_condition(s) or _step_exclusive_set(s):
                 break
+            if _step_is_disabled(s):
+                break
             run_indices.append(j)
             j += 1
         if len(run_indices) >= 2 and j < n:
             nxt = steps[j]
-            if isinstance(nxt, dict) and not _step_has_nonempty_condition(nxt):
+            if isinstance(nxt, dict) and not _step_has_nonempty_condition(nxt) and not _step_is_disabled(nxt):
                 if not all(_step_type_for_exclusive_warn(steps[k]) == "branch" for k in run_indices):
                     names: List[str] = []
                     for k in run_indices:
@@ -783,6 +789,8 @@ def _validate_playbook_steps(steps: List[Dict[str, Any]]) -> List[str]:
             warnings.append(f"step {i} ({name or '?'}): missing 'step_type'")
         elif step_type not in VALID_STEP_TYPES:
             warnings.append(f"step {i} ({name or '?'}): invalid step_type '{step_type}'")
+        if "enabled" in step and step.get("enabled") is not None and not isinstance(step.get("enabled"), bool):
+            warnings.append(f"step {i} ({name or '?'}): 'enabled' must be a boolean when set (JSON true/false)")
         if not (step.get("output_key") or "").strip():
             warnings.append(f"step {i} ({name or '?'}): missing or empty 'output_key'")
         if step_type == "tool" and not step.get("action"):
@@ -923,7 +931,7 @@ async def list_available_actions_tool(
             "\n\nCONFIRM-FLOW RULE: Tools that accept confirmed (e.g. update_playbook, create_playbook, create_agent_profile, update_agent_profile, delete_playbook, delete_agent_profile, assign_playbook_to_agent, set_agent_profile_status, create_agent_schedule, bind_data_source_to_agent, create_skill, propose_skill_update): (1) After showing a preview (confirmed=False), when the user approves in any later message (e.g. 'yes', 'go ahead', 'apply'), you MUST call the same tool again with the same arguments and confirmed=True in your very next response—before replying in text. (2) Use the same playbook_id and updates (or other arguments) from your earlier tool call in this conversation. (3) Do not tell the user the change is done until you have called with confirmed=True and received a success response. Do not only acknowledge in text—make the call.\n"
             "\nPLAYBOOK DEFINITION SHAPE (same for create_playbook and update_playbook):\n"
             "- Playbook definition: {\"steps\": [...], \"run_context\": \"interactive\" | \"background\"}. Steps is a list of step objects.\n"
-            "- Step fields (required per type: step_type, output_key; tool needs action; llm_task needs prompt/prompt_template; llm_agent has optional available_tools, may be empty for toolless steps; deep_agent needs phases): name, step_type, output_key, action (tool), inputs, params, prompt, prompt_template, condition, branch_condition, then_steps, else_steps, parallel_steps, steps (loop), available_tools, max_iterations, system_prompt_additions, phases (deep_agent), skill_ids, discovery_mode, max_discovered_skills, model_override, output_schema, timeout_minutes, on_reject, subagents, delegation_mode, samples, selection_strategy, selection_criteria, fan_out.\n"
+            "- Step fields (required per type: step_type, output_key; tool needs action; llm_task needs prompt/prompt_template; llm_agent has optional available_tools, may be empty for toolless steps; deep_agent needs phases): name, step_type, output_key, enabled (optional boolean; false skips the step), action (tool), inputs, params, prompt, prompt_template, condition, branch_condition, then_steps, else_steps, parallel_steps, steps (loop), available_tools, max_iterations, system_prompt_additions, phases (deep_agent), skill_ids, discovery_mode, max_discovered_skills, model_override, output_schema, timeout_minutes, on_reject, subagents, delegation_mode, samples, selection_strategy, selection_criteria, fan_out.\n"
             "- subagents (llm_agent, deep_agent): optional list of {agent_profile_id, playbook_id?, role?, accepts?, returns?}. Adds delegate_subagent_* tools and shared scratchpad. delegation_mode: supervised (default, LLM delegates via tools), parallel (pre-run all subagents then synthesize), sequential (pre-run subagents in order then synthesize).\n"
             "- samples (llm_agent, deep_agent): optional integer 1–5 (default 1). Runs the step N times independently with raised temperature and selects the best result. selection_strategy: llm_judge (default, LLM picks best) or highest_score (deep_agent only, uses last evaluate phase score from phase_trace; falls back to llm_judge if no scores). selection_criteria: optional string for the judge when using llm_judge.\n"
             "- fan_out (llm_agent, deep_agent): optional object {source, item_variable?, max_items?, merge?}. Reads a list from playbook_state (source is a dot-path like plan.items), runs the step once per item in parallel (capped by max_items, default 10), merges results. item_variable (default current_item) is injected into playbook_state and inputs for each copy — use {current_item} in prompts. merge: list (default: items array plus formatted join) or concat (formatted sections per item).\n"

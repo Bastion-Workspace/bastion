@@ -567,7 +567,8 @@ class OrgTodoService:
             lines[idx] = line
 
             if new_state is not None:
-                if new_state.upper() in DONE_STATES:
+                done_set = await _resolve_done_states(user_id)
+                if new_state.upper() in done_set:
                     ts = await self._org_timestamp(user_id)
                     closed_line = f"CLOSED: [{ts}]"
                     closed_idx = self._find_planning_line(lines, idx, "CLOSED:")

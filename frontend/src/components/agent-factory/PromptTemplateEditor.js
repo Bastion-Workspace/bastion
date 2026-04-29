@@ -4,7 +4,7 @@
  * - Autocomplete on { for runtime variables, step.field, playbook inputs
  * - LaTeX-style conditional block: {{# triggers completion that inserts {{#key}}\n  \n{{/key}} with cursor in the middle
  */
-import React, { useMemo, useCallback, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useCallback, useState, useRef, useEffect, memo } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { EditorView, Decoration, ViewPlugin, keymap } from '@codemirror/view';
 import { history, defaultKeymap } from '@codemirror/commands';
@@ -228,7 +228,18 @@ function createPromptAutocomplete(
   });
 }
 
-export default function PromptTemplateEditor({
+function upstreamStepsCompletionFingerprint(steps) {
+  return JSON.stringify(
+    (steps || []).map((s) => ({
+      k: s?.output_key || s?.name || '',
+      t: s?.step_type || s?.type || '',
+      a: s?.action || '',
+      nt: Array.isArray(s?.available_tools) ? s.available_tools.length : 0,
+    }))
+  );
+}
+
+function PromptTemplateEditor({
   value = '',
   onChange,
   label = 'Prompt template',
@@ -242,6 +253,15 @@ export default function PromptTemplateEditor({
   placeholder = 'Use {step_name.field} for upstream values. Type { for variables.',
 }) {
   const { darkMode } = useTheme();
+  const upstreamStepsRef = useRef(upstreamSteps);
+  const playbookInputsRef = useRef(playbookInputs);
+  const actionsByNameRef = useRef(actionsByName);
+  const extraRefCompletionsRef = useRef(extraRefCompletions);
+  upstreamStepsRef.current = upstreamSteps;
+  playbookInputsRef.current = playbookInputs;
+  actionsByNameRef.current = actionsByName;
+  extraRefCompletionsRef.current = extraRefCompletions;
+
   const minHeightPx = Math.max(MIN_HEIGHT_PX, Math.round(minLines * 1.5 * 16));
   const [editorHeight, setEditorHeight] = useState(() => {
     try {
@@ -261,20 +281,52 @@ export default function PromptTemplateEditor({
     if (editorHeight < minHeightPx) setEditorHeight(minHeightPx);
   }, [minHeightPx, editorHeight]);
 
+  const upstreamFingerprint = useMemo(
+    () => upstreamStepsCompletionFingerprint(upstreamSteps),
+    [upstreamSteps]
+  );
+  const playbookInputsFingerprint = useMemo(
+    () =>
+      JSON.stringify(
+        (playbookInputs || []).map((p) => (typeof p === 'object' && p != null ? p.name : String(p)))
+      ),
+    [playbookInputs]
+  );
+  const actionsKeysFingerprint = useMemo(
+    () => Object.keys(actionsByName || {}).sort().join('\0'),
+    [actionsByName]
+  );
+  const extraRefFingerprint = useMemo(
+    () => JSON.stringify(extraRefCompletions || []),
+    [extraRefCompletions]
+  );
+
   const extensions = useMemo(() => {
     const base = [
       history(),
       keymap.of([...defaultKeymap, ...completionKeymap]),
       promptHighlightPlugin,
       createPromptEditorTheme(darkMode),
-      createPromptAutocomplete(upstreamSteps, playbookInputs, actionsByName, extraRefCompletions),
+      createPromptAutocomplete(
+        upstreamStepsRef.current,
+        playbookInputsRef.current,
+        actionsByNameRef.current,
+        extraRefCompletionsRef.current
+      ),
       EditorView.lineWrapping,
     ];
     if (readOnly) {
       base.push(EditorView.editable.of(false));
     }
     return base;
-  }, [darkMode, upstreamSteps, playbookInputs, actionsByName, extraRefCompletions, readOnly]);
+  }, [
+    darkMode,
+    upstreamFingerprint,
+    playbookInputsFingerprint,
+    actionsKeysFingerprint,
+    extraRefFingerprint,
+    readOnly,
+  ]);
 
   const handleChange = useCallback(
     (val) => {
@@ -360,3 +412,5 @@ export default function PromptTemplateEditor({
     </Box>
   );
 }
+
+export default memo(PromptTemplateEditor);
