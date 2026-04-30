@@ -4308,7 +4308,7 @@ const FileTreeSidebar = ({
                 <ListItemIcon sx={{ minWidth: 32 }}>
                   <Typography sx={{ fontSize: '18px' }}>✅</Typography>
                 </ListItemIcon>
-                <ListItemText primary={<Typography variant="body2">All TODOs</Typography>} />
+                <ListItemText primary={<Typography variant="body2">ToDos</Typography>} />
               </ListItemButton>
             </ListItem>
             <ListItem disablePadding>

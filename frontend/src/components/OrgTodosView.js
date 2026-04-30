@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { format, isValid, parseISO } from 'date-fns';
 import {
   Box,
   Typography,
@@ -43,7 +44,8 @@ import {
   UnfoldLess,
   Add,
   FilterList,
-  ArrowDropDown
+  ArrowDropDown,
+  EditNote
 } from '@mui/icons-material';
 import apiService from '../services/apiService';
 import orgService from '../services/org/OrgService';
@@ -116,6 +118,76 @@ const SORT_LABELS = {
   date: 'By date',
   priority: 'By priority',
 };
+
+/** Format org SCHEDULED/DEADLINE/inactive timestamp strings for list rows */
+function formatOrgPlanningLine(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  let s = String(raw).trim();
+  s = s.replace(/^[\[<]+/, '').replace(/[\]>]+$/, '').trim();
+  const m = s.match(/^(\d{4}-\d{2}-\d{2})(?:\s+.+)?$/);
+  if (!m) return s.length > 40 ? `${s.slice(0, 37)}…` : s;
+  try {
+    const d = parseISO(m[1]);
+    if (!isValid(d)) return s.length > 40 ? `${s.slice(0, 37)}…` : s;
+    const datePart = format(d, 'EEE, MMM d, yyyy');
+    const tail = s.slice(10).trim();
+    const timeMatch = tail.match(/\b(\d{1,2}:\d{2}(?::\d{2})?)\b/);
+    if (timeMatch) {
+      return `${datePart} · ${timeMatch[1]}`;
+    }
+    return datePart;
+  } catch {
+    return s.length > 40 ? `${s.slice(0, 37)}…` : s;
+  }
+}
+
+/** Notes, optional body preview, and creation timestamp under a todo row */
+function OrgTodoListBodySecondary({ item }) {
+  const hasNotes = Array.isArray(item.notes) && item.notes.length > 0;
+  return (
+    <>
+      {hasNotes &&
+        item.notes.map((n, i) => (
+          <Box key={`${n.timestamp}-${i}`} sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5, mt: 0.5 }}>
+            <EditNote sx={{ fontSize: 14, color: 'text.disabled', flexShrink: 0, mt: 0.15 }} />
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, display: 'block' }}>
+                Note · {formatOrgPlanningLine(n.timestamp)}
+              </Typography>
+              <Typography variant="caption" sx={{ color: 'text.secondary', fontStyle: 'italic', display: 'block' }}>
+                {n.text}
+              </Typography>
+            </Box>
+          </Box>
+        ))}
+      {!hasNotes && item.body_preview && (
+        <Typography
+          variant="caption"
+          component="div"
+          sx={{
+            color: 'text.secondary',
+            mt: 0.25,
+            display: 'block',
+            minWidth: 0,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            opacity: 0.7,
+            width: '100%',
+            maxWidth: '100%',
+          }}
+        >
+          {item.body_preview}
+        </Typography>
+      )}
+      {item.creation_timestamp && (
+        <Typography variant="caption" sx={{ color: 'text.disabled', mt: 0.25, display: 'block' }}>
+          Added {formatOrgPlanningLine(item.creation_timestamp)}
+        </Typography>
+      )}
+    </>
+  );
+}
 
 const todosPopoverFieldSx = {
   width: '100%',
@@ -853,38 +925,19 @@ const OrgTodosView = ({ onOpenDocument }) => {
                         )}
                         <Box sx={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }} />
                         {item.scheduled && (
-                          <Typography variant="caption" sx={{ color: 'info.main', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                          <Typography variant="caption" sx={{ color: 'info.main', whiteSpace: 'nowrap', flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                             <Schedule sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
-                            {item.scheduled.split(' ')[0]}
+                            {formatOrgPlanningLine(item.scheduled)}
                           </Typography>
                         )}
                         {item.deadline && (
-                          <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                          <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                             <ErrorIcon sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
-                            {item.deadline.split(' ')[0]}
+                            {formatOrgPlanningLine(item.deadline)}
                           </Typography>
                         )}
                       </Box>
-                      {item.body_preview && (
-                        <Typography
-                          variant="caption"
-                          component="div"
-                          sx={{
-                            color: 'text.secondary',
-                            mt: 0.25,
-                            display: 'block',
-                            minWidth: 0,
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                            opacity: 0.7,
-                            width: '100%',
-                            maxWidth: '100%',
-                          }}
-                        >
-                          {item.body_preview}
-                        </Typography>
-                      )}
+                      <OrgTodoListBodySecondary item={item} />
                     </Box>
                   </ListItemButton>
                   <Box
@@ -982,7 +1035,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
         }}
       >
         <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <CheckCircle /> All TODOs
+          <CheckCircle /> ToDos
         </Typography>
       </Box>
 
@@ -1528,36 +1581,19 @@ const OrgTodosView = ({ onOpenDocument }) => {
                                     {item.filename}
                                   </Typography>
                                   {item.scheduled && (
-                                    <Typography variant="caption" sx={{ color: 'info.main', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                                    <Typography variant="caption" sx={{ color: 'info.main', whiteSpace: 'nowrap', flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                       <Schedule sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
-                                      {item.scheduled.split(' ')[0]}
+                                      {formatOrgPlanningLine(item.scheduled)}
                                     </Typography>
                                   )}
                                   {item.deadline && (
-                                    <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                                    <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                       <ErrorIcon sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
-                                      {item.deadline.split(' ')[0]}
+                                      {formatOrgPlanningLine(item.deadline)}
                                     </Typography>
                                   )}
                                 </Box>
-                                {item.body_preview && (
-                                  <Typography
-                                    variant="caption"
-                                    component="div"
-                                    sx={{
-                                      color: 'text.secondary',
-                                      mt: 0.25,
-                                      overflow: 'hidden',
-                                      textOverflow: 'ellipsis',
-                                      whiteSpace: 'nowrap',
-                                      opacity: 0.7,
-                                      width: '100%',
-                                      maxWidth: '100%'
-                                    }}
-                                  >
-                                    {item.body_preview}
-                                  </Typography>
-                                )}
+                                <OrgTodoListBodySecondary item={item} />
                               </Box>
                             </ListItemButton>
                             <Box

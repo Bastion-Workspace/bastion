@@ -3603,30 +3603,42 @@ async def notify_execution_event(body: NotifyExecutionEventBody) -> JSONResponse
     """Internal: send WebSocket notification for execution/dashboard events. Called from Celery or tools service."""
     try:
         from datetime import datetime, timezone
-        from utils.websocket_manager import get_websocket_manager
-        ws_manager = get_websocket_manager()
-        if ws_manager:
-            payload = {
-                "type": "agent_notification",
-                "subtype": body.subtype,
-                "execution_id": body.execution_id,
-                "agent_profile_id": body.agent_profile_id,
-                "agent_name": body.agent_name or "Agent",
-                "status": body.status,
-                "duration_ms": body.duration_ms,
-                "cost_usd": body.cost_usd,
-                "error_details": (body.error_details or "")[:500] if body.error_details else None,
-                "trigger_type": body.trigger_type or "manual",
-                "query": (body.query or "")[:200] if body.query else None,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            if body.team_id is not None:
-                payload["team_id"] = body.team_id
-            if body.team_name is not None:
-                payload["team_name"] = body.team_name
-            if body.message is not None:
-                payload["message"] = (body.message or "")[:500]
-            await ws_manager.send_to_session(payload, body.user_id)
+        from services.notification_router import route_notification
+
+        payload = {
+            "type": "agent_notification",
+            "subtype": body.subtype,
+            "execution_id": body.execution_id,
+            "agent_profile_id": body.agent_profile_id,
+            "agent_name": body.agent_name or "Agent",
+            "status": body.status,
+            "duration_ms": body.duration_ms,
+            "cost_usd": body.cost_usd,
+            "error_details": (body.error_details or "")[:500] if body.error_details else None,
+            "trigger_type": body.trigger_type or "manual",
+            "query": (body.query or "")[:200] if body.query else None,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if body.team_id is not None:
+            payload["team_id"] = body.team_id
+        if body.team_name is not None:
+            payload["team_name"] = body.team_name
+        if body.message is not None:
+            payload["message"] = (body.message or "")[:500]
+        an = body.agent_name or "Agent"
+        st = body.subtype or "execution_event"
+        payload["title"] = f"{an}: {st.replace('_', ' ')}"
+        payload["preview"] = (
+            (body.message or body.query or body.error_details or "")[:200]
+            if (body.message or body.query or body.error_details)
+            else ""
+        )
+        await route_notification(
+            body.user_id,
+            str(body.subtype or "execution_event"),
+            payload,
+            originating_surface_id=None,
+        )
     except Exception as e:
         logger.warning("notify_execution_event WebSocket send failed: %s", e)
     return JSONResponse(content={"ok": True})
@@ -3664,22 +3676,23 @@ async def notify_schedule_paused(body: NotifySchedulePausedBody) -> JSONResponse
     """Internal: send WebSocket notification when a schedule is auto-paused. Called from Celery."""
     try:
         from datetime import datetime, timezone
-        from utils.websocket_manager import get_websocket_manager
-        ws_manager = get_websocket_manager()
-        if ws_manager:
-            agent_name = body.agent_name or "Scheduled Agent"
-            preview = f"Paused after {body.consecutive} failures: {(body.last_error or '')[:100]}"
-            await ws_manager.send_to_session(
-                {
-                    "type": "agent_notification",
-                    "subtype": "schedule_paused",
-                    "agent_name": agent_name,
-                    "title": f"{agent_name} schedule paused",
-                    "preview": preview,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                },
-                body.user_id,
-            )
+        from services.notification_router import route_notification
+
+        agent_name = body.agent_name or "Scheduled Agent"
+        preview = f"Paused after {body.consecutive} failures: {(body.last_error or '')[:100]}"
+        await route_notification(
+            body.user_id,
+            "schedule_paused",
+            {
+                "type": "agent_notification",
+                "subtype": "schedule_paused",
+                "agent_name": agent_name,
+                "title": f"{agent_name} schedule paused",
+                "preview": preview,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            originating_surface_id=None,
+        )
     except Exception as e:
         logger.warning("notify_schedule_paused WebSocket send failed: %s", e)
     return JSONResponse(content={"ok": True})

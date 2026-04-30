@@ -7,10 +7,16 @@ export type OrgTodoListItem = {
   heading: string;
   line_number: number;
   level?: number;
+  /** Ancestor headings from org hierarchy (same as web OrgTodosView). */
+  parent_path?: string[];
+  /** Org heading levels for each segment in parent_path. */
+  parent_levels?: number[];
   todo_state?: string | null;
   tags?: string[];
   preview?: string;
   body_preview?: string;
+  creation_timestamp?: string | null;
+  notes?: { timestamp: string; text: string }[];
   scheduled?: string | null;
   deadline?: string | null;
   priority?: string | null;

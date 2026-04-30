@@ -42,6 +42,10 @@ async function refreshIfNeeded(): Promise<void> {
 
 export type ApiError = Error & { status?: number; body?: unknown };
 
+export function isApiError(e: unknown): e is ApiError {
+  return e instanceof Error && typeof (e as ApiError).status === 'number';
+}
+
 export async function apiRequest<T>(
   path: string,
   init: RequestInit & { skipAuth?: boolean } = {}

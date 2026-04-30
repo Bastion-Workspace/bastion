@@ -346,7 +346,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
         const viewConfigs = {
             'agenda': { title: 'Agenda', icon: '📅', type: 'org-agenda' },
             'search': { title: 'Search', icon: '🔍', type: 'org-search' },
-            'todos': { title: 'TODOs', icon: '✅', type: 'org-todos' },
+            'todos': { title: 'ToDos', icon: '✅', type: 'org-todos' },
             'contacts': { title: 'Contacts', icon: '👤', type: 'org-contacts' },
             'tags': { title: 'Tags', icon: '🏷️', type: 'org-tags' }
         };

@@ -26,6 +26,7 @@ import {
   type ConversationMessage,
   type ConversationSummary,
 } from '../../src/api/conversations';
+import { setActiveConversationForNotifications } from '../../src/session/activeConversationRef';
 import { getEnabledModels, getModelRoles, setUserChatModelRole, type EnabledModel } from '../../src/api/models';
 import { streamOrchestrator } from '../../src/api/orchestratorStream';
 
@@ -92,6 +93,7 @@ export default function BastionChatScreen() {
     docSnippet?: string;
     /** Present when opening from document FAB so each open gets a fresh conversation. */
     docSession?: string;
+    conversationId?: string;
   }>();
 
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
@@ -137,6 +139,19 @@ export default function BastionChatScreen() {
       }
     })();
   }, [loadConversations]);
+
+  useEffect(() => {
+    const fromRoute =
+      typeof params.conversationId === 'string' ? params.conversationId.trim() : '';
+    if (fromRoute) {
+      setConversationId(fromRoute);
+    }
+  }, [params.conversationId]);
+
+  useEffect(() => {
+    setActiveConversationForNotifications(conversationId);
+    return () => setActiveConversationForNotifications(null);
+  }, [conversationId]);
 
   useLayoutEffect(() => {
     navigation.setOptions({

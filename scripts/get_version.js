@@ -13,7 +13,7 @@ function getVersion() {
     return version;
   } catch (error) {
     console.warn('Could not read VERSION file, using default');
-    return '0.70.8';
+    return '0.70.9';
   }
 }
 

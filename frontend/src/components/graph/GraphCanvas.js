@@ -197,6 +197,21 @@ export default function GraphCanvas({
   const lastLayoutSigRef = useRef(null);
 
   const elements = useMemo(() => buildElements(nodes, edges), [nodes, edges]);
+  const isDarkMode = theme?.palette?.mode === 'dark';
+  const effectiveStyle = useMemo(() => {
+    if (style) return style;
+    return [
+      ...DEFAULT_STYLE,
+      {
+        selector: 'node',
+        style: { color: isDarkMode ? '#f5f5f5' : '#333' },
+      },
+      {
+        selector: 'edge',
+        style: { 'target-arrow-color': isDarkMode ? '#b3b3b3' : '#999' },
+      },
+    ];
+  }, [style, isDarkMode]);
 
   const elementsLayoutSig = useMemo(() => {
     if (!elements.length) return '';
@@ -210,7 +225,7 @@ export default function GraphCanvas({
     const cy = cytoscape({
       container: containerRef.current,
       elements: [],
-      style: style || DEFAULT_STYLE,
+      style: effectiveStyle,
       minZoom: 0.1,
       maxZoom: 4,
       wheelSensitivity: 1.2,
@@ -220,7 +235,7 @@ export default function GraphCanvas({
       cy.destroy();
       cyRef.current = null;
     };
-  }, []);
+  }, [effectiveStyle]);
 
   useEffect(() => {
     const cy = cyRef.current;

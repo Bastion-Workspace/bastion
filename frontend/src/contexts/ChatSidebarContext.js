@@ -30,6 +30,7 @@ import {
   writePersistedUserEditorPreferenceForUser,
   clearLegacyGlobalChatPreferenceKeys,
 } from '../utils/chatSelectionStorage';
+import { getOrCreateDesktopSurfaceId } from '../utils/surfaceId';
 import {
   getSelectableChatModels,
   coerceChatModelToSelectable,
@@ -1501,11 +1502,13 @@ export const ChatSidebarProvider = ({ children }) => {
       const streamAbort = new AbortController();
       streamAbortControllerRef.current = streamAbort;
 
+      const surfaceId = getOrCreateDesktopSurfaceId();
       const response = await fetch('/api/async/orchestrator/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
+          ...(surfaceId ? { 'X-Surface-Id': surfaceId } : {}),
         },
         signal: streamAbort.signal,
         body: JSON.stringify({
@@ -1755,25 +1758,61 @@ export const ChatSidebarProvider = ({ children }) => {
                   });
                   devLog(`✅ Added ${citations.length} citations to streaming message`);
                 } else if (data.type === 'permission_request') {
-                  // ROOSEVELT'S HITL: Permission request detected
-                  devLog('🛡️ Permission request received:', data);
-                  
-                  setMessages(prev => prev.map(msg => 
-                    msg.id === streamingMessage.id 
-                      ? { 
-                          ...msg, 
-                          content: data.content,
+                  devLog('Permission request received:', data);
+                  let parsedPayload = {};
+                  try {
+                    if (typeof data.content === 'string' && data.content.trim().startsWith('{')) {
+                      parsedPayload = JSON.parse(data.content);
+                    }
+                  } catch (_) {
+                    parsedPayload = {};
+                  }
+                  const pa = data.pending_auth || parsedPayload.pending_auth || {};
+                  const interactionType =
+                    data.interaction_type ||
+                    parsedPayload.interaction_type ||
+                    pa.interaction_type ||
+                    '';
+                  const approvalId =
+                    data.approval_id ||
+                    parsedPayload.approval_id ||
+                    pa.approval_id ||
+                    (pa.interaction_data && pa.interaction_data.approval_id) ||
+                    '';
+                  const shellCommand =
+                    data.command ||
+                    parsedPayload.command ||
+                    (pa.interaction_data && pa.interaction_data.command) ||
+                    '';
+                  const displayPrompt =
+                    data.prompt ||
+                    pa.prompt ||
+                    parsedPayload.prompt ||
+                    (typeof data.content === 'string' && !String(data.content).trim().startsWith('{')
+                      ? data.content
+                      : '') ||
+                    'Approve to continue?';
+
+                  setMessages(prev => prev.map(msg =>
+                    msg.id === streamingMessage.id
+                      ? {
+                          ...msg,
+                          content: displayPrompt,
                           isStreaming: false,
-                          isPermissionRequest: true,  // Tag for special handling
-                          requiresApproval: data.requires_approval,
+                          isPermissionRequest: true,
+                          requiresApproval: data.requires_approval !== false,
+                          interactionType,
+                          shellApprovalId: approvalId || undefined,
+                          shellCommand: shellCommand || undefined,
+                          pendingAuthPayload: pa && Object.keys(pa).length ? pa : undefined,
                           conversationId: data.conversation_id,
-                          timestamp: new Date().toISOString()
+                          timestamp: new Date().toISOString(),
                         }
                       : msg
                   ));
-                  
-                  devLog('✅ Permission request message updated');
-                  
+
+                  devLog('Permission request message updated');
+
                 } else if (data.type === 'notification') {
                   // Signal Corps: Spontaneous notification/alert
                   devLog('📢 Notification received:', data);

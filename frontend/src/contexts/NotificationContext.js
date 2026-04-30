@@ -73,7 +73,7 @@ export const NotificationProvider = ({ children }) => {
 
   const addNotification = useCallback((payload) => {
     const item = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      id: (payload.notification_id && String(payload.notification_id)) || `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
       ...payload,
       read: false,
       timestamp: payload.timestamp || new Date().toISOString(),

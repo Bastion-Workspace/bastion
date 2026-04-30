@@ -591,6 +591,42 @@ class RSSService:
             logger.error(f"RSS SERVICE ERROR: Failed to get feed articles: {e}")
             return []
 
+    async def get_all_user_articles(
+        self,
+        user_id: str,
+        limit: int = 200,
+        read_filter: str = "unread",
+    ) -> List[RSSArticle]:
+        """Articles across all feeds visible to the user (own + global feeds)."""
+        try:
+            rf = (read_filter or "unread").strip().lower()
+            if rf not in ("all", "unread", "read"):
+                rf = "unread"
+            read_clause = ""
+            if rf == "unread":
+                read_clause = " AND (a.is_read IS NOT TRUE)"
+            elif rf == "read":
+                read_clause = " AND (a.is_read IS TRUE)"
+
+            rows = await fetch_all(
+                f"""
+                SELECT a.*, f.feed_name AS feed_name
+                FROM rss_articles a
+                INNER JOIN rss_feeds f ON a.feed_id = f.feed_id
+                WHERE (a.user_id = $1 OR a.user_id IS NULL)
+                  AND (f.user_id = $1 OR f.user_id IS NULL)
+                  {read_clause}
+                ORDER BY a.published_date DESC NULLS LAST, a.created_at DESC
+                LIMIT $2
+                """,
+                user_id,
+                limit,
+            )
+            return [self._row_dict_to_article(dict(r)) for r in rows]
+        except Exception as e:
+            logger.error(f"RSS SERVICE ERROR: Failed to get all user articles: {e}")
+            return []
+
     def _row_dict_to_article(self, row_dict: Dict[str, Any]) -> RSSArticle:
         d = dict(row_dict)
         if "images" in d and isinstance(d["images"], str):

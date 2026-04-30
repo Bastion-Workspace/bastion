@@ -99,6 +99,7 @@ folder_service = None
 
 # Import API routers
 from api.settings_api import router as settings_router
+from api.notification_api import router as notification_router
 from api.learning_api import router as learning_router
 
 # Import FileManager service
@@ -1037,6 +1038,7 @@ logger.debug("✅ Resilient embedding API routes registered")
 
 # Include settings API routes
 app.include_router(settings_router)
+app.include_router(notification_router)
 
 from api.dashboard_api import router as dashboard_router
 app.include_router(dashboard_router)
@@ -1713,8 +1715,48 @@ async def websocket_conversations(websocket: WebSocket):
                             "type": "heartbeat_ack",
                             "timestamp": datetime.now().isoformat()
                         })
+                    elif isinstance(data, dict) and data.get("type") == "surface_meta":
+                        sid = (data.get("surface_id") or "").strip()
+                        stype = (data.get("surface_type") or "unknown").strip()
+                        if sid:
+                            ws_manager.register_surface_meta(
+                                str(user_id), sid, stype, websocket
+                            )
+                        await websocket.send_json({
+                            "type": "surface_meta_ack",
+                            "surface_id": sid,
+                            "timestamp": datetime.now().isoformat(),
+                        })
+                    elif isinstance(data, dict) and data.get("type") == "surface_state":
+                        sid = (data.get("surface_id") or "").strip()
+                        state = (data.get("state") or "blurred").strip()
+                        active_cid = data.get("active_conversation_id")
+                        if sid:
+                            ws_manager.update_surface_state(
+                                str(user_id),
+                                sid,
+                                state,
+                                active_conversation_id=active_cid if active_cid is not None else None,
+                                websocket=websocket,
+                            )
+                        await websocket.send_json({
+                            "type": "surface_state_ack",
+                            "timestamp": datetime.now().isoformat(),
+                        })
+                    elif isinstance(data, dict) and data.get("type") == "notification_ack":
+                        nid = (data.get("notification_id") or "").strip()
+                        if nid:
+                            await ws_manager.send_notification_ack_to_user_sessions(
+                                str(user_id),
+                                nid,
+                                exclude_websocket=websocket,
+                            )
+                        await websocket.send_json({
+                            "type": "notification_ack_ack",
+                            "notification_id": nid,
+                            "timestamp": datetime.now().isoformat(),
+                        })
                     else:
-                        # Echo back for other message types
                         await websocket.send_json({
                             "type": "echo",
                             "data": data,

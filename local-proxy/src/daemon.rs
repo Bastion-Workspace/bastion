@@ -1,7 +1,7 @@
 //! WebSocket client loop: connect, register, receive invokes, dispatch to capabilities, respond.
 
 use crate::capabilities::CapabilityRegistry;
-use crate::config::AppConfig;
+use crate::config::{save_config, AppConfig};
 use crate::policy;
 use crate::protocol::{BackendToDaemon, DaemonToBackend};
 use crate::shared_state::{ConnectionStatus, DaemonCommand, InvocationRecord, SharedState};
@@ -240,15 +240,17 @@ pub async fn run_daemon_loop(
                                     let result_msg = match cap {
                                         Some(c) => {
                                             let state_clone = state.clone();
-                                            let workspace_root = {
+                                            // Snapshot the latest config (may have been updated
+                                            // by a recent SetPolicy push from the server).
+                                            let (current_config, workspace_root) = {
                                                 let st = state_clone.lock().unwrap();
-                                                st.active_workspace_root.clone()
+                                                (st.config.clone(), st.active_workspace_root.clone())
                                             };
                                             let resolved_args = resolve_paths_with_workspace_root(
                                                 args,
                                                 workspace_root.as_deref(),
                                             );
-                                            let exec = c.execute(resolved_args, &config);
+                                            let exec = c.execute(resolved_args, &current_config);
                                             let out = exec.await;
                                             match out {
                                                 Ok(res) => {
@@ -293,6 +295,40 @@ pub async fn run_daemon_loop(
                                         error!("Failed to send result: {}", e);
                                         break;
                                     }
+                                }
+                                BackendToDaemon::SetPolicy { capabilities } => {
+                                    // Apply server-pushed policy: replace the in-memory map,
+                                    // persist to config.yml, and re-register with the new
+                                    // enabled capability list so the backend sees the update
+                                    // immediately.
+                                    let new_caps: Vec<String> = {
+                                        let mut st = state.lock().unwrap();
+                                        st.config.capabilities = capabilities;
+                                        if let Err(e) = save_config(&st.config, None) {
+                                            warn!("Failed to persist server policy: {}", e);
+                                        }
+                                        registry
+                                            .names()
+                                            .into_iter()
+                                            .filter(|n| policy::capability_offered(&st.config, n))
+                                            .collect()
+                                    };
+                                    let device_id = {
+                                        let st = state.lock().unwrap();
+                                        st.config.device_id.clone()
+                                    };
+                                    let reg = DaemonToBackend::Register {
+                                        device_id,
+                                        capabilities: new_caps,
+                                    };
+                                    if let Err(e) = write
+                                        .send(Message::Text(serde_json::to_string(&reg).unwrap()))
+                                        .await
+                                    {
+                                        error!("Failed to re-register after SetPolicy: {}", e);
+                                        break;
+                                    }
+                                    info!("Applied server policy and re-registered");
                                 }
                                 BackendToDaemon::SetWorkspace { request_id, workspace_root } => {
                                     // Validate and set the active workspace root.

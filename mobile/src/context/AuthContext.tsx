@@ -10,6 +10,7 @@ import { getCurrentUser, login as apiLogin, logout as apiLogout } from '../api/a
 import { getApiBaseUrl, normalizeBastionOrigin, setRuntimeApiBaseUrl } from '../api/config';
 import { getStoredBaseUrl, setStoredBaseUrl } from '../session/baseUrlStore';
 import { clearStoredToken, getStoredToken } from '../session/tokenStore';
+import { registerDevicePushWithServer, revokeDevicePushOnServer } from '../api/notifications';
 
 export type AuthContextValue = {
   token: string | null;
@@ -51,6 +52,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               ? (me.user as Record<string, unknown>)
               : null;
         setUser(u);
+        void registerDevicePushWithServer();
       } catch {
         setUser(null);
         await clearStoredToken();
@@ -83,9 +85,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const res = await apiLogin(username, password);
     setToken(res.access_token);
     setUser((res.user ?? null) as Record<string, unknown> | null);
+    void registerDevicePushWithServer();
   }, []);
 
   const logout = useCallback(async () => {
+    await revokeDevicePushOnServer();
     await apiLogout();
     setToken(null);
     setUser(null);

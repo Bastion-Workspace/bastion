@@ -72,20 +72,15 @@ async def notify_chat_reply_ready(
     response_text: str,
     agent_name: Optional[str] = None,
     conversation_title: Optional[str] = None,
+    originating_surface_id: Optional[str] = None,
 ) -> None:
     """
-    Send agent_notification (subtype chat_completion) to the user's session(s).
+    Send agent_notification (subtype chat_completion) via NotificationRouter.
     Failures are logged and ignored so chat persistence is never blocked.
     """
     if not user_id or not conversation_id or not str(conversation_id).strip():
         return
     try:
-        from utils.websocket_manager import get_websocket_manager
-
-        ws = get_websocket_manager()
-        if not ws:
-            return
-
         preview = _preview_from_body(response_text)
         if not preview:
             preview = "Reply ready"
@@ -104,6 +99,13 @@ async def notify_chat_reply_ready(
             "preview": preview,
             "timestamp": now.isoformat(),
         }
-        await ws.send_to_session(payload, user_id)
+        from services.notification_router import route_notification
+
+        await route_notification(
+            user_id,
+            NOTIFICATION_SUBTYPE,
+            payload,
+            originating_surface_id=originating_surface_id,
+        )
     except Exception as e:
         logger.debug("chat completion notification skipped: %s", e)

@@ -11,7 +11,7 @@ import uuid
 from typing import Dict, Any, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -59,7 +59,8 @@ class AsyncOrchestratorRequest(BaseModel):
 @router.post("/api/async/orchestrator/stream")
 async def stream_orchestrator_response(
     request: AsyncOrchestratorRequest,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+    http_request: Request,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ) -> StreamingResponse:
     """Stream ENHANCED orchestrator response with multi-operation state management"""
     try:
@@ -96,6 +97,8 @@ async def stream_orchestrator_response(
         stream_run_id = str(uuid.uuid4())
         request_context["client_run_id"] = stream_run_id
 
+        surface_hdr = (http_request.headers.get("x-surface-id") or "").strip() or None
+
         # Log active_editor for debugging
         if request.active_editor:
             logger.info(f"📝 ACTIVE EDITOR: Passing to gRPC orchestrator (file={request.active_editor.get('filename', 'unknown')}, type={request.active_editor.get('frontmatter', {}).get('type', 'unknown')})")
@@ -114,6 +117,7 @@ async def stream_orchestrator_response(
                 is_branch_resend=bool(request.is_branch_resend),
                 branch_message_id=request.branch_message_id,
                 client_run_id=stream_run_id,
+                originating_surface_id=surface_hdr,
             ),
             media_type="text/event-stream",
             headers={

@@ -39,6 +39,7 @@ import {
 import { Add, PlayArrow, History, Restore, Lock, Download, ContentCopy } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import { getOrCreateDesktopSurfaceId } from '../../utils/surfaceId';
 import agentFactoryService from '../../services/agentFactoryService';
 import UsageWarningBanner from './UsageWarningBanner';
 import WorkflowSection from './WorkflowSection';
@@ -710,11 +711,13 @@ export default function PlaybookEditor({ playbookId }) {
     const query = overrideQuery !== null ? overrideQuery : testQuery;
     (async () => {
       try {
+        const surfaceId = getOrCreateDesktopSurfaceId();
         const response = await fetch('/api/async/orchestrator/stream', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            ...(surfaceId ? { 'X-Surface-Id': surfaceId } : {}),
           },
           body: JSON.stringify({
             query,

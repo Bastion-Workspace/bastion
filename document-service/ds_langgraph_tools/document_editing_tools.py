@@ -824,38 +824,49 @@ async def apply_operations_directly(
         current_content = file_path.read_text(encoding='utf-8')
         frontmatter, body = parse_frontmatter(current_content)
         has_frontmatter = bool(frontmatter)
-        
+
+        from ds_utils.editor_operations_resolver import get_frontmatter_end
+
+        fm_end = get_frontmatter_end(current_content)
+
         # Apply operations (same logic as apply_document_edit_proposal)
         # Sort operations by start position (highest first to keep offsets stable)
         sorted_ops = sorted(operations, key=lambda op: op.get("start", 0), reverse=True)
-        
+
         new_content = current_content
         for op in sorted_ops:
             op_type = op.get("op_type", "replace_range")
             start = op.get("start", 0)
             end = op.get("end", start)
             text = op.get("text", "")
-            
+
             if op_type == "delete_range":
+                start = max(start, fm_end)
+                end = max(end, fm_end)
+                if start >= end:
+                    logger.warning("Skipping delete_range that targets frontmatter zone")
+                    continue
                 new_content = new_content[:start] + new_content[end:]
             elif op_type == "replace_range":
+                start = max(start, fm_end)
+                end = max(end, fm_end)
+                if start >= end:
+                    logger.warning("Skipping replace_range that targets frontmatter zone")
+                    continue
                 new_content = new_content[:start] + text + new_content[end:]
             elif op_type == "insert_after_heading":
-                # For insert_after_heading, we need to find the anchor and insert after it
                 anchor_text = op.get("anchor_text", "")
                 if anchor_text:
-                    anchor_pos = new_content.find(anchor_text)
+                    anchor_pos = new_content.find(anchor_text, fm_end)
                     if anchor_pos != -1:
-                        # Find end of line after anchor
                         line_end = new_content.find("\n", anchor_pos + len(anchor_text))
                         if line_end == -1:
                             line_end = len(new_content)
                         insert_pos = line_end + 1
                         new_content = new_content[:insert_pos] + text + new_content[insert_pos:]
                     else:
-                        logger.warning(f"⚠️ Anchor text not found for insert_after_heading: {anchor_text}")
+                        logger.warning("Anchor text not found for insert_after_heading: %s", anchor_text)
                 else:
-                    # Fallback to end
                     new_content = new_content + text
         
         # Snapshot current content before overwrite (version history)
@@ -1197,11 +1208,18 @@ async def apply_document_edit_proposal(
                 else:
                     new_content = content
             elif edit_mode == "insert_at":
-                insert_pos = content_edit.get("insert_position")
-                if insert_pos is None:
-                    # Append to end
+                from ds_utils.editor_operations_resolver import get_frontmatter_end
+
+                fm_end = get_frontmatter_end(current_content)
+                raw_pos = content_edit.get("insert_position")
+                if raw_pos is None:
                     new_content = current_content + "\n\n" + content
                 else:
+                    try:
+                        raw_int = int(raw_pos)
+                    except (TypeError, ValueError):
+                        raw_int = len(current_content)
+                    insert_pos = max(raw_int, fm_end)
                     new_content = current_content[:insert_pos] + content + current_content[insert_pos:]
             
             applied_count = 1

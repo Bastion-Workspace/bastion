@@ -398,6 +398,31 @@ async def get_feed_articles(
         raise HTTPException(status_code=500, detail="Failed to get feed articles")
 
 
+@router.get("/api/rss/articles", response_model=List[RSSArticle])
+async def get_all_user_articles(
+    limit: int = 200,
+    read_filter: str = "unread",
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """
+    Cross-feed article list for the current user (feeds: own + global).
+
+    read_filter: ``all``, ``unread`` (default), or ``read``.
+    """
+    try:
+        rf = (read_filter or "unread").strip().lower()
+        if rf not in ("all", "unread", "read"):
+            rf = "unread"
+        rss_service = await get_rss_service()
+        articles = await rss_service.get_all_user_articles(
+            current_user.user_id, limit=limit, read_filter=rf
+        )
+        return articles
+    except Exception as e:
+        logger.error("RSS API: get all user articles failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to list articles")
+
+
 async def _require_feed_access(
     rss_service, feed_id: str, current_user: AuthenticatedUserResponse
 ) -> None:
@@ -407,6 +432,26 @@ async def _require_feed_access(
     is_admin = current_user.role == "admin"
     if not is_admin and feed.user_id and feed.user_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied to this RSS feed")
+
+
+@router.get("/api/rss/articles/{article_id}", response_model=RSSArticle)
+async def get_rss_article(
+    article_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Return one article (including stored body fields) if the user can access its feed."""
+    try:
+        rss_service = await get_rss_service()
+        article = await rss_service.get_article(article_id)
+        if not article:
+            raise HTTPException(status_code=404, detail="Article not found")
+        await _require_feed_access(rss_service, article.feed_id, current_user)
+        return article
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("RSS API: get article failed for %s: %s", article_id, e)
+        raise HTTPException(status_code=500, detail="Failed to load article")
 
 
 @router.post("/api/rss/mark-all-read", response_model=RSSBulkCountResponse)
@@ -631,9 +676,7 @@ async def delete_rss_article(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Delete an RSS article
-    
-    **Trust busting for unwanted articles!** Remove this article from the user's feed!
+    Delete an RSS article for the current user when permitted.
     """
     try:
         logger.info(f"📡 RSS API: Deleting article {article_id} for user {current_user.user_id}")

@@ -35,7 +35,7 @@ class SearchResult(NamedTuple):
 
 def get_frontmatter_end(content: str) -> int:
     """Return character index where frontmatter ends (0 if no frontmatter)."""
-    m = re.match(r"^(---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n)", content)
+    m = re.match(r"^(---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n?)", content)
     return m.end() if m else 0
 
 

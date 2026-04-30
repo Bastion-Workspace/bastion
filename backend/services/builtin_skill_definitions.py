@@ -1531,7 +1531,7 @@ BUILTIN_SKILL_DEFINITIONS: list[dict] = [
             "'/api/rss/feeds/your-feed-id/articles'. queryParams is a plain object turned into a query string (omit or {} if none).\n"
             "- Allowed paths only (anything else is rejected): /api/todos, /api/org/todos (deprecated list shape); /api/org/agenda, /api/org/tags, /api/org/search, "
             "/api/org/clock/active, /api/org/journal/entry; /api/calendar/events, /api/calendar/calendars; "
-            "/api/rss/feeds, /api/rss/unread-count, /api/rss/feeds/{feed_id}/articles; /api/folders/tree, /api/document-pins, "
+            "/api/rss/feeds, /api/rss/unread-count, /api/rss/articles, /api/rss/articles/{article_id}, /api/rss/feeds/{feed_id}/articles; /api/folders/tree, /api/document-pins, "
             "/api/folders/{folder_id}/contents; /api/status-bar/data.\n"
             "- Limits: read-only GET; roughly 10 requests per 10 seconds and 3 concurrent; ~15s timeout per call. "
             "Use modest polling (e.g. 30–60s) if refreshing. Always .catch() errors.\n"

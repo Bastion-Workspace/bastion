@@ -24,7 +24,7 @@ def strip_frontmatter_block(text: str) -> str:
 def frontmatter_end_index(text: str) -> int:
     """Return the end index of a leading YAML frontmatter block if present, else 0."""
     try:
-        m = re.match(r'^(---\s*\n[\s\S]*?\n---\s*\n)', text, flags=re.MULTILINE)
+        m = re.match(r"^(---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n?)", text)
         if m:
             return m.end()
         return 0

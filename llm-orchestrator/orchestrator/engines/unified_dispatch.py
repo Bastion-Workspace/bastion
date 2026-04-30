@@ -216,6 +216,15 @@ class UnifiedDispatcher:
             }
             if pending_auth:
                 payload["pending_auth"] = pending_auth
+                itype = (pending_auth or {}).get("interaction_type")
+                if itype:
+                    payload["interaction_type"] = itype
+                idata = (pending_auth or {}).get("interaction_data") or {}
+                aid = (pending_auth or {}).get("approval_id") or idata.get("approval_id")
+                if aid:
+                    payload["approval_id"] = str(aid)
+                if idata.get("command"):
+                    payload["command"] = str(idata.get("command", ""))
             content = content or f"Approval required at step '{payload['step_name']}'."
             yield orchestrator_pb2.ChatChunk(
                 type="permission_request",
@@ -351,6 +360,15 @@ class UnifiedDispatcher:
             }
             if pending_auth:
                 payload["pending_auth"] = pending_auth
+                itype = (pending_auth or {}).get("interaction_type")
+                if itype:
+                    payload["interaction_type"] = itype
+                idata = (pending_auth or {}).get("interaction_data") or {}
+                aid = (pending_auth or {}).get("approval_id") or idata.get("approval_id")
+                if aid:
+                    payload["approval_id"] = str(aid)
+                if idata.get("command"):
+                    payload["command"] = str(idata.get("command", ""))
             content = content or f"Approval required at step '{payload['step_name']}'."
             yield orchestrator_pb2.ChatChunk(
                 type="permission_request",

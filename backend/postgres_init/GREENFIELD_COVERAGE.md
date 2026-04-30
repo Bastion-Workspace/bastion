@@ -14,8 +14,8 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 
 ## Summary
 
-- **A**: 41
-- **B**: 23
+- **A**: 42
+- **B**: 27
 - **C**: 18
 - **R**: 81
 
@@ -186,9 +186,11 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 | `160_admin_tts_empty_means_browser.sql` | B | included via \ir from 02-09 wrapper |
 | `161_add_openrouter_voice_provider.sql` | B | included via \ir from 02-09 wrapper |
 | `162_add_zettelkasten_settings.sql` | B | included via \ir from 02-09 wrapper |
-| `163_code_chunks.sql` | A | tables in 01: code_chunks |
-| `164_user_shell_policy.sql` | A | tables in 01: user_shell_policy |
-| `165_code_workspace_rls.sql` | R | RLS on code_workspaces, code_chunks (merged in 01) |
+| `163_code_chunks.sql` | B | included via \ir from 02-09 wrapper |
+| `164_user_shell_policy.sql` | B | included via \ir from 02-09 wrapper |
+| `165_code_workspace_rls.sql` | B | included via \ir from 02-09 wrapper |
+| `166_notification_router.sql` | A | tables in 01: mobile_push_tokens, notification_log |
+| `167_device_capabilities_policy.sql` | B | included via \ir from 02-09 wrapper |
 
 ## Wrapper `\ir` targets (02-09)
 
@@ -218,3 +220,4 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 - `163_code_chunks.sql`
 - `164_user_shell_policy.sql`
 - `165_code_workspace_rls.sql`
+- `167_device_capabilities_policy.sql`

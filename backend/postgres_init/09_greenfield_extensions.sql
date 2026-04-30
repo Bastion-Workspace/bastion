@@ -6,9 +6,11 @@
 -- Code workspace chunk index for semantic search (163; idempotent with 01_init.sql merge).
 -- Per-user shell command policy (164; idempotent with 01_init.sql merge).
 -- Code workspace RLS (165; idempotent with 01_init.sql merge).
+-- device_tokens capabilities_policy (167; idempotent for DBs created before column merge).
 
 \c bastion_knowledge_base
 
+\ir migrations/167_device_capabilities_policy.sql
 \ir migrations/162_add_zettelkasten_settings.sql
 \ir migrations/163_code_chunks.sql
 \ir migrations/164_user_shell_policy.sql

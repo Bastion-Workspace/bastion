@@ -78,6 +78,26 @@ export const ThemeProvider = ({ children }) => {
   }, [darkMode]);
 
   useEffect(() => {
+    const themeColor = darkMode ? '#121212' : '#f5f5f5';
+    let meta = document.querySelector('meta[name="theme-color"]:not([media])');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.setAttribute('name', 'theme-color');
+      document.head.appendChild(meta);
+    }
+    meta.setAttribute('content', themeColor);
+
+    let appleTouchIcon = document.querySelector('link[rel="apple-touch-icon"]:not([media])');
+    if (!appleTouchIcon) {
+      appleTouchIcon = document.createElement('link');
+      appleTouchIcon.setAttribute('rel', 'apple-touch-icon');
+      appleTouchIcon.setAttribute('sizes', '180x180');
+      document.head.appendChild(appleTouchIcon);
+    }
+    appleTouchIcon.setAttribute('href', darkMode ? '/images/bastion-dark.png' : '/images/bastion.png');
+  }, [darkMode]);
+
+  useEffect(() => {
     localStorage.setItem(STORAGE_KEY_ACCENT, accentId);
   }, [accentId]);
 

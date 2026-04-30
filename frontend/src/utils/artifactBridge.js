@@ -24,6 +24,8 @@ const ALLOWED_ENDPOINTS = [
   /^\/api\/calendar\/calendars$/,
   /^\/api\/rss\/feeds$/,
   /^\/api\/rss\/unread-count$/,
+  /^\/api\/rss\/articles$/,
+  /^\/api\/rss\/articles\/[^/]+$/,
   /^\/api\/rss\/feeds\/[^/]+\/articles$/,
   /^\/api\/folders\/tree$/,
   /^\/api\/document-pins$/,

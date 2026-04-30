@@ -316,6 +316,84 @@ async def internal_transcribe_audio(
     return {"success": True, "text": text}
 
 
+_SHELL_APPROVAL_UUID = re.compile(
+    r"^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+    re.IGNORECASE,
+)
+
+
+async def _try_external_shell_approval_reply(
+    user_id: str, text: str
+) -> Optional[Dict[str, str]]:
+    """
+    Telegram/Discord quick reply: 'approve <uuid>' / 'run <uuid>' / 'yes <uuid>'
+    or 'skip <uuid>' / 'no <uuid>' for shell_command_approval rows.
+    """
+    from services.database_manager.database_helpers import fetch_one, execute
+
+    raw = (text or "").strip()
+    parts = raw.split(None, 1)
+    if len(parts) != 2:
+        return None
+    verb, aid_str = parts[0].lower(), parts[1].strip()
+    if not _SHELL_APPROVAL_UUID.match(aid_str):
+        return None
+    try:
+        aid = uuid.UUID(aid_str)
+    except ValueError:
+        return None
+    row = await fetch_one(
+        """
+        SELECT id, status, governance_type
+        FROM agent_approval_queue
+        WHERE id = $1::uuid AND user_id = $2
+        """,
+        aid,
+        user_id,
+    )
+    if not row or (row.get("governance_type") or "") != "shell_command_approval":
+        return None
+    if row.get("status") != "pending":
+        return {
+            "response": f"This approval is already {row.get('status')}.",
+        }
+    now = datetime.now(timezone.utc)
+    if verb in ("approve", "run", "yes"):
+        await execute(
+            """
+            UPDATE agent_approval_queue
+            SET status = 'approved', responded_at = $1
+            WHERE id = $2::uuid AND user_id = $3 AND status = 'pending'
+              AND governance_type = 'shell_command_approval'
+            """,
+            now,
+            aid,
+            user_id,
+        )
+        return {
+            "response": (
+                "Shell command approved. Say yes or continue in Bastion chat "
+                "so the agent can run it, or ask the agent to retry the command."
+            ),
+        }
+    if verb in ("skip", "no", "reject"):
+        await execute(
+            """
+            UPDATE agent_approval_queue
+            SET status = 'rejected', responded_at = $1
+            WHERE id = $2::uuid AND user_id = $3 AND status = 'pending'
+              AND governance_type = 'shell_command_approval'
+            """,
+            now,
+            aid,
+            user_id,
+        )
+        return {
+            "response": "Shell command skipped. Tell the agent not to run it, or start a new request.",
+        }
+    return None
+
+
 @router.post("/external-chat", dependencies=[Depends(verify_internal_service_key)])
 async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
     """
@@ -336,6 +414,14 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
             )
             return {
                 "response": "Started a new chat. How can I help?",
+                "images": [],
+                "conversation_id": body.conversation_id,
+            }
+
+        shell_quick = await _try_external_shell_approval_reply(body.user_id, body.query)
+        if shell_quick is not None:
+            return {
+                "response": shell_quick["response"],
                 "images": [],
                 "conversation_id": body.conversation_id,
             }
@@ -667,9 +753,13 @@ async def create_agent_conversation(body: AgentConversationRequest) -> Dict[str,
         )
 
         from utils.websocket_manager import get_websocket_manager
+        from services.notification_router import route_notification
+
         ws_manager = get_websocket_manager()
         if ws_manager:
-            await ws_manager.send_to_session(
+            await route_notification(
+                body.user_id,
+                "agent_conversation",
                 {
                     "type": "agent_notification",
                     "conversation_id": conversation_id,
@@ -678,7 +768,7 @@ async def create_agent_conversation(body: AgentConversationRequest) -> Dict[str,
                     "preview": body.message[:150] if body.message else "",
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
-                body.user_id,
+                originating_surface_id=None,
             )
             await ws_manager.send_to_session(
                 {"type": "conversation_created", "conversation_id": conversation_id},

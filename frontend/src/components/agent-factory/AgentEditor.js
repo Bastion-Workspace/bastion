@@ -34,6 +34,7 @@ import {
 import { PlayArrow, Delete, Download, Lock, Restore, DeleteSweep, Star, StarBorder, ContentCopy } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import { getOrCreateDesktopSurfaceId } from '../../utils/surfaceId';
 import agentFactoryService, { invalidateAgentHandlesQuery } from '../../services/agentFactoryService';
 import IdentitySection from './IdentitySection';
 import DataSourcesSection from './DataSourcesSection';
@@ -291,11 +292,13 @@ export default function AgentEditor({ profileId, onCloseEntityTab }) {
     // Backend skips persisting when agent_profile_id is set; output is via channels / Recent Runs only.
     const conversationId = `agent-run-${crypto.randomUUID?.() ?? Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
     try {
+      const surfaceId = getOrCreateDesktopSurfaceId();
       const response = await fetch('/api/async/orchestrator/stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(surfaceId ? { 'X-Surface-Id': surfaceId } : {}),
         },
         body: JSON.stringify({
           query: testQuery,

@@ -7,7 +7,11 @@ import json
 import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from services.device_token_service import resolve_token, update_last_connected
+from services.device_token_service import (
+    get_capabilities_policy,
+    resolve_token,
+    update_last_connected,
+)
 from utils.websocket_manager import get_websocket_manager
 
 logger = logging.getLogger(__name__)
@@ -15,6 +19,36 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Device Proxy"])
 
 AUTH_TIMEOUT_SECONDS = 10
+
+
+async def _push_initial_policy(
+    websocket: WebSocket, user_id: str, token_id: str, device_id: str
+) -> None:
+    """Send the stored capabilities_policy to the daemon if any has been configured."""
+    try:
+        policy = await get_capabilities_policy(token_id, user_id)
+    except Exception as e:
+        logger.warning(
+            "Failed to load capabilities_policy for token=%s: %s", token_id, e
+        )
+        return
+    if not policy:
+        return
+    try:
+        await websocket.send_json({
+            "type": "set_policy",
+            "capabilities": policy,
+        })
+        logger.info(
+            "Pushed initial policy to device: user=%s, device=%s, caps=%d",
+            user_id,
+            device_id,
+            len(policy),
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to push initial policy to device=%s: %s", device_id, e
+        )
 
 
 @router.websocket("/api/ws/device")
@@ -69,6 +103,9 @@ async def device_websocket(websocket: WebSocket):
         await update_last_connected(token_id, ip=client_ip)
     except Exception as e:
         logger.debug("Could not update last_connected_at: %s", e)
+    # Push the user's stored capabilities_policy to the daemon as soon as it
+    # connects so server-side policy is authoritative even before register.
+    await _push_initial_policy(websocket, user_id, token_id, device_id)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -86,6 +123,8 @@ async def device_websocket(websocket: WebSocket):
                 ws_manager.unregister_device(user_id, device_id)
                 ws_manager.register_device(user_id, dev_id, websocket, capabilities, token_id=token_id)
                 device_id = dev_id
+                # Re-push policy on every register (covers reconnects and policy updates)
+                await _push_initial_policy(websocket, user_id, token_id, device_id)
             elif msg_type == "result":
                 request_id = msg.get("request_id")
                 if request_id:

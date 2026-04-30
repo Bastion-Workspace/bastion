@@ -1,5 +1,6 @@
 import { assertApiBaseUrl } from './config';
 import { getStoredToken } from '../session/tokenStore';
+import { getOrCreateMobileSurfaceId } from '../session/surfaceIdStore';
 
 export type StreamChunk =
   | { type: 'content'; content: string }
@@ -42,6 +43,13 @@ export async function streamOrchestrator({
   if (!token) {
     throw new Error('Not authenticated');
   }
+  let surfaceHeader: Record<string, string> = {};
+  try {
+    const sid = await getOrCreateMobileSurfaceId();
+    if (sid) surfaceHeader = { 'X-Surface-Id': sid };
+  } catch {
+    /* ignore */
+  }
 
   const body: Record<string, unknown> = {
     query,
@@ -61,6 +69,7 @@ export async function streamOrchestrator({
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${token}`,
+      ...surfaceHeader,
     },
     body: JSON.stringify(body),
     signal,

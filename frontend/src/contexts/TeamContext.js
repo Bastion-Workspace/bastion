@@ -6,6 +6,7 @@ import { useMessaging } from './MessagingContext';
 import { useNotifications } from './NotificationContext';
 import { devLog } from '../utils/devConsole';
 import { activeConversationSessionStorageKey } from '../utils/chatSelectionStorage';
+import { getOrCreateDesktopSurfaceId } from '../utils/surfaceId';
 
 const TeamContext = createContext();
 
@@ -20,7 +21,7 @@ export const useTeam = () => {
 export const TeamProvider = ({ children }) => {
   const { user, isAuthenticated } = useAuth();
   const { loadRooms } = useMessaging();
-  const { addNotification } = useNotifications();
+  const { addNotification, dismissNotification } = useNotifications();
   const queryClient = useQueryClient();
   
   // State
@@ -441,6 +442,43 @@ export const TeamProvider = ({ children }) => {
         reconnectAttempts = 0; // Reset on successful connection
         // Load unread counts when WebSocket connects
         loadUnreadCounts();
+
+        const surfaceId = getOrCreateDesktopSurfaceId();
+        if (surfaceId && ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: 'surface_meta',
+              surface_id: surfaceId,
+              surface_type: 'desktop_web',
+            })
+          );
+          const pushSurfaceState = () => {
+            if (ws.readyState !== WebSocket.OPEN) return;
+            try {
+              const scoped = user?.user_id
+                ? activeConversationSessionStorageKey(user.user_id)
+                : null;
+              const active =
+                (scoped && sessionStorage.getItem(scoped)) ||
+                sessionStorage.getItem('bastion_ui_active_conversation_id') ||
+                '';
+              const vis = document.visibilityState === 'visible' ? 'focused' : 'blurred';
+              ws.send(
+                JSON.stringify({
+                  type: 'surface_state',
+                  surface_id: surfaceId,
+                  state: vis,
+                  active_conversation_id: active,
+                })
+              );
+            } catch (_) {
+              /* sessionStorage unavailable */
+            }
+          };
+          ws._bastionVisHandler = pushSurfaceState;
+          document.addEventListener('visibilitychange', pushSurfaceState);
+          pushSurfaceState();
+        }
         
         // Start heartbeat to keep connection alive
         const heartbeatInterval = setInterval(() => {
@@ -462,6 +500,10 @@ export const TeamProvider = ({ children }) => {
           const data = JSON.parse(event.data);
           devLog('📨 WebSocket message received:', data.type, data);
           
+          if (data.type === 'notification_ack' && data.notification_id) {
+            dismissNotification(String(data.notification_id));
+            return;
+          }
           if (data.type === 'agent_notification') {
             if (data.subtype === 'chat_completion' && data.conversation_id) {
               try {
@@ -707,6 +749,13 @@ export const TeamProvider = ({ children }) => {
         if (ws.heartbeatInterval) {
           clearInterval(ws.heartbeatInterval);
         }
+        if (ws._bastionVisHandler) {
+          try {
+            document.removeEventListener('visibilitychange', ws._bastionVisHandler);
+          } catch (_) {
+            /* ignore */
+          }
+        }
         
         wsRef.current = null;
         
@@ -733,10 +782,18 @@ export const TeamProvider = ({ children }) => {
         clearTimeout(reconnectTimeout);
       }
       if (wsRef.current) {
-        wsRef.current.close();
+        const cur = wsRef.current;
+        if (cur._bastionVisHandler) {
+          try {
+            document.removeEventListener('visibilitychange', cur._bastionVisHandler);
+          } catch (_) {
+            /* ignore */
+          }
+        }
+        cur.close();
       }
     };
-    }, [isAuthenticated, user, currentTeam, loadTeamPosts, loadTeamMembers, loadPendingInvitations, loadUnreadCounts, loadUserTeams, loadRooms]);
+    }, [isAuthenticated, user, currentTeam, loadTeamPosts, loadTeamMembers, loadPendingInvitations, loadUnreadCounts, loadUserTeams, loadRooms, dismissNotification]);
 
   // Function to mark a post as "viewed" (remove from new posts set)
   const markPostAsViewed = useCallback((postId) => {

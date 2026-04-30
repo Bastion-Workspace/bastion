@@ -39,7 +39,7 @@ export default function MapViewTabContent({ tab, darkMode = false }) {
 
   if (!styleObject) {
     return (
-      <div style={{ padding: 24, textAlign: 'center', color: '#666' }}>
+      <div style={{ padding: 24, textAlign: 'center', color: darkMode ? '#b3b3b3' : '#666' }}>
         Map tiles not configured. Set VITE_PMTILES_URL to enable map view.
       </div>
     );

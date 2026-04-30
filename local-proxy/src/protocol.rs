@@ -1,6 +1,8 @@
 //! Protocol message types for WebSocket communication with Bastion backend.
 
+use crate::config::CapabilityConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -41,6 +43,12 @@ pub enum BackendToDaemon {
     SetWorkspace {
         request_id: String,
         workspace_root: String,
+    },
+    /// Server-pushed capability + path/command policy. Replaces the daemon's
+    /// in-memory `capabilities` map and is persisted to the local config.yml.
+    /// The daemon re-registers with the backend after applying.
+    SetPolicy {
+        capabilities: HashMap<String, CapabilityConfig>,
     },
     Ping,
 }

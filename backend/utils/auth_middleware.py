@@ -70,6 +70,8 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             "/api/migration",
             "/api/games",
             "/api/saved-artifacts",
+            "/api/notifications",
+            "/api/rss",
         ]
         
         # Paths that don't require authentication

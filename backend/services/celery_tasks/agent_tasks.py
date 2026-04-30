@@ -659,6 +659,70 @@ def resume_approved_agent(self, approval_id: str, user_id: str) -> Dict[str, Any
         return {"success": False, "error": str(e), "message": "Resume failed"}
 
 
+@celery_app.task(bind=True, name="agents.notify_shell_approval")
+def notify_shell_approval(
+    self,
+    user_id: str,
+    approval_id: str,
+    preview_data_json: str,
+    prompt: str,
+    step_name: str,
+    agent_profile_id: str,
+    execution_id: str,
+) -> Dict[str, Any]:
+    """
+    Route a shell-command approval to in-app WebSocket and external cascade
+    (Telegram, Discord, Slack, etc.) with instructions for approve/skip by ID.
+    """
+    import json as _json
+    from datetime import timezone as _tz
+
+    async def _go() -> None:
+        from services.notification_router import route_notification
+
+        preview: Dict[str, Any] = {}
+        try:
+            raw = preview_data_json or "{}"
+            preview = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except Exception:
+            preview = {}
+        if not isinstance(preview, dict):
+            preview = {}
+        cmd = str(preview.get("command") or "")[:2000]
+        pr = (prompt or "")[:800]
+        body = (
+            f"**Shell command**\n`{cmd}`\n\n{pr}\n\n"
+            f"**Approval ID:** `{approval_id}`\n"
+            "Reply with `approve <id>` or `skip <id>` from Telegram/Discord, "
+            "or use Run / Skip in Bastion web chat."
+        )
+        await route_notification(
+            user_id,
+            "approval_required",
+            {
+                "type": "agent_notification",
+                "subtype": "shell_command_approval",
+                "approval_id": approval_id,
+                "agent_profile_id": agent_profile_id or None,
+                "execution_id": execution_id or None,
+                "step_name": step_name,
+                "prompt": pr,
+                "title": "Shell command approval",
+                "preview": body[:3900],
+                "command": cmd,
+                "timestamp": datetime.now(_tz.utc).isoformat(),
+            },
+            originating_surface_id=None,
+        )
+
+    try:
+        run_async(_go())
+        return {"success": True}
+    except Exception as e:
+        logger.exception("notify_shell_approval failed: %s", e)
+        return {"success": False, "error": str(e)}
+
+
 @celery_app.task(bind=True, name="agents.dispatch_email_reaction")
 def dispatch_email_reaction(
     self,

@@ -3,10 +3,11 @@ Device token service for Bastion Local Proxy daemon authentication.
 """
 
 import hashlib
+import json
 import logging
 import secrets
 import uuid
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from services.database_manager.database_helpers import fetch_all, fetch_one, execute
 
@@ -56,13 +57,61 @@ async def resolve_token(raw_token: str) -> Optional[dict]:
     token_hash = _hash_token(raw_token)
     row = await fetch_one(
         """
-        SELECT id, user_id, device_name, last_connected_at
+        SELECT id, user_id, device_name, last_connected_at, capabilities_policy
         FROM device_tokens
         WHERE token_hash = $1 AND revoked_at IS NULL
         """,
         token_hash,
     )
     return dict(row) if row else None
+
+
+async def get_capabilities_policy(token_id: str, user_id: str) -> Optional[Dict[str, Any]]:
+    """Return the stored capabilities_policy JSONB for a token, or None if not found."""
+    try:
+        uuid.UUID(token_id)
+    except (ValueError, TypeError):
+        return None
+    row = await fetch_one(
+        """
+        SELECT capabilities_policy
+        FROM device_tokens
+        WHERE id = $1::uuid AND user_id = $2 AND revoked_at IS NULL
+        """,
+        token_id,
+        user_id,
+    )
+    if not row:
+        return None
+    raw = row["capabilities_policy"]
+    if isinstance(raw, str):
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    return dict(raw) if raw else {}
+
+
+async def set_capabilities_policy(
+    token_id: str, user_id: str, policy: Dict[str, Any]
+) -> bool:
+    """Replace capabilities_policy for a token. Returns True if a row was updated."""
+    try:
+        uuid.UUID(token_id)
+    except (ValueError, TypeError):
+        return False
+    payload = json.dumps(policy or {})
+    await execute(
+        """
+        UPDATE device_tokens
+        SET capabilities_policy = $3::jsonb
+        WHERE id = $1::uuid AND user_id = $2 AND revoked_at IS NULL
+        """,
+        token_id,
+        user_id,
+        payload,
+    )
+    return True
 
 
 async def count_active_tokens(user_id: str) -> int:

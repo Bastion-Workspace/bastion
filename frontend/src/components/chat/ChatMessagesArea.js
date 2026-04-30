@@ -25,7 +25,7 @@ import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { materialLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { materialLight, materialDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { markdownToPlainText, renderCitations, smartCopy } from '../../utils/chatUtils';
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import FolderSelectionDialog from './FolderSelectionDialog';
@@ -75,31 +75,60 @@ const ChatMessagesArea = forwardRef(function ChatMessagesArea({ darkMode: darkMo
 
   // Handle HITL permission response - DIRECT API CALL VERSION
   const handleHITLResponse = useCallback(async (response) => {
-    console.log('🛡️ HITL Response - Direct submission:', response);
-
     try {
-      // ROOSEVELT'S DIRECT CHARGE: Use sendMessage with override parameter
-      // sendMessage will handle adding the user message, so we don't duplicate it here
       await sendMessage('auto', response);
-
-      console.log('✅ HITL response sent directly via sendMessage override');
     } catch (error) {
-      console.error('❌ Failed to send HITL response directly:', error);
-
-      // Show user what happened
+      console.error('Failed to send HITL response:', error);
       setMessages?.((prev) => [
         ...prev,
         {
           id: Date.now(),
           role: 'system',
           type: 'system',
-          content: `⚠️ Auto-submission failed. Please copy and resend: "${response}"`,
+          content: `Auto-submission failed. Please copy and resend: "${response}"`,
           timestamp: new Date().toISOString(),
           isError: true,
         },
       ]);
     }
   }, [sendMessage, setMessages]);
+
+  const handleShellApproval = useCallback(
+    async (action, message) => {
+      const id = message.shellApprovalId;
+      if (!id) return;
+      try {
+        if (action === 'run') {
+          await apiService.post(
+            `/api/settings/shell-approvals/${encodeURIComponent(id)}/grant`
+          );
+          await sendMessage('auto', 'yes, run the approved shell command.');
+        } else {
+          await apiService.post(
+            `/api/settings/shell-approvals/${encodeURIComponent(id)}/reject`
+          );
+          await sendMessage('auto', 'skip, do not run that shell command.');
+        }
+      } catch (error) {
+        console.error('Shell approval action failed:', error);
+        setMessages?.((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            role: 'system',
+            type: 'system',
+            content:
+              action === 'run'
+                ? 'Could not record approval. Try again or approve from Settings.'
+                : 'Could not record skip. Try again.',
+            timestamp: new Date().toISOString(),
+            isError: true,
+          },
+        ]);
+      }
+    },
+    [sendMessage, setMessages]
+  );
 
   // Fetch AI name from prompt settings
   const { data: promptSettings } = useQuery(
@@ -642,7 +671,12 @@ ${message.content}
 
   // Check if a message is a HITL permission request
   const isHITLPermissionRequest = useCallback((message) => {
-    // ROOSEVELT'S ENHANCED HITL: Use new tagging system first, fallback to content detection
+    if (
+      message.interactionType === 'shell_command_approval' &&
+      message.shellApprovalId
+    ) {
+      return false;
+    }
     if (message.isPermissionRequest && message.requiresApproval) {
       return true;
     }
@@ -672,7 +706,7 @@ ${message.content}
 
       return !inline && match ? (
         <SyntaxHighlighter
-          style={materialLight}
+          style={theme.palette.mode === 'dark' ? materialDark : materialLight}
           language={match[1].split(':')[0]} // Handle potential colons in language name for highlighter
           PreTag="div"
           {...props}
@@ -681,7 +715,11 @@ ${message.content}
         </SyntaxHighlighter>
       ) : (
         <code className={className} {...props} style={{ 
-          backgroundColor: 'rgba(0, 0, 0, 0.1)', 
+          backgroundColor:
+            theme.palette.mode === 'dark'
+              ? 'rgba(255, 255, 255, 0.15)'
+              : 'rgba(0, 0, 0, 0.1)',
+          color: theme.palette.text.primary,
           padding: '2px 4px', 
           borderRadius: '3px',
           fontSize: '0.9em'
@@ -1153,6 +1191,7 @@ ${message.content}
               handleSaveAsMarkdown={handleSaveAsMarkdown}
               isHITLPermissionRequest={isHITLPermissionRequest}
               handleHITLResponse={handleHITLResponse}
+              handleShellApproval={handleShellApproval}
               hasResearchPlan={hasResearchPlan}
               executingPlans={executingPlans}
               extractImageUrls={extractImageUrls}

@@ -20,6 +20,98 @@ DONE_STATES = {"DONE", "CANCELED", "CANCELLED"}
 # Trailing org-mode tag(s) at end of headline text (e.g. " :@home:" or " :a::b:")
 _RE_TRAILING_ORG_TAGS = re.compile(r"\s+:([A-Za-z0-9_@:+-]+):\s*$")
 
+# Inactive timestamp on its own line (capture / creation time under a heading)
+_RE_CAPTURE_TS_LINE = re.compile(r"^\s*\[(\d{4}-\d{2}-\d{2}[^\]]*)\]\s*$")
+
+# Emacs org "Note taken on" blocks: header line then one or more indented continuation lines
+_RE_NOTE_TAKEN = re.compile(
+    r"(?:^|\n)\s*-\s+Note taken on\s+\[([^\]]+)\]\s*(?:\\\\|\\)?\s*\r?\n"
+    r"((?:[ \t]+[^\n]+\r?\n?)+)",
+    re.MULTILINE,
+)
+
+# PROPERTIES / LOGBOOK drawers (strip from body before preview)
+_RE_ORG_DRAWER = re.compile(
+    r":(?:PROPERTIES|LOGBOOK):\s*\n.*?:END:\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Planning lines often duplicated in body text
+_RE_PLANNING_LINE = re.compile(
+    r"^\s*(?:SCHEDULED|DEADLINE|CLOSED):\s*.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _parse_todo_body(body: str, max_preview: int = 120) -> Dict[str, Any]:
+    """
+    Split org heading body into creation_timestamp, structured notes, and a prose-only preview.
+
+    Avoids showing inactive capture timestamps and org note boilerplate as the only preview line.
+    """
+    if not body or not str(body).strip():
+        return {
+            "creation_timestamp": None,
+            "notes": [],
+            "body_preview": "",
+        }
+
+    text = str(body).strip()
+    text = _RE_ORG_DRAWER.sub("\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    creation_timestamp: Optional[str] = None
+    lines = text.split("\n")
+    if lines:
+        first = lines[0].strip()
+        m0 = _RE_CAPTURE_TS_LINE.match(first)
+        if m0:
+            creation_timestamp = m0.group(1).strip()
+            text = "\n".join(lines[1:]).strip()
+
+    notes: List[Dict[str, str]] = []
+    while True:
+        m = _RE_NOTE_TAKEN.search(text)
+        if not m:
+            break
+        note_body = " ".join(
+            ln.strip()
+            for ln in (m.group(2) or "").splitlines()
+            if ln.strip()
+        )
+        notes.append(
+            {
+                "timestamp": (m.group(1) or "").strip(),
+                "text": re.sub(r"\s+", " ", note_body).strip(),
+            }
+        )
+        text = (text[: m.start()] + text[m.end() :]).strip()
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    text = _RE_PLANNING_LINE.sub("", text)
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    preview = ""
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if _RE_CAPTURE_TS_LINE.match(line):
+            continue
+        if re.match(r"^\s*-\s+Note taken on\s+\[", line):
+            continue
+        preview = line
+        break
+
+    if len(preview) > max_preview:
+        preview = preview[: max_preview - 3] + "..."
+
+    return {
+        "creation_timestamp": creation_timestamp,
+        "notes": notes,
+        "body_preview": preview,
+    }
+
 
 def _strip_trailing_org_tags_from_title(title: str) -> str:
     """Remove any trailing org-style :tag: from title so tags are only added via the tags parameter."""
@@ -219,9 +311,11 @@ class OrgTodoService:
                     r["document_id"] = document_id
                     line_num = r.get("line_number", 0)
                     r["line_number"] = line_num - 1 if isinstance(line_num, int) and line_num > 0 else 0
-                    body = (r.get("body") or "").strip()
-                    body = body.split("\n")[0].strip() if body else ""
-                    r["body_preview"] = (body[:120] + "...") if len(body) > 120 else body
+                    body_raw = (r.get("body") or "").strip()
+                    parsed = _parse_todo_body(body_raw)
+                    r["body_preview"] = parsed["body_preview"]
+                    r["creation_timestamp"] = parsed["creation_timestamp"]
+                    r["notes"] = parsed["notes"]
                     if not include_body:
                         r.pop("body", None)
                 all_results.extend(file_results)

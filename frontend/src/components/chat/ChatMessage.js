@@ -300,6 +300,7 @@ const ChatMessage = React.memo(({
   handleSaveAsMarkdown,
   isHITLPermissionRequest,
   handleHITLResponse,
+  handleShellApproval,
   hasResearchPlan,
   executingPlans,
   extractImageUrls,
@@ -322,6 +323,7 @@ const ChatMessage = React.memo(({
   const [imageDetailIndex, setImageDetailIndex] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editDraft, setEditDraft] = useState('');
+  const [shellApprovalChoice, setShellApprovalChoice] = useState(null);
 
   const rehypePluginsForMessage = useMemo(() => {
     const plugins = [rehypeRaw];
@@ -527,7 +529,7 @@ const ChatMessage = React.memo(({
                   sx={{ 
                     height: 16, 
                     fontSize: '0.6rem', 
-                    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                    backgroundColor: 'action.hover',
                     '& .MuiChip-label': { px: 1 }
                   }} 
                 />
@@ -539,7 +541,7 @@ const ChatMessage = React.memo(({
                   sx={{
                     height: 16,
                     fontSize: '0.6rem',
-                    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+                    backgroundColor: 'action.hover',
                     '& .MuiChip-label': { px: 1, textTransform: 'capitalize' },
                   }}
                 />
@@ -700,12 +702,18 @@ const ChatMessage = React.memo(({
                 margin: '8px 0',
                 borderRadius: '4px',
                 overflow: 'auto',
-                backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                backgroundColor:
+                  theme.palette.mode === 'dark'
+                    ? 'rgba(255, 255, 255, 0.1)'
+                    : 'rgba(0, 0, 0, 0.05)',
                 padding: '12px'
               },
               '& code': {
                 fontFamily: 'monospace',
-                backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                backgroundColor:
+                  theme.palette.mode === 'dark'
+                    ? 'rgba(255, 255, 255, 0.15)'
+                    : 'rgba(0, 0, 0, 0.1)',
                 padding: '2px 4px',
                 borderRadius: '3px',
                 fontSize: '0.9em'
@@ -955,7 +963,50 @@ const ChatMessage = React.memo(({
         </Box>
 
         {/* Async Task Progress */}
-        {/* HITL Permission Request Actions */}
+        {/* Shell command approval (Run / Skip) */}
+        {message.interactionType === 'shell_command_approval' &&
+          message.shellApprovalId &&
+          handleShellApproval && (
+          <Box mt={2}>
+            {message.shellCommand ? (
+              <Typography variant="body2" sx={{ mb: 1, fontFamily: 'monospace', whiteSpace: 'pre-wrap' }}>
+                {message.shellCommand}
+              </Typography>
+            ) : null}
+            <Box display="flex" gap={1} mb={1} flexWrap="wrap">
+              <Button
+                variant="contained"
+                color="success"
+                size="small"
+                onClick={async () => {
+                  setShellApprovalChoice('run');
+                  await handleShellApproval('run', message);
+                }}
+                disabled={isLoading || !!shellApprovalChoice}
+                sx={{ minWidth: '72px' }}
+              >
+                {shellApprovalChoice === 'run' ? 'Sent' : 'Run'}
+              </Button>
+              <Button
+                variant="outlined"
+                color="inherit"
+                size="small"
+                onClick={async () => {
+                  setShellApprovalChoice('skip');
+                  await handleShellApproval('skip', message);
+                }}
+                disabled={isLoading || !!shellApprovalChoice}
+                sx={{ minWidth: '72px' }}
+              >
+                {shellApprovalChoice === 'skip' ? 'Sent' : 'Skip'}
+              </Button>
+            </Box>
+            <Typography variant="caption" color="text.secondary" display="block">
+              Run records approval and tells the agent to continue; Skip rejects this command.
+            </Typography>
+          </Box>
+        )}
+        {/* HITL Permission Request Actions (web search / generic) */}
         {isHITLPermissionRequest(message) && (
           <Box mt={2}>
             <Box display="flex" gap={1} mb={1}>
@@ -981,13 +1032,15 @@ const ChatMessage = React.memo(({
               </Button>
             </Box>
             <Typography variant="caption" color="text.secondary" display="block">
-              🛡️ Click "Yes" to auto-approve web search or "No" to use local resources only. Response will be sent automatically.
+              Click Yes to approve web search or No to use local resources only. The response is sent automatically.
             </Typography>
           </Box>
         )}
 
         {/* Research Plan Actions */}
-        {hasResearchPlan(message) && !isHITLPermissionRequest(message) && (
+        {hasResearchPlan(message) &&
+          !isHITLPermissionRequest(message) &&
+          message.interactionType !== 'shell_command_approval' && (
           <Box mt={2}>
             {message.planApproved ? (
               <Box display="flex" alignItems="center" gap={1}>
@@ -1108,7 +1161,7 @@ const ChatMessage = React.memo(({
                         sx={{
                           height: 16,
                           fontSize: '0.6rem',
-                          backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                          backgroundColor: 'action.hover',
                           '& .MuiChip-label': { px: 1 },
                         }}
                       />
@@ -1209,6 +1262,7 @@ const ChatMessage = React.memo(({
     prevProps.handleSaveAsMarkdown === nextProps.handleSaveAsMarkdown &&
     prevProps.isHITLPermissionRequest === nextProps.isHITLPermissionRequest &&
     prevProps.handleHITLResponse === nextProps.handleHITLResponse &&
+    prevProps.handleShellApproval === nextProps.handleShellApproval &&
     prevProps.hasResearchPlan === nextProps.hasResearchPlan &&
     prevProps.extractImageUrls === nextProps.extractImageUrls &&
     prevProps.getImageApiUrl === nextProps.getImageApiUrl &&

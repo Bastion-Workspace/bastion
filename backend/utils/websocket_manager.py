@@ -30,6 +30,10 @@ class WebSocketManager:
         # Same keys as device_connections: device_tokens.id (UUID str) for settings / merge with DB
         self.device_token_ids: Dict[str, Dict[str, str]] = {}
         self.pending_device_invocations: Dict[str, Tuple[str, asyncio.Future]] = {}  # request_id -> (user_id, future)
+        # Surface registry: user_id -> surface_id -> metadata (conversation bell routing)
+        self.surface_meta: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Reverse index: websocket -> (user_id, surface_id) for cleanup on disconnect
+        self._ws_surface_index: Dict[WebSocket, Tuple[str, str]] = {}
     
     async def connect(self, websocket: WebSocket, session_id: str = None):
         """Accept a new WebSocket connection. session_id is normalized to str so DB UUID and JWT string match."""
@@ -96,8 +100,123 @@ class WebSocketManager:
             self.line_timeline_connections[line_id] = []
         self.line_timeline_connections[line_id].append(websocket)
 
+    def _cleanup_surface_for_websocket(self, websocket: WebSocket) -> None:
+        """Remove surface registry entries tied to this WebSocket."""
+        entry = self._ws_surface_index.pop(websocket, None)
+        if not entry:
+            return
+        user_id, surface_id = entry
+        surfaces = self.surface_meta.get(user_id)
+        if not surfaces:
+            return
+        meta = surfaces.get(surface_id)
+        if meta and meta.get("websocket") is websocket:
+            surfaces.pop(surface_id, None)
+        if not surfaces:
+            self.surface_meta.pop(user_id, None)
+
+    def register_surface_meta(
+        self,
+        user_id: str,
+        surface_id: str,
+        surface_type: str,
+        websocket: WebSocket,
+    ) -> None:
+        """Register or replace a client surface for notification routing (session WebSocket)."""
+        uid = str(user_id).strip()
+        sid = (surface_id or "").strip()
+        if not uid or not sid:
+            return
+        self._cleanup_surface_for_websocket(websocket)
+        if uid not in self.surface_meta:
+            self.surface_meta[uid] = {}
+        self.surface_meta[uid][sid] = {
+            "surface_type": (surface_type or "unknown").strip()[:64],
+            "state": "blurred",
+            "active_conversation_id": "",
+            "websocket": websocket,
+            "connected_at": datetime.utcnow().isoformat(),
+        }
+        self._ws_surface_index[websocket] = (uid, sid)
+
+    def update_surface_state(
+        self,
+        user_id: str,
+        surface_id: str,
+        state: str,
+        active_conversation_id: Optional[str] = None,
+        websocket: Optional[WebSocket] = None,
+    ) -> bool:
+        """Update focus/background state and optional active conversation for a surface."""
+        uid = str(user_id).strip()
+        sid = (surface_id or "").strip()
+        if not uid or not sid or uid not in self.surface_meta:
+            return False
+        meta = self.surface_meta[uid].get(sid)
+        if not meta:
+            return False
+        if websocket is not None and meta.get("websocket") is not websocket:
+            return False
+        st = (state or "blurred").strip().lower()
+        if st not in ("focused", "blurred", "background"):
+            st = "blurred"
+        meta["state"] = st
+        if active_conversation_id is not None:
+            meta["active_conversation_id"] = str(active_conversation_id).strip()
+        return True
+
+    def get_active_surface_ids(self, user_id: str) -> List[str]:
+        """Surface IDs that are focused (desktop tab visible) or active foreground app."""
+        uid = str(user_id).strip()
+        out: List[str] = []
+        for sid, meta in (self.surface_meta.get(uid) or {}).items():
+            if meta.get("state") in ("focused", "active"):
+                out.append(sid)
+        return out
+
+    def is_conversation_active_on_any_surface(self, user_id: str, conversation_id: str) -> bool:
+        """True if any focused surface is viewing this conversation."""
+        if not conversation_id:
+            return False
+        cid = str(conversation_id).strip()
+        for meta in (self.surface_meta.get(str(user_id).strip()) or {}).values():
+            if meta.get("state") != "focused":
+                continue
+            active = (meta.get("active_conversation_id") or "").strip()
+            if active and active == cid:
+                return True
+        return False
+
+    async def send_notification_ack_to_user_sessions(
+        self,
+        user_id: str,
+        notification_id: str,
+        exclude_websocket: Optional[WebSocket] = None,
+    ) -> None:
+        """Fan out dismiss/read so other tabs and surfaces update."""
+        payload = {
+            "type": "notification_ack",
+            "notification_id": notification_id,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        key = str(user_id) if user_id is not None else None
+        if not key or key not in self.session_connections:
+            return
+        broken: List[WebSocket] = []
+        for websocket in self.session_connections[key]:
+            if exclude_websocket is not None and websocket is exclude_websocket:
+                continue
+            try:
+                await websocket.send_text(json.dumps(payload))
+            except Exception as e:
+                logger.error("Failed to send notification_ack to session %s: %s", key, e)
+                broken.append(websocket)
+        for ws in broken:
+            self.disconnect(ws, key)
+
     def disconnect(self, websocket: WebSocket, session_id: str = None):
         """Remove a WebSocket connection. session_id normalized to str for consistent lookup."""
+        self._cleanup_surface_for_websocket(websocket)
         key = str(session_id) if session_id is not None else None
         logger.debug(f"🔌 Disconnecting WebSocket (session: {key})")
         if websocket in self.active_connections:
@@ -185,12 +304,31 @@ class WebSocketManager:
             if websocket in self.active_connections:
                 self.active_connections.remove(websocket)
 
-    async def send_to_session(self, message: Any, session_id: str):
-        """Send a message to all connections in a session. session_id is normalized to str for consistent lookup (JWT may use str, DB may return UUID)."""
+    def _surface_id_for_session_websocket(self, websocket: WebSocket) -> Optional[str]:
+        entry = self._ws_surface_index.get(websocket)
+        if not entry:
+            return None
+        return entry[1]
+
+    async def send_to_session(
+        self,
+        message: Any,
+        session_id: str,
+        exclude_surface_ids: Optional[List[str]] = None,
+    ):
+        """Send a message to all connections in a session. session_id is normalized to str for consistent lookup (JWT may use str, DB may return UUID).
+
+        If exclude_surface_ids is set, WebSockets that registered a matching surface_id are skipped.
+        Connections without surface registration still receive the message (backward compatible).
+        """
         key = str(session_id) if session_id is not None else None
+        exclude = {str(x).strip() for x in (exclude_surface_ids or []) if str(x).strip()}
         if key and key in self.session_connections:
             broken_connections = []
             for websocket in self.session_connections[key]:
+                sid = self._surface_id_for_session_websocket(websocket)
+                if sid and sid in exclude:
+                    continue
                 try:
                     if isinstance(message, dict):
                         message_str = json.dumps(message)
@@ -832,6 +970,49 @@ class WebSocketManager:
             return {"success": False, "error": "Device invocation timed out", "formatted": "Request timed out."}
         finally:
             self.pending_device_invocations.pop(request_id, None)
+
+    async def push_device_policy(
+        self,
+        user_id: str,
+        capabilities_policy: dict,
+        token_id: Optional[str] = None,
+        device_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Push a capabilities_policy map to one or more connected daemons.
+        - If token_id is given, push to all devices registered with that token.
+        - If device_id is given, push to that specific device.
+        - Otherwise, push to every device for the user.
+        Returns True if at least one daemon received the policy.
+        """
+        devices = self.device_connections.get(user_id) or {}
+        if not devices:
+            return False
+        token_map = self.device_token_ids.get(user_id) or {}
+        targets: List[str] = []
+        if device_id and device_id in devices:
+            targets = [device_id]
+        elif token_id:
+            targets = [d for d, t in token_map.items() if str(t) == str(token_id) and d in devices]
+        else:
+            targets = list(devices.keys())
+        if not targets:
+            return False
+        delivered = False
+        msg = {
+            "type": "set_policy",
+            "capabilities": capabilities_policy or {},
+        }
+        for did in targets:
+            ws = devices.get(did)
+            if not ws:
+                continue
+            try:
+                await ws.send_json(msg)
+                delivered = True
+            except Exception as e:
+                logger.warning("push_device_policy: failed to send to device=%s: %s", did, e)
+        return delivered
 
     async def set_device_workspace(
         self,

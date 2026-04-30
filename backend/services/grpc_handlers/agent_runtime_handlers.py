@@ -221,34 +221,42 @@ class AgentRuntimeHandlersMixin:
                             pct = int(budget_after.get("warning_threshold_pct") or 80)
                             enforce = bool(budget_after.get("enforce_hard_limit") is not False)
                             try:
-                                from utils.websocket_manager import get_websocket_manager
-                                ws = get_websocket_manager()
-                                if ws and user_id:
+                                from services.notification_router import route_notification
+
+                                if user_id:
                                     if enforce and spend_usd >= limit_usd:
-                                        await ws.send_to_session(
+                                        await route_notification(
+                                            user_id,
+                                            "budget_exceeded",
                                             {
                                                 "type": "agent_notification",
                                                 "subtype": "budget_exceeded",
                                                 "agent_profile_id": profile_id,
                                                 "agent_name": None,
+                                                "title": "Budget exceeded",
+                                                "preview": f"Spend ${spend_usd:.2f} of ${limit_usd:.2f} limit",
                                                 "spend_usd": spend_usd,
                                                 "limit_usd": limit_usd,
                                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                                             },
-                                            user_id,
+                                            originating_surface_id=None,
                                         )
                                     elif spend_usd >= limit_usd * (pct / 100.0):
-                                        await ws.send_to_session(
+                                        await route_notification(
+                                            user_id,
+                                            "budget_warning",
                                             {
                                                 "type": "agent_notification",
                                                 "subtype": "budget_warning",
                                                 "agent_profile_id": profile_id,
                                                 "agent_name": None,
+                                                "title": "Budget warning",
+                                                "preview": f"Spend ${spend_usd:.2f} approaching ${limit_usd:.2f} limit",
                                                 "spend_usd": spend_usd,
                                                 "limit_usd": limit_usd,
                                                 "timestamp": datetime.now(timezone.utc).isoformat(),
                                             },
-                                            user_id,
+                                            originating_surface_id=None,
                                         )
                             except Exception as ws_err:
                                 logger.debug("Budget WebSocket notify failed: %s", ws_err)
@@ -257,33 +265,37 @@ class AgentRuntimeHandlersMixin:
 
             if execution_id and user_id:
                 try:
-                    from utils.websocket_manager import get_websocket_manager
+                    from services.notification_router import route_notification
+
                     profile_row = await fetch_one(
                         "SELECT name, handle FROM agent_profiles WHERE id = $1",
                         uuid.UUID(profile_id),
                         rls_context=ctx,
                     )
                     agent_name = (profile_row.get("name") or profile_row.get("handle") or "Agent") if profile_row else "Agent"
-                    ws_manager = get_websocket_manager()
-                    if ws_manager:
-                        subtype = "execution_completed" if request.status == "completed" else "execution_failed"
-                        await ws_manager.send_to_session(
-                            {
-                                "type": "agent_notification",
-                                "subtype": subtype,
-                                "execution_id": str(execution_id),
-                                "agent_profile_id": profile_id,
-                                "agent_name": agent_name,
-                                "status": request.status or "completed",
-                                "duration_ms": request.duration_ms,
-                                "cost_usd": float(cost_usd) if cost_usd is not None else None,
-                                "error_details": (request.error_details or "")[:500] if request.error_details else None,
-                                "trigger_type": metadata.get("trigger_type", "manual"),
-                                "query": (request.query or "")[:200] if request.query else None,
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            },
-                            user_id,
-                        )
+                    subtype = "execution_completed" if request.status == "completed" else "execution_failed"
+                    qprev = (request.query or "")[:200] if request.query else ""
+                    await route_notification(
+                        user_id,
+                        subtype,
+                        {
+                            "type": "agent_notification",
+                            "subtype": subtype,
+                            "execution_id": str(execution_id),
+                            "agent_profile_id": profile_id,
+                            "agent_name": agent_name,
+                            "title": f"{agent_name}: {subtype.replace('_', ' ')}",
+                            "preview": qprev or (request.error_details or "")[:200] or "",
+                            "status": request.status or "completed",
+                            "duration_ms": request.duration_ms,
+                            "cost_usd": float(cost_usd) if cost_usd is not None else None,
+                            "error_details": (request.error_details or "")[:500] if request.error_details else None,
+                            "trigger_type": metadata.get("trigger_type", "manual"),
+                            "query": qprev or None,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                        originating_surface_id=None,
+                    )
                 except Exception as ws_err:
                     logger.debug("LogAgentExecution WebSocket notify failed: %s", ws_err)
 
@@ -344,22 +356,40 @@ class AgentRuntimeHandlersMixin:
                     success=False, approval_id="", error="insert failed"
                 )
             try:
-                from utils.websocket_manager import get_websocket_manager
-                ws = get_websocket_manager()
-                if ws and user_id:
-                    await ws.send_to_session(
-                        {
-                            "type": "agent_notification",
-                            "subtype": "approval_required",
-                            "approval_id": str(approval_id),
-                            "agent_profile_id": agent_profile_id,
-                            "execution_id": execution_id,
-                            "step_name": step_name,
-                            "prompt": (prompt or "")[:500],
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                        },
+                if governance_type == "shell_command_approval" and user_id:
+                    from services.celery_tasks.agent_tasks import notify_shell_approval
+
+                    notify_shell_approval.delay(
                         user_id,
+                        str(approval_id),
+                        preview_data_json or "{}",
+                        (prompt or "")[:10000],
+                        step_name,
+                        agent_profile_id or "",
+                        execution_id or "",
                     )
+                else:
+                    from services.notification_router import route_notification
+
+                    if user_id:
+                        pr = (prompt or "")[:500]
+                        await route_notification(
+                            user_id,
+                            "approval_required",
+                            {
+                                "type": "agent_notification",
+                                "subtype": "approval_required",
+                                "approval_id": str(approval_id),
+                                "agent_profile_id": agent_profile_id,
+                                "execution_id": execution_id,
+                                "step_name": step_name,
+                                "prompt": pr,
+                                "title": "Approval required",
+                                "preview": pr[:200],
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            },
+                            originating_surface_id=None,
+                        )
             except Exception as ws_err:
                 logger.debug("ParkApproval WebSocket notify failed: %s", ws_err)
             return tool_service_pb2.ParkApprovalResponse(

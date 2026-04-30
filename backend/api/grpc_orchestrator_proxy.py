@@ -11,7 +11,7 @@ from typing import AsyncIterator, Dict, Any, Optional
 from datetime import datetime
 
 import grpc
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -81,6 +81,7 @@ async def stream_from_grpc_orchestrator(
     is_branch_resend: bool = False,
     branch_message_id: str = None,
     client_run_id: Optional[str] = None,
+    originating_surface_id: Optional[str] = None,
 ) -> AsyncIterator[str]:
     """
     Stream responses from gRPC orchestrator microservice
@@ -318,6 +319,12 @@ async def stream_from_grpc_orchestrator(
                         }
                         if payload.get("pending_auth"):
                             sse_msg["pending_auth"] = payload["pending_auth"]
+                        if payload.get("interaction_type"):
+                            sse_msg["interaction_type"] = payload["interaction_type"]
+                        if payload.get("approval_id"):
+                            sse_msg["approval_id"] = payload["approval_id"]
+                        if payload.get("command") is not None:
+                            sse_msg["command"] = payload["command"]
                         yield format_sse_message(sse_msg)
 
                     elif chunk.type == "complete":
@@ -457,6 +464,7 @@ async def stream_from_grpc_orchestrator(
                         response_text=accumulated_response,
                         agent_name=display_agent,
                         conversation_title=title_for_notify,
+                        originating_surface_id=originating_surface_id,
                     )
 
                     # Record skill execution metrics (fire-and-forget)
@@ -594,7 +602,8 @@ async def stream_from_grpc_orchestrator(
 @router.post("/api/async/orchestrator/grpc/stream")
 async def stream_orchestrator_grpc(
     request: OrchesterRequest,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+    http_request: Request,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
     """
     Stream orchestrator responses via gRPC microservice
@@ -632,6 +641,8 @@ async def stream_orchestrator_grpc(
         stream_run_id = str(uuid.uuid4())
         request_context["client_run_id"] = stream_run_id
 
+        surface_hdr = (http_request.headers.get("x-surface-id") or "").strip() or None
+
         # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
         # State is automatically retrieved by the gRPC service
         conversation_state = None
@@ -649,6 +660,7 @@ async def stream_orchestrator_grpc(
                 is_branch_resend=bool(getattr(request, "is_branch_resend", False)),
                 branch_message_id=getattr(request, "branch_message_id", None),
                 client_run_id=stream_run_id,
+                originating_surface_id=surface_hdr,
             ),
             media_type="text/event-stream",
             headers={

@@ -1,9 +1,9 @@
 /**
- * Device tokens (Bastion Local Proxy): list, create, show one-time token, revoke.
- * Shown under Settings → Connections.
+ * Device tokens (Bastion Local Proxy): list, create, show one-time token, revoke,
+ * and per-device capability + shell policy (Settings gear).
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Box,
   Typography,
@@ -23,12 +23,27 @@ import {
   DialogActions,
   TextField,
   Chip,
+  Tabs,
+  Tab,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  FormControlLabel,
+  Switch,
+  MenuItem,
+  Select,
+  FormControl,
+  InputLabel,
 } from '@mui/material';
 import LinkOffIcon from '@mui/icons-material/LinkOff';
 import AddIcon from '@mui/icons-material/Add';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import DevicesIcon from '@mui/icons-material/Devices';
+import SettingsIcon from '@mui/icons-material/Settings';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import apiService from '../services/apiService';
 
 const POLL_MS = 12000;
@@ -43,6 +58,22 @@ const formatDate = (iso) => {
   }
 };
 
+const linesToList = (s) => {
+  if (!s || !String(s).trim()) return [];
+  return String(s)
+    .split(/\r?\n/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+};
+
+const emptyCapForm = () => ({
+  enabled: true,
+  allowed_paths: '',
+  denied_paths: '',
+  allowed_commands: '',
+  denied_patterns: '',
+});
+
 const DeviceTokensSettings = () => {
   const [tokens, setTokens] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -54,6 +85,23 @@ const DeviceTokensSettings = () => {
   const [createdResult, setCreatedResult] = useState(null);
   const [tokenCopied, setTokenCopied] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+
+  const [proxyCaps, setProxyCaps] = useState([]);
+  const [policyDialogToken, setPolicyDialogToken] = useState(null);
+  const [policyTab, setPolicyTab] = useState(0);
+  const [capForm, setCapForm] = useState({});
+  const [shellRules, setShellRules] = useState([]);
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policySaving, setPolicySaving] = useState(false);
+  const [policyError, setPolicyError] = useState(null);
+  const [ruleForm, setRuleForm] = useState({
+    pattern: '',
+    match_mode: 'prefix',
+    action: 'require_approval',
+    priority: 50,
+    label: '',
+  });
+  const [ruleSaving, setRuleSaving] = useState(false);
 
   const loadTokens = async ({ silent } = {}) => {
     try {
@@ -95,6 +143,133 @@ const DeviceTokensSettings = () => {
     document.addEventListener('visibilitychange', onVis);
     return () => document.removeEventListener('visibilitychange', onVis);
   }, []);
+
+  const openPolicyDialog = useCallback(async (tokenRow) => {
+    setPolicyDialogToken(tokenRow);
+    setPolicyTab(0);
+    setPolicyError(null);
+    setPolicyLoading(true);
+    setRuleForm({
+      pattern: '',
+      match_mode: 'prefix',
+      action: 'require_approval',
+      priority: 50,
+      label: '',
+    });
+    try {
+      let caps = proxyCaps;
+      if (!caps.length) {
+        const cr = await apiService.get('/api/settings/proxy-capabilities');
+        caps = cr.capabilities || [];
+        setProxyCaps(caps);
+      }
+      const [polRes, rulesRes] = await Promise.all([
+        apiService.get(
+          `/api/settings/device-tokens/${encodeURIComponent(tokenRow.id)}/policy`
+        ),
+        apiService.get('/api/settings/shell-policy/rules'),
+      ]);
+      const pol = polRes.capabilities || {};
+      const form = {};
+      caps.forEach((c) => {
+        const p = pol[c.id] || {};
+        form[c.id] = {
+          enabled: p.enabled !== false,
+          allowed_paths: (p.allowed_paths || []).join('\n'),
+          denied_paths: (p.denied_paths || []).join('\n'),
+          allowed_commands: (p.allowed_commands || []).join('\n'),
+          denied_patterns: (p.denied_patterns || []).join('\n'),
+        };
+      });
+      setCapForm(form);
+      setShellRules(rulesRes.rules || []);
+    } catch (e) {
+      setPolicyError(e.message || 'Failed to load policy');
+      setCapForm({});
+      setShellRules([]);
+    } finally {
+      setPolicyLoading(false);
+    }
+  }, [proxyCaps]);
+
+  const closePolicyDialog = () => {
+    setPolicyDialogToken(null);
+    setPolicyError(null);
+    setPolicyTab(0);
+  };
+
+  const saveCapabilitiesPolicy = async () => {
+    if (!policyDialogToken || !proxyCaps.length) return;
+    setPolicySaving(true);
+    setPolicyError(null);
+    try {
+      const capsPayload = {};
+      proxyCaps.forEach((c) => {
+        const st = capForm[c.id] || emptyCapForm();
+        capsPayload[c.id] = {
+          enabled: !!st.enabled,
+          allowed_paths: linesToList(st.allowed_paths),
+          denied_paths: linesToList(st.denied_paths),
+          allowed_commands: linesToList(st.allowed_commands),
+          denied_patterns: linesToList(st.denied_patterns),
+        };
+      });
+      await apiService.patch(
+        `/api/settings/device-tokens/${encodeURIComponent(policyDialogToken.id)}/policy`,
+        { capabilities: capsPayload }
+      );
+      await loadTokens({ silent: true });
+    } catch (e) {
+      setPolicyError(e.response?.data?.detail || e.message || 'Save failed');
+    } finally {
+      setPolicySaving(false);
+    }
+  };
+
+  const reloadShellRules = async () => {
+    const rulesRes = await apiService.get('/api/settings/shell-policy/rules');
+    setShellRules(rulesRes.rules || []);
+  };
+
+  const addShellRule = async () => {
+    const pattern = (ruleForm.pattern || '').trim();
+    if (!pattern) return;
+    setRuleSaving(true);
+    setPolicyError(null);
+    try {
+      await apiService.post('/api/settings/shell-policy/rules', {
+        pattern,
+        match_mode: ruleForm.match_mode,
+        action: ruleForm.action,
+        priority: Number(ruleForm.priority) || 50,
+        label: (ruleForm.label || '').trim() || null,
+      });
+      setRuleForm({
+        pattern: '',
+        match_mode: 'prefix',
+        action: 'require_approval',
+        priority: 50,
+        label: '',
+      });
+      await reloadShellRules();
+    } catch (e) {
+      setPolicyError(e.response?.data?.detail || e.message || 'Failed to add rule');
+    } finally {
+      setRuleSaving(false);
+    }
+  };
+
+  const deleteShellRule = async (ruleId) => {
+    setPolicyError(null);
+    try {
+      await apiService.delete(
+        `/api/settings/shell-policy/rules/${encodeURIComponent(ruleId)}`
+      );
+      await reloadShellRules();
+    } catch (e) {
+      setPolicyError(e.response?.data?.detail || e.message || 'Failed to delete rule');
+    }
+  };
 
   const deviceSecondaryText = (t) => {
     const name = t.device_name || '';
@@ -168,13 +343,20 @@ const DeviceTokensSettings = () => {
   const activeTokens = tokens.filter((t) => !t.revoked);
   const revokedTokens = tokens.filter((t) => t.revoked);
 
+  const updateCapField = (capId, field, value) => {
+    setCapForm((prev) => ({
+      ...prev,
+      [capId]: { ...(prev[capId] || emptyCapForm()), [field]: value },
+    }));
+  };
+
   return (
     <Box>
       <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
         <DevicesIcon /> Local proxy (devices)
       </Typography>
       <Typography variant="body2" color="text.secondary" paragraph>
-        Add devices running the Bastion Local Proxy daemon so they can connect to this workspace. Create a token here, then paste it in the daemon's Settings. Each token is shown only once.
+        Add devices running the Bastion Local Proxy daemon so they can connect to this workspace. Create a token here, then paste it in the daemon&apos;s Settings. Use the gear icon to set which capabilities are advertised and shell command rules (allow / deny / require approval).
       </Typography>
 
       {error && (
@@ -215,7 +397,7 @@ const DeviceTokensSettings = () => {
             </Box>
           ) : activeTokens.length === 0 && revokedTokens.length === 0 ? (
             <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-              No devices yet. Click "Add device" and paste the token into the Local Proxy daemon.
+              No devices yet. Click &quot;Add device&quot; and paste the token into the Local Proxy daemon.
             </Typography>
           ) : (
             <List dense sx={{ mt: 2 }}>
@@ -223,18 +405,28 @@ const DeviceTokensSettings = () => {
                 <ListItem
                   key={t.id}
                   secondaryAction={
-                    <IconButton
-                      edge="end"
-                      aria-label="Revoke"
-                      onClick={() => handleRevoke(t.id)}
-                      disabled={revokingId === t.id}
-                    >
-                      {revokingId === t.id ? (
-                        <CircularProgress size={20} />
-                      ) : (
-                        <LinkOffIcon />
-                      )}
-                    </IconButton>
+                    <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                      <IconButton
+                        edge="end"
+                        aria-label="Proxy policy"
+                        onClick={() => openPolicyDialog(t)}
+                        sx={{ mr: 0.5 }}
+                      >
+                        <SettingsIcon />
+                      </IconButton>
+                      <IconButton
+                        edge="end"
+                        aria-label="Revoke"
+                        onClick={() => handleRevoke(t.id)}
+                        disabled={revokingId === t.id}
+                      >
+                        {revokingId === t.id ? (
+                          <CircularProgress size={20} />
+                        ) : (
+                          <LinkOffIcon />
+                        )}
+                      </IconButton>
+                    </Box>
                   }
                 >
                   <ListItemText
@@ -316,7 +508,7 @@ const DeviceTokensSettings = () => {
                 {tokenCopied ? 'Copied' : 'Copy token'}
               </Button>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-                In the Local Proxy daemon, open Settings → paste this token and (if asked) the Device ID shown there. Save and connect.
+                In the Local Proxy daemon, open Settings, paste this token, and save and connect.
               </Typography>
             </Box>
           )}
@@ -337,6 +529,218 @@ const DeviceTokensSettings = () => {
                 {creating ? 'Creating…' : 'Create token'}
               </Button>
             </>
+          )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(policyDialogToken)}
+        onClose={closePolicyDialog}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          Proxy policy
+          {policyDialogToken ? ` — ${policyDialogToken.device_name || policyDialogToken.id}` : ''}
+        </DialogTitle>
+        <DialogContent dividers>
+          {policyError && (
+            <Alert severity="error" sx={{ mb: 2 }} onClose={() => setPolicyError(null)}>
+              {policyError}
+            </Alert>
+          )}
+          {!policyDialogToken ? null : policyLoading ? (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 2 }}>
+              <CircularProgress size={24} />
+              <Typography variant="body2">Loading…</Typography>
+            </Box>
+          ) : (
+            <>
+              <Tabs value={policyTab} onChange={(_, v) => setPolicyTab(v)} sx={{ mb: 2 }}>
+                <Tab label="Capabilities" />
+                <Tab label="Shell command rules" />
+              </Tabs>
+              {policyTab === 0 && (
+                <Box>
+                  {!policyDialogToken.connected && (
+                    <Alert severity="info" sx={{ mb: 2 }}>
+                      Device is offline. Saved policy will apply when the daemon reconnects.
+                    </Alert>
+                  )}
+                  {proxyCaps.map((c) => {
+                    const st = capForm[c.id] || emptyCapForm();
+                    const sup = c.supports || {};
+                    return (
+                      <Box key={c.id} sx={{ mb: 2, pb: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
+                        <FormControlLabel
+                          control={
+                            <Switch
+                              checked={!!st.enabled}
+                              onChange={(e) => updateCapField(c.id, 'enabled', e.target.checked)}
+                            />
+                          }
+                          label={<Typography fontWeight={600}>{c.label}</Typography>}
+                        />
+                        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                          {c.description}
+                        </Typography>
+                        {sup.path_policy ? (
+                          <>
+                            <TextField
+                              size="small"
+                              fullWidth
+                              margin="dense"
+                              label="Allowed paths (one per line)"
+                              value={st.allowed_paths}
+                              onChange={(e) => updateCapField(c.id, 'allowed_paths', e.target.value)}
+                              multiline
+                              minRows={2}
+                            />
+                            <TextField
+                              size="small"
+                              fullWidth
+                              margin="dense"
+                              label="Denied path substrings (one per line)"
+                              value={st.denied_paths}
+                              onChange={(e) => updateCapField(c.id, 'denied_paths', e.target.value)}
+                              multiline
+                              minRows={2}
+                            />
+                          </>
+                        ) : null}
+                        {sup.command_policy ? (
+                          <>
+                            <TextField
+                              size="small"
+                              fullWidth
+                              margin="dense"
+                              label="Allowed command binaries (one per line; empty = any)"
+                              value={st.allowed_commands}
+                              onChange={(e) => updateCapField(c.id, 'allowed_commands', e.target.value)}
+                              multiline
+                              minRows={2}
+                            />
+                            <TextField
+                              size="small"
+                              fullWidth
+                              margin="dense"
+                              label="Denied substrings (one per line)"
+                              value={st.denied_patterns}
+                              onChange={(e) => updateCapField(c.id, 'denied_patterns', e.target.value)}
+                              multiline
+                              minRows={2}
+                            />
+                          </>
+                        ) : null}
+                      </Box>
+                    );
+                  })}
+                </Box>
+              )}
+              {policyTab === 1 && (
+                <Box>
+                  <Alert severity="info" sx={{ mb: 2 }}>
+                    Rules apply to local shell execution in agents (first match wins). Empty list means all commands are allowed unless a rule matches. Use &quot;require approval&quot; to prompt in chat before running.
+                  </Alert>
+                  <Table size="small">
+                    <TableHead>
+                      <TableRow>
+                        <TableCell>Pattern</TableCell>
+                        <TableCell>Match</TableCell>
+                        <TableCell>Action</TableCell>
+                        <TableCell align="right"> </TableCell>
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {(shellRules || []).map((r) => (
+                        <TableRow key={r.id}>
+                          <TableCell>{r.pattern}</TableCell>
+                          <TableCell>{r.match_mode}</TableCell>
+                          <TableCell>{r.action}</TableCell>
+                          <TableCell align="right">
+                            <IconButton
+                              size="small"
+                              aria-label="Delete rule"
+                              onClick={() => deleteShellRule(r.id)}
+                            >
+                              <DeleteOutlineIcon fontSize="small" />
+                            </IconButton>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  <Typography variant="subtitle2" sx={{ mt: 2, mb: 1 }}>
+                    Add rule
+                  </Typography>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    margin="dense"
+                    label="Pattern (e.g. git or rm)"
+                    value={ruleForm.pattern}
+                    onChange={(e) => setRuleForm((f) => ({ ...f, pattern: e.target.value }))}
+                  />
+                  <FormControl size="small" fullWidth margin="dense">
+                    <InputLabel>Match mode</InputLabel>
+                    <Select
+                      label="Match mode"
+                      value={ruleForm.match_mode}
+                      onChange={(e) =>
+                        setRuleForm((f) => ({ ...f, match_mode: e.target.value }))
+                      }
+                    >
+                      <MenuItem value="prefix">prefix (first token)</MenuItem>
+                      <MenuItem value="contains">contains</MenuItem>
+                      <MenuItem value="glob">glob (full command)</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" fullWidth margin="dense">
+                    <InputLabel>Action</InputLabel>
+                    <Select
+                      label="Action"
+                      value={ruleForm.action}
+                      onChange={(e) => setRuleForm((f) => ({ ...f, action: e.target.value }))}
+                    >
+                      <MenuItem value="allow">allow</MenuItem>
+                      <MenuItem value="deny">deny</MenuItem>
+                      <MenuItem value="require_approval">require approval</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    margin="dense"
+                    type="number"
+                    label="Priority (lower runs first)"
+                    value={ruleForm.priority}
+                    onChange={(e) =>
+                      setRuleForm((f) => ({ ...f, priority: e.target.value }))
+                    }
+                  />
+                  <Button
+                    variant="outlined"
+                    onClick={addShellRule}
+                    disabled={ruleSaving || !(ruleForm.pattern || '').trim()}
+                    sx={{ mt: 1 }}
+                  >
+                    {ruleSaving ? 'Adding…' : 'Add rule'}
+                  </Button>
+                </Box>
+              )}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closePolicyDialog}>Close</Button>
+          {policyTab === 0 && (
+            <Button
+              variant="contained"
+              onClick={saveCapabilitiesPolicy}
+              disabled={policySaving || policyLoading || !proxyCaps.length}
+            >
+              {policySaving ? 'Saving…' : 'Save capabilities'}
+            </Button>
           )}
         </DialogActions>
       </Dialog>

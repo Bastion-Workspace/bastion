@@ -5,11 +5,12 @@
 
 import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import { useQuery } from 'react-query';
+import { useTheme as useMuiTheme } from '@mui/material/styles';
 import DOMPurify from 'dompurify';
 import rssService from '../services/rssService';
 import apiService from '../services/apiService';
 import { formatInstantDateTime } from '../utils/userTimeDisplay';
-import { useTheme } from '../contexts/ThemeContext';
+import { useTheme as useCustomTheme } from '../contexts/ThemeContext';
 
 function escapeForArticleIdSelector(id) {
     if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
@@ -26,7 +27,7 @@ const RSSArticleViewer = ({
     initialArticleId = null,
     onInitialArticleConsumed,
 }) => {
-    const { darkMode } = useTheme();
+    const { darkMode } = useCustomTheme();
 
     const { data: userTimeFormatData } = useQuery(
         'userTimeFormat',
@@ -536,17 +537,69 @@ const RSS_ARTICLE_HTML_PURIFY = {
     FORBID_ATTR: ['style'],
 };
 
-const rssArticleBodyStyle = {
-    lineHeight: '1.65',
-    fontSize: '14px',
-    color: 'var(--text-primary)',
-    overflow: 'hidden',
-    wordBreak: 'break-word',
-};
-
 // Article Card Component
 const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExpanded, darkMode }) => {
+    const muiTheme = useMuiTheme();
     const [showActions, setShowActions] = useState(false);
+
+    const rssArticleBodyStyle = useMemo(
+        () => ({
+            lineHeight: '1.65',
+            fontSize: '14px',
+            color: muiTheme.palette.text.primary,
+            overflow: 'hidden',
+            wordBreak: 'break-word',
+        }),
+        [muiTheme.palette.text.primary]
+    );
+
+    const articleDescriptionMerged = useMemo(
+        () => ({
+            margin: '0 0 12px 0',
+            fontSize: '14px',
+            lineHeight: '1.5',
+            color: muiTheme.palette.text.secondary,
+        }),
+        [muiTheme.palette.text.secondary]
+    );
+
+    const plainBodyParagraphStyle = useMemo(
+        () => ({
+            margin: '0 0 12px 0',
+            lineHeight: '1.65',
+            whiteSpace: 'pre-wrap',
+            color: muiTheme.palette.text.primary,
+        }),
+        [muiTheme.palette.text.primary]
+    );
+
+    const previewParagraphStyle = useMemo(
+        () => ({
+            margin: '0 0 12px 0',
+            lineHeight: '1.5',
+            color: muiTheme.palette.text.primary,
+        }),
+        [muiTheme.palette.text.primary]
+    );
+
+    const articleMetaMerged = useMemo(
+        () => ({
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            fontSize: '12px',
+            color: muiTheme.palette.text.secondary,
+        }),
+        [muiTheme.palette.text.secondary]
+    );
+
+    const articleDateMerged = useMemo(
+        () => ({
+            fontSize: '12px',
+            color: muiTheme.palette.text.secondary,
+        }),
+        [muiTheme.palette.text.secondary]
+    );
 
     const stripHtmlTags = (html) => {
         if (!html) return '';
@@ -589,7 +642,7 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExp
                         {article.is_starred ? '\u2605' : '\u2606'}
                     </button>
                     <h3
-                        style={articleTitleStyle}
+                        style={{ ...articleTitleStyle, color: muiTheme.palette.primary.main }}
                         onClick={() => onTitleClick(article.link)}
                     >
                         {article.title}
@@ -598,7 +651,7 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExp
                 
                 {/* Display full content if available, otherwise fall back to description */}
                 {(article.full_content_html || article.full_content || article.description) && (
-                    <div style={articleDescriptionStyle}>
+                    <div style={articleDescriptionMerged}>
                         {isExpanded ? (
                             sanitizedExpandedHtml ? (
                                 <div
@@ -607,18 +660,12 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExp
                                     className="rss-article-content"
                                 />
                             ) : (
-                                <p
-                                    style={{
-                                        margin: '0 0 12px 0',
-                                        lineHeight: '1.65',
-                                        whiteSpace: 'pre-wrap',
-                                    }}
-                                >
+                                <p style={plainBodyParagraphStyle}>
                                     {article.full_content || article.description}
                                 </p>
                             )
                         ) : (
-                            <p style={{ margin: '0 0 12px 0', lineHeight: '1.5' }}>
+                            <p style={previewParagraphStyle}>
                                 {previewPlain.length > 300
                                     ? `${previewPlain.substring(0, 300)}...`
                                     : previewPlain}
@@ -631,7 +678,7 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExp
                                 style={{
                                     background: 'none',
                                     border: 'none',
-                                    color: '#1976d2',
+                                    color: muiTheme.palette.info.main,
                                     cursor: 'pointer',
                                     fontSize: '12px',
                                     textDecoration: 'underline',
@@ -644,8 +691,8 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExp
                     </div>
                 )}
                 
-                <div style={articleMetaStyle}>
-                    <span style={articleDateStyle}>
+                <div style={articleMetaMerged}>
+                    <span style={articleDateMerged}>
                         {formatArticleWhen(article.published_date || article.created_at)}
                     </span>
                     {article.is_processed && (

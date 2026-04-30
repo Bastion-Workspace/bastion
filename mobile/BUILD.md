@@ -47,7 +47,7 @@ Rebuild with `npx expo prebuild --platform android` so native projects pick up `
 
 In GitHub Actions, set `EXPO_PUBLIC_API_BASE_URL` as an env var on the **Expo prebuild** and **Gradle assemble** steps (same as local export).
 
-**Note:** If a user later sets a URL in the app, that **runtime** value overrides build-time defaults until they clear it on the Server / Profile flow.
+**Note:** If a user later sets a URL in the app, that **runtime** value overrides build-time defaults until they clear it on the Server / Settings flow.
 
 ---
 
@@ -148,6 +148,29 @@ Copy that file to a device or emulator (`adb install …`) or to another machine
 | `Unable to load script` / missing bundle | Debug variant must embed the bundle: the repo uses a config plugin (`plugins/withAndroidEmbeddedDebugBundle.js`) and `NODE_ENV=production` for the Gradle bundle task. |
 | Wrong or empty API host in APK | `EXPO_PUBLIC_API_BASE_URL` must be set **when Metro bundles** (Gradle `assembleDebug` with `NODE_ENV=production`). Re-run assemble after changing `.env`. |
 | 16 KB / ELF warnings on API 35 | NDK `27.1.12297006` is set via `expo-build-properties` in `app.config.ts`; prebuilt RN 0.76 libs may still warn until RN/Expo upgrades. |
+
+---
+
+## Shortcuts and deep links (iOS Shortcuts, Android intents)
+
+The app registers the URL scheme **`bastion`** (see `app.config.ts`). On a **development build or release APK/IPA** (not necessarily in Expo Go), you can open these URLs from **iOS Shortcuts** (including Action Button → Shortcut), **Android** (`adb shell am start …`, Tasker, home-screen shortcuts), or any launcher that supports custom URL schemes.
+
+You must be **signed in** to the app first; otherwise the `(app)` routes are not available.
+
+| URL | What it does |
+|-----|----------------|
+| `bastion://shortcut-send?m=<url-encoded message>` | Sends the message to Bastion’s default chat model (fire-and-forget), then opens the Chat tab. Example: `bastion://shortcut-send?m=Put%20ordering%20milk%20on%20my%20ToDo%20list` |
+| `bastion://voice` | Switches to Chat and opens the **same voice capture modal** as the dock mic button. |
+
+**Length:** the `m` parameter is limited to **2000 characters** (see `src/api/quickSend.ts`).
+
+**iOS Shortcuts:** add action **Open URLs** with the full `bastion://…` URL. Assign the shortcut to the **Action Button** if you want hardware-triggered capture.
+
+**Android test:**
+
+```bash
+adb shell am start -a android.intent.action.VIEW -d 'bastion://shortcut-send?m=test%20from%20adb'
+```
 
 ---
 

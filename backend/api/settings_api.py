@@ -1441,6 +1441,447 @@ async def revoke_device_token(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# --- Per-proxy capability + path/command policy ---
+# Mirrors local-proxy/src/capabilities/mod.rs CAPABILITIES_UI_TAIL.
+# This list is what the Settings UI renders as the master capability grid for
+# every connected device. The "screenshot" capability is feature-gated in the
+# daemon (compiled in only with --features native-screenshot); we still expose
+# it to the UI so users can pre-configure it.
+PROXY_CAPABILITIES: List[Dict[str, Any]] = [
+    {"id": "screenshot", "label": "Screenshot",
+     "description": "Capture a screenshot of the local display.",
+     "supports": {"path_policy": False, "command_policy": False}},
+    {"id": "clipboard_read", "label": "Clipboard (read)",
+     "description": "Read the local clipboard.",
+     "supports": {"path_policy": False, "command_policy": False}},
+    {"id": "clipboard_write", "label": "Clipboard (write)",
+     "description": "Write to the local clipboard.",
+     "supports": {"path_policy": False, "command_policy": False}},
+    {"id": "system_info", "label": "System info",
+     "description": "Read OS / hostname / CPU / memory.",
+     "supports": {"path_policy": False, "command_policy": False}},
+    {"id": "desktop_notify", "label": "Desktop notifications",
+     "description": "Show native desktop notifications.",
+     "supports": {"path_policy": False, "command_policy": False}},
+    {"id": "shell_execute", "label": "Shell execute",
+     "description": "Run shell commands on the local machine.",
+     "supports": {"path_policy": False, "command_policy": True}},
+    {"id": "read_file", "label": "Read file",
+     "description": "Read files from the local filesystem.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "list_directory", "label": "List directory",
+     "description": "List contents of local directories.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "write_file", "label": "Write file",
+     "description": "Write or overwrite local files.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "patch_file", "label": "Patch file (replace text)",
+     "description": "Replace ranges within local files.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "create_directory", "label": "Create directory",
+     "description": "Create directories on the local filesystem.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "file_tree", "label": "File tree",
+     "description": "Walk and report on directory trees.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "search_files", "label": "Search files",
+     "description": "Search file contents on the local filesystem.",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "git_info", "label": "Git info",
+     "description": "Read git repo metadata (branch, status, etc.).",
+     "supports": {"path_policy": True, "command_policy": False}},
+    {"id": "list_processes", "label": "List processes",
+     "description": "Enumerate running processes.",
+     "supports": {"path_policy": False, "command_policy": False}},
+    {"id": "open_url", "label": "Open URL",
+     "description": "Open a URL in the user's default browser.",
+     "supports": {"path_policy": False, "command_policy": False}},
+]
+
+
+@router.get("/api/settings/proxy-capabilities")
+async def get_proxy_capabilities(
+    _current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Return the master list of capabilities the daemon supports, for the Settings UI."""
+    return {"capabilities": PROXY_CAPABILITIES}
+
+
+class CapabilityPolicy(BaseModel):
+    enabled: bool = True
+    allowed_paths: List[str] = Field(default_factory=list)
+    denied_paths: List[str] = Field(default_factory=list)
+    allowed_commands: List[str] = Field(default_factory=list)
+    denied_patterns: List[str] = Field(default_factory=list)
+    max_output_bytes: Optional[int] = None
+    max_file_bytes: Optional[int] = None
+
+
+class DevicePolicyUpdate(BaseModel):
+    capabilities: Dict[str, CapabilityPolicy] = Field(default_factory=dict)
+
+
+_VALID_CAPABILITY_IDS = frozenset(c["id"] for c in PROXY_CAPABILITIES)
+
+
+@router.get("/api/settings/device-tokens/{token_id}/policy")
+async def get_device_policy(
+    token_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Return the stored capabilities_policy for a device token."""
+    try:
+        from services.device_token_service import get_capabilities_policy
+        policy = await get_capabilities_policy(token_id, current_user.user_id)
+        if policy is None:
+            raise HTTPException(status_code=404, detail="Device token not found")
+        return {"token_id": token_id, "capabilities": policy or {}}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to load device policy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/api/settings/device-tokens/{token_id}/policy")
+async def patch_device_policy(
+    token_id: str,
+    body: DevicePolicyUpdate,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """
+    Replace the capabilities_policy for a device token. If the daemon is
+    currently connected with this token_id, push the updated policy to it
+    immediately. Otherwise it will be pushed on the daemon's next register.
+    """
+    try:
+        from services.device_token_service import (
+            get_capabilities_policy,
+            set_capabilities_policy,
+        )
+        from utils.websocket_manager import get_websocket_manager
+
+        existing = await get_capabilities_policy(token_id, current_user.user_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Device token not found")
+
+        normalized: Dict[str, Any] = {}
+        for cap_id, cfg in (body.capabilities or {}).items():
+            if cap_id not in _VALID_CAPABILITY_IDS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Unknown capability id: {cap_id}",
+                )
+            normalized[cap_id] = cfg.model_dump(exclude_none=True)
+
+        merged: Dict[str, Any] = {**(existing or {}), **normalized}
+
+        await set_capabilities_policy(token_id, current_user.user_id, merged)
+
+        ws_manager = get_websocket_manager()
+        delivered = await ws_manager.push_device_policy(
+            current_user.user_id,
+            merged,
+            token_id=token_id,
+        )
+
+        return {
+            "success": True,
+            "token_id": token_id,
+            "capabilities": merged,
+            "delivered": delivered,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update device policy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Shell command approval grant (in-chat Run/Skip flow) ---
+
+@router.post("/api/settings/shell-approvals/{approval_id}/grant")
+async def grant_shell_approval(
+    approval_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """
+    Mark a parked shell_command_approval as approved. The next agent
+    invocation that re-runs the same shell command will find a pre-approved
+    record and consume it (no resume task needed).
+    """
+    from services.database_manager.database_helpers import fetch_one, execute
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    try:
+        try:
+            aid = _uuid.UUID(approval_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="invalid approval_id")
+
+        row = await fetch_one(
+            """
+            SELECT id, status, governance_type
+            FROM agent_approval_queue
+            WHERE id = $1::uuid AND user_id = $2
+            """,
+            aid,
+            current_user.user_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        if row.get("governance_type") != "shell_command_approval":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval is not a shell_command_approval (got {row.get('governance_type')})",
+            )
+        if row.get("status") != "pending":
+            return {"success": True, "status": row.get("status"), "already": True}
+        await execute(
+            """
+            UPDATE agent_approval_queue
+            SET status = 'approved', responded_at = $1
+            WHERE id = $2::uuid AND user_id = $3 AND status = 'pending'
+            """,
+            _dt.now(_tz.utc),
+            aid,
+            current_user.user_id,
+        )
+        return {"success": True, "status": "approved"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to grant shell approval: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- User shell policy (allow / deny / require_approval) REST CRUD ---
+# Mirrors the gRPC handlers in services/grpc_handlers/shell_policy_handlers.py
+# but exposed as REST so the Settings UI can manage rules without a gRPC bridge.
+
+_VALID_SHELL_MATCH = frozenset({"prefix", "contains", "glob"})
+_VALID_SHELL_ACTION = frozenset({"allow", "deny", "require_approval"})
+
+
+class ShellPolicyRule(BaseModel):
+    pattern: str = Field(..., min_length=1, max_length=255)
+    match_mode: str = Field(default="prefix")
+    action: str = Field(...)
+    scope_workspace_id: Optional[str] = None
+    label: Optional[str] = None
+    priority: int = Field(default=50, ge=0, le=10000)
+
+
+@router.get("/api/settings/shell-policy/rules")
+async def list_shell_policy_rules(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List shell policy rules for the current user, ordered by priority asc."""
+    from services.database_manager.database_helpers import fetch_all
+    try:
+        rows = await fetch_all(
+            """
+            SELECT id::text AS id, pattern, match_mode, action,
+                   scope_workspace_id::text AS scope_workspace_id,
+                   label, priority, created_at
+            FROM user_shell_policy
+            WHERE user_id = $1
+            ORDER BY priority ASC NULLS LAST, created_at ASC
+            """,
+            current_user.user_id,
+        )
+        return {"rules": [dict(r) for r in (rows or [])]}
+    except Exception as e:
+        logger.error(f"Failed to list shell policy rules: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/shell-policy/rules")
+async def create_shell_policy_rule(
+    rule: ShellPolicyRule,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Create a new shell policy rule."""
+    from services.database_manager.database_helpers import fetch_value, fetch_one
+    import uuid as _uuid
+
+    if rule.match_mode not in _VALID_SHELL_MATCH:
+        raise HTTPException(status_code=400, detail=f"invalid match_mode: {rule.match_mode}")
+    if rule.action not in _VALID_SHELL_ACTION:
+        raise HTTPException(status_code=400, detail=f"invalid action: {rule.action}")
+
+    scope_uuid = None
+    if rule.scope_workspace_id:
+        try:
+            scope_uuid = _uuid.UUID(rule.scope_workspace_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="invalid scope_workspace_id")
+        ok = await fetch_one(
+            "SELECT id FROM code_workspaces WHERE id = $1::uuid AND user_id = $2",
+            scope_uuid,
+            current_user.user_id,
+        )
+        if not ok:
+            raise HTTPException(status_code=400, detail="scope_workspace_id not found for user")
+    try:
+        new_id = await fetch_value(
+            """
+            INSERT INTO user_shell_policy
+                (user_id, pattern, match_mode, action, scope_workspace_id, label, priority)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id::text
+            """,
+            current_user.user_id,
+            rule.pattern.strip(),
+            rule.match_mode,
+            rule.action,
+            scope_uuid,
+            (rule.label or None),
+            rule.priority,
+        )
+        return {"success": True, "rule_id": str(new_id)}
+    except Exception as e:
+        logger.error(f"Failed to create shell policy rule: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/settings/shell-policy/rules/{rule_id}")
+async def update_shell_policy_rule(
+    rule_id: str,
+    rule: ShellPolicyRule,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Update an existing shell policy rule."""
+    from services.database_manager.database_helpers import fetch_value, fetch_one
+    import uuid as _uuid
+
+    try:
+        rid = _uuid.UUID(rule_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid rule_id")
+    if rule.match_mode not in _VALID_SHELL_MATCH:
+        raise HTTPException(status_code=400, detail=f"invalid match_mode: {rule.match_mode}")
+    if rule.action not in _VALID_SHELL_ACTION:
+        raise HTTPException(status_code=400, detail=f"invalid action: {rule.action}")
+
+    scope_uuid = None
+    if rule.scope_workspace_id:
+        try:
+            scope_uuid = _uuid.UUID(rule.scope_workspace_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="invalid scope_workspace_id")
+        ok = await fetch_one(
+            "SELECT id FROM code_workspaces WHERE id = $1::uuid AND user_id = $2",
+            scope_uuid,
+            current_user.user_id,
+        )
+        if not ok:
+            raise HTTPException(status_code=400, detail="scope_workspace_id not found for user")
+    try:
+        updated_id = await fetch_value(
+            """
+            UPDATE user_shell_policy
+            SET pattern = $1, match_mode = $2, action = $3,
+                scope_workspace_id = $4, label = $5, priority = $6
+            WHERE id = $7::uuid AND user_id = $8
+            RETURNING id::text
+            """,
+            rule.pattern.strip(),
+            rule.match_mode,
+            rule.action,
+            scope_uuid,
+            (rule.label or None),
+            rule.priority,
+            rid,
+            current_user.user_id,
+        )
+        if not updated_id:
+            raise HTTPException(status_code=404, detail="rule not found")
+        return {"success": True, "rule_id": str(updated_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update shell policy rule: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/settings/shell-policy/rules/{rule_id}")
+async def delete_shell_policy_rule(
+    rule_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Delete a shell policy rule."""
+    from services.database_manager.database_helpers import execute
+    import uuid as _uuid
+
+    try:
+        rid = _uuid.UUID(rule_id)
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="invalid rule_id")
+    try:
+        await execute(
+            "DELETE FROM user_shell_policy WHERE id = $1::uuid AND user_id = $2",
+            rid,
+            current_user.user_id,
+        )
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"Failed to delete shell policy rule: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/shell-approvals/{approval_id}/reject")
+async def reject_shell_approval(
+    approval_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Mark a parked shell_command_approval as rejected."""
+    from services.database_manager.database_helpers import fetch_one, execute
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    try:
+        try:
+            aid = _uuid.UUID(approval_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="invalid approval_id")
+        row = await fetch_one(
+            """
+            SELECT id, status, governance_type
+            FROM agent_approval_queue
+            WHERE id = $1::uuid AND user_id = $2
+            """,
+            aid,
+            current_user.user_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Approval not found")
+        if row.get("governance_type") != "shell_command_approval":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Approval is not a shell_command_approval (got {row.get('governance_type')})",
+            )
+        if row.get("status") != "pending":
+            return {"success": True, "status": row.get("status"), "already": True}
+        await execute(
+            """
+            UPDATE agent_approval_queue
+            SET status = 'rejected', responded_at = $1
+            WHERE id = $2::uuid AND user_id = $3 AND status = 'pending'
+            """,
+            _dt.now(_tz.utc),
+            aid,
+            current_user.user_id,
+        )
+        return {"success": True, "status": "rejected"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reject shell approval: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/api/settings/{category}")
 async def get_settings_by_category(category: str):
     """Get settings by category"""
