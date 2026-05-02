@@ -37,6 +37,10 @@ import {
 } from '../../../src/utils/ebookFileStore';
 import { koreaderPartialMd5 } from '../../../src/utils/koreaderPartialMd5';
 import {
+  loadLocalEbookPosition,
+  saveLocalEbookPosition,
+} from '../../../src/utils/ebookPositionStore';
+import {
   clearLastEbookParams,
   saveLastEbookParams,
 } from '../../../src/session/lastEbookParamsStore';
@@ -81,6 +85,33 @@ function inferReaderFormat(formatParam: string, acquisitionUrl: string): 'epub' 
   return 'epub';
 }
 
+const SYNC_POSITION_THRESHOLD = 0.05;
+
+function normalizeRemoteProgressPct(remote: Record<string, unknown> | null | undefined): number {
+  if (!remote || typeof remote !== 'object') return 0;
+  const p = remote.percentage;
+  if (typeof p !== 'number' || !Number.isFinite(p)) return 0;
+  let x = p;
+  if (x > 1) x /= 100;
+  return Math.max(0, Math.min(1, x));
+}
+
+function remoteHasMeaningfulPosition(
+  remote: { progress?: unknown; percentage?: unknown },
+  remotePctNorm: number
+): boolean {
+  const prog = remote.progress;
+  if (typeof prog === 'string' && prog.startsWith('epubcfi(')) return true;
+  return remotePctNorm > 0.0001;
+}
+
+type SyncConflictState = {
+  remotePct: number;
+  remoteCfi: string | null;
+  remoteDevice: string;
+  localPct: number;
+};
+
 export default function EbookReaderScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -118,6 +149,8 @@ export default function EbookReaderScreen() {
   const readyRef = useRef(false);
   const digestRef = useRef('');
   const kosyncConfiguredRef = useRef(false);
+  const localPersistReadyRef = useRef(false);
+  const [syncConflict, setSyncConflict] = useState<SyncConflictState | null>(null);
 
   const gestureThresholds = useMemo(
     () => ({
@@ -220,6 +253,14 @@ export default function EbookReaderScreen() {
       } catch {
         // ignore
       }
+      if (localPersistReadyRef.current) {
+        const cfiStore = cfi && cfi.startsWith('epubcfi(') ? cfi : null;
+        try {
+          await saveLocalEbookPosition(docDigest, percentage, cfiStore);
+        } catch {
+          // ignore
+        }
+      }
     },
     []
   );
@@ -277,6 +318,8 @@ export default function EbookReaderScreen() {
       setReaderHtml(null);
       setContentPositioned(false);
       readyRef.current = false;
+      localPersistReadyRef.current = false;
+      setSyncConflict(null);
       readerFormatRef.current = resolvedFormat;
       try {
         const settings = await getEbooksSettings();
@@ -367,6 +410,7 @@ export default function EbookReaderScreen() {
     })();
     return () => {
       cancelled = true;
+      localPersistReadyRef.current = false;
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [catalogId, acquisitionUrl, initialDigest, title, resolvedFormat]);
@@ -395,6 +439,23 @@ export default function EbookReaderScreen() {
     },
     []
   );
+
+  useEffect(() => {
+    if (!syncConflict) return undefined;
+    const t = setTimeout(() => setSyncConflict(null), 10000);
+    return () => clearTimeout(t);
+  }, [syncConflict]);
+
+  const handleJumpToRemoteSync = useCallback(() => {
+    const c = syncConflict;
+    if (!c) return;
+    if (c.remoteCfi) {
+      webRef.current?.sendCommand({ type: 'GOTO_CFI', cfi: c.remoteCfi });
+    } else if (c.remotePct > 0) {
+      webRef.current?.sendCommand({ type: 'SEEK_PERCENT', pct: c.remotePct });
+    }
+    setSyncConflict(null);
+  }, [syncConflict]);
 
   const onWebMessage = useCallback(
     (msg: WebToNativeMessage) => {
@@ -426,27 +487,78 @@ export default function EbookReaderScreen() {
         const doc = digestRef.current;
         if (!doc || !kosyncConfiguredRef.current) {
           setContentPositioned(true);
+          setTimeout(() => {
+            localPersistReadyRef.current = true;
+          }, 600);
           return;
         }
         void (async () => {
+          const armPersist = () => {
+            setTimeout(() => {
+              localPersistReadyRef.current = true;
+            }, 600);
+          };
           try {
             const remote = await getKosyncProgress(doc);
+            const remoteObj = remote as Record<string, unknown>;
+            const remotePct = normalizeRemoteProgressPct(remoteObj);
             const prog = remote?.progress;
+            const remoteCfi =
+              typeof prog === 'string' && prog.startsWith('epubcfi(') ? prog : null;
+            const remoteDevice =
+              typeof remote?.device === 'string' && remote.device.trim()
+                ? remote.device.trim()
+                : 'sync';
+            const hasRemotePos = remoteHasMeaningfulPosition(remote ?? {}, remotePct);
+
+            const localRow = await loadLocalEbookPosition(doc);
+            const localPct = localRow?.percentage ?? 0;
+            const localCfi =
+              localRow?.cfi && localRow.cfi.startsWith('epubcfi(') ? localRow.cfi : null;
+
             let didSeek = false;
-            if (typeof prog === 'string' && prog.startsWith('epubcfi(')) {
-              webRef.current?.sendCommand({ type: 'GOTO_CFI', cfi: prog });
+
+            if (!hasRemotePos) {
+              if (localPct > 0) {
+                if (localCfi) {
+                  webRef.current?.sendCommand({ type: 'GOTO_CFI', cfi: localCfi });
+                } else {
+                  webRef.current?.sendCommand({ type: 'SEEK_PERCENT', pct: localPct });
+                }
+                didSeek = true;
+              }
+            } else if (localPct <= 0 || remotePct >= localPct - SYNC_POSITION_THRESHOLD) {
+              if (remoteCfi) {
+                webRef.current?.sendCommand({ type: 'GOTO_CFI', cfi: remoteCfi });
+                didSeek = true;
+              } else if (remotePct > 0) {
+                webRef.current?.sendCommand({ type: 'SEEK_PERCENT', pct: remotePct });
+                didSeek = true;
+              }
+            } else {
+              if (localCfi) {
+                webRef.current?.sendCommand({ type: 'GOTO_CFI', cfi: localCfi });
+              } else {
+                webRef.current?.sendCommand({ type: 'SEEK_PERCENT', pct: localPct });
+              }
               didSeek = true;
-            } else if (typeof remote?.percentage === 'number' && remote.percentage > 0) {
-              webRef.current?.sendCommand({ type: 'SEEK_PERCENT', pct: remote.percentage });
-              didSeek = true;
+              setSyncConflict({
+                remotePct,
+                remoteCfi,
+                remoteDevice,
+                localPct,
+              });
             }
+
             if (didSeek) {
               setTimeout(() => setContentPositioned(true), 450);
             } else {
               setContentPositioned(true);
             }
+            armPersist();
           } catch {
             setContentPositioned(true);
+            armPersist();
           }
         })();
       }
@@ -502,6 +614,24 @@ export default function EbookReaderScreen() {
           <Pressable style={styles.backBtn} onPress={() => router.back()}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
+        </View>
+      ) : null}
+
+      {syncConflict && readerHtml && contentPositioned && !error ? (
+        <View style={[styles.syncBanner, { paddingBottom: Math.max(insets.bottom, 12) }]} accessibilityRole="alert">
+          <Text style={styles.syncBannerText}>
+            Sync ({Math.round(Math.max(0, Math.min(1, syncConflict.remotePct)) * 100)}%
+            {syncConflict.remoteDevice ? ` · ${syncConflict.remoteDevice}` : ''}) is earlier than here (
+            {Math.round(Math.max(0, Math.min(1, syncConflict.localPct)) * 100)}%).
+          </Text>
+          <View style={styles.syncBannerRow}>
+            <Pressable style={styles.syncBannerBtn} onPress={handleJumpToRemoteSync}>
+              <Text style={styles.syncBannerBtnText}>Jump to sync</Text>
+            </Pressable>
+            <Pressable style={styles.syncBannerBtn} onPress={() => setSyncConflict(null)}>
+              <Text style={styles.syncBannerBtnText}>Dismiss</Text>
+            </Pressable>
+          </View>
         </View>
       ) : null}
 
@@ -662,6 +792,25 @@ const styles = StyleSheet.create({
   seekRow: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12 },
   seekBtn: { color: '#fff', fontWeight: '700', fontSize: 14 },
   seekPct: { color: '#ccc', minWidth: 48, textAlign: 'center' },
+  syncBanner: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 8,
+    backgroundColor: 'rgba(30, 40, 55, 0.94)',
+    borderRadius: 10,
+    padding: 12,
+    zIndex: 40,
+  },
+  syncBannerText: { color: '#eee', fontSize: 14, marginBottom: 10 },
+  syncBannerRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  syncBannerBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: '#444',
+    borderRadius: 8,
+  },
+  syncBannerBtnText: { color: '#fff', fontWeight: '600', fontSize: 14 },
   fsBtn: { color: '#fff', fontSize: 18, fontWeight: '700', paddingHorizontal: 8 },
   fsLabel: { color: '#ccc', minWidth: 48, textAlign: 'center' },
   themeChip: { paddingHorizontal: 8, paddingVertical: 4 },

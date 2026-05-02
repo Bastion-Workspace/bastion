@@ -330,29 +330,45 @@ async def _read_epub(session: "BBSSession", catalog_id: str, acquisition_url: st
     settings = await client.get_ebooks_settings(jwt)
     kosync_ok = bool((settings.get("kosync") or {}).get("configured")) and not settings.get("error")
     start_ch = 0
+
+    session_ch: Optional[int] = None
+    if digest in session.ebook_positions:
+        saved_sess = session.ebook_positions[digest]
+        if isinstance(saved_sess, int) and 0 <= saved_sess < len(chapters):
+            session_ch = saved_sess
+
+    kosync_ch: Optional[int] = None
+    remote_pct = 0.0
     if kosync_ok:
         remote = await client.kosync_get_progress(jwt, digest)
-        pct = _normalize_remote_percentage(remote.get("percentage") if isinstance(remote, dict) else 0)
-        if pct > 0.02:
-            pct_i = int(pct * 100)
+        remote_pct = _normalize_remote_percentage(remote.get("percentage") if isinstance(remote, dict) else 0)
+        if remote_pct > 0.02:
+            kosync_ch = _chapter_from_percentage(chapters, remote_pct)
+
+    if session_ch is not None and kosync_ch is not None:
+        if abs(session_ch - kosync_ch) >= 2:
+            pct_sess = int(_percentage_for_chapter(chapters, session_ch) * 100)
+            pct_ks = int(remote_pct * 100)
             await session._write(
-                f"\r\nKoSync saved position (~{pct_i}%).\r\n"
-                f"{t.fg_bright_green}[Y]{t.reset}es resume  "
-                f"{t.fg_bright_green}[N]{t.reset}o start from beginning: "
+                f"\r\nPositions differ:  this session ch.{session_ch + 1} (~{pct_sess}%)  "
+                f"vs  sync ch.{kosync_ch + 1} (~{pct_ks}%).\r\n"
+                f"{t.fg_bright_green}[1]{t.reset} Continue from session (ch.{session_ch + 1})  "
+                f"{t.fg_bright_green}[2]{t.reset} Jump to sync (ch.{kosync_ch + 1}): "
             )
             ans = (await session.read_menu_choice()).strip().lower()
-            if ans in ("y", "yes"):
-                start_ch = _chapter_from_percentage(chapters, pct)
-    if digest in session.ebook_positions:
-        saved = session.ebook_positions[digest]
-        if 0 <= saved < len(chapters):
-            await session._write(
-                f"\r\nResume in this session at chapter {saved + 1}? "
-                f"{t.fg_bright_green}[Y]{t.reset}/{t.fg_bright_green}[N]{t.reset}: "
-            )
-            ans2 = (await session.read_menu_choice()).strip().lower()
-            if ans2 in ("y", "yes"):
-                start_ch = saved
+            if ans in ("2", "two", "j", "jump"):
+                start_ch = kosync_ch
+            else:
+                start_ch = session_ch
+        else:
+            start_ch = max(session_ch, kosync_ch)
+    elif kosync_ch is not None:
+        start_ch = kosync_ch
+    elif session_ch is not None:
+        start_ch = session_ch
+    else:
+        start_ch = 0
+
     chapter_idx = max(0, min(len(chapters) - 1, start_ch))
     while 0 <= chapter_idx < len(chapters):
         ch_title, body = chapters[chapter_idx]

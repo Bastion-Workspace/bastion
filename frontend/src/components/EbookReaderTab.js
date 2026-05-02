@@ -10,6 +10,7 @@ import {
   InputLabel,
   Tooltip,
   Paper,
+  Alert,
 } from '@mui/material';
 import { Fullscreen, FullscreenExit } from '@mui/icons-material';
 import ePub from 'epubjs';
@@ -21,6 +22,7 @@ import {
 } from '../utils/koreaderPartialMd5';
 import { devLog } from '../utils/devConsole';
 import { ebookCachePut, ebookCacheGet, ebookCacheEnforceQuota } from '../services/ebookIndexedDb';
+import { loadLocalEbookPosition, saveLocalEbookPosition } from '../utils/ebookPositionStore';
 import PdfBytesViewer from './PdfBytesViewer';
 
 const DEVICE_KEY = 'bastion_kosync_device_id';
@@ -111,6 +113,25 @@ function applyReaderTheme(rendition, readerPrefs) {
 
 const READER_MAX_WIDTH_PX = 1180;
 
+/** When cloud position is this far behind local, show non-blocking conflict UI (0..1 scale). */
+const SYNC_POSITION_THRESHOLD = 0.05;
+
+function normalizeRemoteProgressPct(remote) {
+  if (!remote || typeof remote !== 'object') return 0;
+  const p = remote.percentage;
+  if (typeof p !== 'number' || !Number.isFinite(p)) return 0;
+  let x = p;
+  if (x > 1) x /= 100;
+  return Math.max(0, Math.min(1, x));
+}
+
+function remoteHasMeaningfulPosition(remote, remotePctNorm) {
+  if (!remote || typeof remote !== 'object') return false;
+  const prog = remote.progress;
+  if (typeof prog === 'string' && prog.startsWith('epubcfi(')) return true;
+  return remotePctNorm > 0.0001;
+}
+
 /** No default focus ring on pointer use; keyboard users still get :focus-visible. */
 const readerTapZoneFocusSx = {
   outline: 'none',
@@ -194,6 +215,8 @@ export default function EbookReaderTab({
   const [pageLocationLabel, setPageLocationLabel] = useState('—');
   const [readerReady, setReaderReady] = useState(false);
   const [pdfBytes, setPdfBytes] = useState(null);
+  const [syncConflict, setSyncConflict] = useState(null);
+  const localPersistReadyRef = useRef(false);
 
   useEffect(() => {
     try {
@@ -225,11 +248,50 @@ export default function EbookReaderTab({
     (percentage, cfi, docDigest) => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => {
-        void pushProgress(percentage, cfi, docDigest);
+        void (async () => {
+          await pushProgress(percentage, cfi, docDigest);
+          const digestUse = docDigest || digest;
+          if (localPersistReadyRef.current && digestUse && format !== 'pdf') {
+            const cfiStr = cfi && String(cfi).startsWith('epubcfi(') ? String(cfi) : null;
+            saveLocalEbookPosition(digestUse, percentage, cfiStr);
+          }
+        })();
       }, 2500);
     },
-    [pushProgress]
+    [pushProgress, digest, format]
   );
+
+  const handleDismissSyncConflict = useCallback(() => {
+    setSyncConflict(null);
+  }, []);
+
+  const handleJumpToRemoteSync = useCallback(async () => {
+    const c = syncConflict;
+    if (!c) return;
+    const book = bookRef.current;
+    const rendition = renditionRef.current;
+    if (!book || !rendition) {
+      setSyncConflict(null);
+      return;
+    }
+    try {
+      if (c.remoteCfi) {
+        await rendition.display(c.remoteCfi);
+      } else if (typeof c.remotePct === 'number' && c.remotePct > 0) {
+        const cfi = book.locations?.cfiFromPercentage?.(c.remotePct);
+        await rendition.display(cfi || undefined);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    setSyncConflict(null);
+  }, [syncConflict]);
+
+  useEffect(() => {
+    if (!syncConflict) return undefined;
+    const t = window.setTimeout(() => setSyncConflict(null), 10000);
+    return () => window.clearTimeout(t);
+  }, [syncConflict]);
 
   useEffect(() => {
     let active = true;
@@ -252,6 +314,8 @@ export default function EbookReaderTab({
         setReaderReady(false);
         setPageLocationLabel('—');
         setError('');
+        setSyncConflict(null);
+        localPersistReadyRef.current = false;
         const settings = await ebooksService.getSettings();
         if (!active) return;
         const mergedPrefs = normalizeReaderPrefs(settings?.reader_prefs || {});
@@ -360,14 +424,54 @@ export default function EbookReaderTab({
         if (kosyncConfiguredRef.current) {
           try {
             const remote = await ebooksService.getProgress(d);
-            const prog = remote?.progress;
-            if (typeof prog === 'string' && prog.startsWith('epubcfi(')) {
-              await rendition.display(prog);
-            } else if (typeof remote?.percentage === 'number' && remote.percentage > 0) {
-              const cfi = book.locations.cfiFromPercentage(remote.percentage);
-              await rendition.display(cfi || undefined);
+            const remotePct = normalizeRemoteProgressPct(remote);
+            const remoteProg = remote?.progress;
+            const remoteCfi =
+              typeof remoteProg === 'string' && remoteProg.startsWith('epubcfi(') ? remoteProg : null;
+            const remoteDevice =
+              typeof remote?.device === 'string' && remote.device.trim() ? remote.device.trim() : 'sync';
+            const hasRemotePos = remoteHasMeaningfulPosition(remote, remotePct);
+            const localRow = loadLocalEbookPosition(d);
+            const localPct =
+              localRow && typeof localRow.percentage === 'number' ? localRow.percentage : 0;
+            const localCfi =
+              localRow?.cfi && String(localRow.cfi).startsWith('epubcfi(') ? localRow.cfi : null;
+
+            if (!hasRemotePos) {
+              if (localPct > 0) {
+                if (localCfi) {
+                  await rendition.display(localCfi);
+                } else {
+                  const lc = book.locations.cfiFromPercentage(localPct);
+                  await rendition.display(lc || undefined);
+                }
+              } else {
+                await rendition.display();
+              }
+            } else if (localPct <= 0 || remotePct >= localPct - SYNC_POSITION_THRESHOLD) {
+              if (remoteCfi) {
+                await rendition.display(remoteCfi);
+              } else if (remotePct > 0) {
+                const cfi = book.locations.cfiFromPercentage(remotePct);
+                await rendition.display(cfi || undefined);
+              } else {
+                await rendition.display();
+              }
             } else {
-              await rendition.display();
+              if (localCfi) {
+                await rendition.display(localCfi);
+              } else {
+                const lc = book.locations.cfiFromPercentage(localPct);
+                await rendition.display(lc || undefined);
+              }
+              if (active) {
+                setSyncConflict({
+                  remotePct,
+                  remoteCfi,
+                  remoteDevice,
+                  localPct,
+                });
+              }
             }
           } catch (_) {
             await rendition.display();
@@ -439,6 +543,9 @@ export default function EbookReaderTab({
 
         setReaderReady(true);
         setStatus('');
+        window.setTimeout(() => {
+          localPersistReadyRef.current = true;
+        }, 600);
       } catch (e) {
         if (active) {
           try {
@@ -457,6 +564,7 @@ export default function EbookReaderTab({
     })();
     return () => {
       active = false;
+      localPersistReadyRef.current = false;
       setReaderReady(false);
       if (keyboardNavRef.current) {
         window.removeEventListener('keydown', keyboardNavRef.current);
@@ -692,6 +800,22 @@ export default function EbookReaderTab({
         <Box p={2} sx={{ flexShrink: 0, position: 'relative', zIndex: 2 }}>
           <Typography>{status}</Typography>
         </Box>
+      )}
+      {syncConflict && format === 'epub' && !error && (
+        <Alert
+          severity="info"
+          onClose={handleDismissSyncConflict}
+          sx={{ flexShrink: 0, mx: 1.5, mb: 0.5, position: 'relative', zIndex: 2 }}
+          action={
+            <Button color="inherit" size="small" onClick={() => void handleJumpToRemoteSync()}>
+              Jump to {Math.round(Math.max(0, Math.min(1, syncConflict.remotePct)) * 100)}%
+            </Button>
+          }
+        >
+          Your sync position ({Math.round(Math.max(0, Math.min(1, syncConflict.remotePct)) * 100)}%
+          {syncConflict.remoteDevice ? ` on ${syncConflict.remoteDevice}` : ''}) is earlier than where you were
+          here ({Math.round(Math.max(0, Math.min(1, syncConflict.localPct)) * 100)}%).
+        </Alert>
       )}
       <Box
         sx={{

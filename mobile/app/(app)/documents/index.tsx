@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { useFocusEffect } from '@react-navigation/native';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -15,6 +16,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { DocumentSearchModal } from '../../../src/components/DocumentSearchModal';
 import { ScreenShell } from '../../../src/components/ScreenShell';
 import { listUserDocuments, type DocumentInfo } from '../../../src/api/documents';
 import {
@@ -25,6 +27,7 @@ import {
   type FolderDocumentRow,
   type FolderTreeApiResponse,
 } from '../../../src/api/folders';
+import { loadRecentDocuments, type RecentDocumentEntry } from '../../../src/session/recentDocumentsStore';
 import { getColors, type AppColors } from '../../../src/theme/colors';
 
 type ScopeFilter = 'all' | 'user' | 'team' | 'global';
@@ -72,6 +75,21 @@ function makeListStyles(colors: AppColors) {
       fontSize: 14,
     },
     empty: { textAlign: 'center', marginTop: 48, color: colors.textSecondary },
+    recentSection: { marginBottom: 16 },
+    recentLabel: { fontSize: 13, fontWeight: '700', color: colors.textSecondary, marginBottom: 8 },
+    recentScroll: { flexGrow: 0 },
+    recentScrollInner: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingRight: 8 },
+    recentChip: {
+      maxWidth: 200,
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: colors.border,
+      backgroundColor: colors.surfaceMuted,
+    },
+    recentChipText: { fontSize: 14, fontWeight: '600', color: colors.text },
+    headerIcons: { flexDirection: 'row', alignItems: 'center', gap: 4 },
     row: {
       backgroundColor: colors.surface,
       padding: 14,
@@ -415,6 +433,19 @@ export default function DocumentsListScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [recentDocs, setRecentDocs] = useState<RecentDocumentEntry[]>([]);
+
+  const refreshRecents = useCallback(async () => {
+    const list = await loadRecentDocuments();
+    setRecentDocs(list.slice(0, 6));
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshRecents();
+    }, [refreshRecents])
+  );
 
   const load = useCallback(async () => {
     setError(null);
@@ -462,18 +493,59 @@ export default function DocumentsListScreen() {
         contentContainerStyle={styles.list}
         ListHeaderComponent={
           <View style={styles.listHeader}>
+            {recentDocs.length > 0 ? (
+              <View style={styles.recentSection}>
+                <Text style={styles.recentLabel}>Recently opened</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.recentScroll}
+                  contentContainerStyle={styles.recentScrollInner}
+                  keyboardShouldPersistTaps="handled"
+                >
+                  {recentDocs.map((r) => (
+                    <Pressable
+                      key={r.document_id}
+                      style={styles.recentChip}
+                      onPress={() =>
+                        router.push({
+                          pathname: `/documents/${r.document_id}`,
+                          params: { documentTitle: r.title },
+                        })
+                      }
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${r.title}`}
+                    >
+                      <Text style={styles.recentChipText} numberOfLines={1}>
+                        {r.title}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
             <View style={styles.titleRow}>
               <Text style={styles.screenTitle}>Documents</Text>
-              <Pressable
-                onLongPress={() => setBrowseOpen(true)}
-                delayLongPress={400}
-                hitSlop={10}
-                style={styles.browseIconBtn}
-                accessibilityRole="button"
-                accessibilityLabel="Browse folder tree"
-              >
-                <Ionicons name="folder-open-outline" size={26} color={colors.text} />
-              </Pressable>
+              <View style={styles.headerIcons}>
+                <Pressable
+                  onPress={() => setSearchOpen(true)}
+                  hitSlop={10}
+                  style={styles.browseIconBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Search documents"
+                >
+                  <Ionicons name="search-outline" size={26} color={colors.text} />
+                </Pressable>
+                <Pressable
+                  onPress={() => setBrowseOpen(true)}
+                  hitSlop={10}
+                  style={styles.browseIconBtn}
+                  accessibilityRole="button"
+                  accessibilityLabel="Browse folder tree"
+                >
+                  <Ionicons name="folder-open-outline" size={26} color={colors.text} />
+                </Pressable>
+              </View>
             </View>
             {error ? (
               <Text style={styles.errorBanner} accessibilityRole="alert">
@@ -502,6 +574,17 @@ export default function DocumentsListScreen() {
         visible={browseOpen}
         onClose={() => setBrowseOpen(false)}
         onOpenDocument={(documentId, documentTitle) => {
+          router.push({
+            pathname: `/documents/${documentId}`,
+            params: { documentTitle },
+          });
+        }}
+      />
+      <DocumentSearchModal
+        visible={searchOpen}
+        onClose={() => setSearchOpen(false)}
+        colors={colors}
+        onPickDocument={(documentId, documentTitle) => {
           router.push({
             pathname: `/documents/${documentId}`,
             params: { documentTitle },

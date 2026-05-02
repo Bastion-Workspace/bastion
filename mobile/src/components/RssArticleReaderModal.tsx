@@ -153,67 +153,6 @@ export function RssArticleReaderModal({
 
   const colors = useMemo(() => rssArticlePalette(rssTheme, systemIsDark), [rssTheme, systemIsDark]);
 
-  const navZones = Boolean(onPrevArticle || onNextArticle);
-
-  const gestureThresholds = useMemo(
-    () => ({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_: unknown, gs: { dx: number; dy: number }) =>
-        Math.abs(gs.dx) > 6 || Math.abs(gs.dy) > 6,
-      onPanResponderTerminationRequest: () => false,
-    }),
-    []
-  );
-
-  const leftZonePan = useMemo(
-    () =>
-      PanResponder.create({
-        ...gestureThresholds,
-        onPanResponderRelease: (_, gs) => {
-          if (Math.abs(gs.dx) < 12 && Math.abs(gs.dy) < 12) {
-            if (hasPrev) onPrevArticle?.();
-            return;
-          }
-          if (gs.dy > 40 && gs.dy > Math.abs(gs.dx) * 1.8) {
-            setChromeOpen(true);
-          }
-        },
-      }),
-    [gestureThresholds, hasPrev, onPrevArticle]
-  );
-
-  const middleZonePan = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_e, gs) => gs.dy > 10 && gs.dy > Math.abs(gs.dx) * 0.55,
-        onStartShouldSetPanResponder: () => false,
-        onPanResponderTerminationRequest: () => false,
-        onPanResponderRelease: (_e, gs) => {
-          if (gs.dy > 40 && gs.dy > Math.abs(gs.dx) * 1.8) {
-            setChromeOpen(true);
-          }
-        },
-      }),
-    []
-  );
-
-  const rightZonePan = useMemo(
-    () =>
-      PanResponder.create({
-        ...gestureThresholds,
-        onPanResponderRelease: (_, gs) => {
-          if (Math.abs(gs.dx) < 12 && Math.abs(gs.dy) < 12) {
-            if (hasNext) onNextArticle?.();
-            return;
-          }
-          if (gs.dy > 40 && gs.dy > Math.abs(gs.dx) * 1.8) {
-            setChromeOpen(true);
-          }
-        },
-      }),
-    [gestureThresholds, hasNext, onNextArticle]
-  );
-
   const chromeBackdropPan = useMemo(
     () =>
       PanResponder.create({
@@ -228,7 +167,6 @@ export function RssArticleReaderModal({
     []
   );
 
-  /** Swipe down on the controls sheet to dismiss (same idea as dragging a sheet closed). */
   const chromePanelPan = useMemo(
     () =>
       PanResponder.create({
@@ -308,7 +246,45 @@ export function RssArticleReaderModal({
     return null;
   }
 
-  const chevronTint = colors.textSecondary;
+  const showArticleNav = Boolean(onPrevArticle || onNextArticle);
+
+  const persistentHeader = (
+    <View
+      style={[
+        styles.persistentHeader,
+        {
+          paddingTop: Math.max(insets.top, 8),
+          backgroundColor: colors.surface,
+          borderBottomColor: colors.border,
+        },
+      ]}
+    >
+      <Pressable onPress={onClose} style={styles.headerIconBtn} accessibilityRole="button" accessibilityLabel="Back to article list">
+        <Ionicons name="chevron-back" size={26} color={colors.link} />
+      </Pressable>
+      <Text style={[styles.persistentTitle, { color: colors.text }]} numberOfLines={1} ellipsizeMode="tail">
+        {display?.title || 'Article'}
+      </Text>
+      <View style={styles.headerActions}>
+        <Pressable
+          onPress={() => void openOriginal()}
+          style={styles.headerIconBtn}
+          accessibilityRole="link"
+          accessibilityLabel="Open in browser"
+        >
+          <Ionicons name="globe-outline" size={24} color={colors.link} />
+        </Pressable>
+        <Pressable
+          onPress={() => setChromeOpen(true)}
+          style={styles.headerIconBtn}
+          accessibilityRole="button"
+          accessibilityLabel="Article display settings"
+        >
+          <Ionicons name="options-outline" size={24} color={colors.link} />
+        </Pressable>
+      </View>
+    </View>
+  );
 
   const chromePanel = (
     <View
@@ -316,31 +292,37 @@ export function RssArticleReaderModal({
       style={[
         styles.chromePanel,
         {
-          paddingTop: Math.max(insets.top, 8) + 4,
+          paddingBottom: Math.max(insets.bottom, 12),
           backgroundColor: colors.surface,
-          borderBottomColor: colors.border,
+          borderTopColor: colors.border,
         },
       ]}
     >
-      <View style={[styles.header, { borderBottomColor: colors.border }]}>
-        <Pressable
-          onPress={() => {
-            setChromeOpen(false);
-            onClose();
-          }}
-          style={styles.headerBtn}
-          accessibilityRole="button"
-          accessibilityLabel="Back to article list"
-        >
-          <Ionicons name="chevron-back" size={28} color={colors.link} />
-        </Pressable>
-        <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={2} ellipsizeMode="tail">
-          {display?.title || 'Article'}
-        </Text>
-        <Pressable onPress={() => void openOriginal()} style={styles.headerBtn} accessibilityRole="link">
-          <Text style={[styles.headerBtnText, { color: colors.link }]}>Browser</Text>
-        </Pressable>
-      </View>
+      {showArticleNav ? (
+        <View style={[styles.navRow, { borderBottomColor: colors.border }]}>
+          <Pressable
+            onPress={() => hasPrev && onPrevArticle?.()}
+            disabled={!hasPrev}
+            style={[styles.navBtn, !hasPrev && styles.navBtnDisabled]}
+            accessibilityRole="button"
+            accessibilityLabel="Previous article"
+          >
+            <Ionicons name="chevron-back" size={28} color={hasPrev ? colors.link : colors.textSecondary} />
+          </Pressable>
+          <Text style={[styles.navHint, { color: colors.textSecondary }]} numberOfLines={1}>
+            Article
+          </Text>
+          <Pressable
+            onPress={() => hasNext && onNextArticle?.()}
+            disabled={!hasNext}
+            style={[styles.navBtn, !hasNext && styles.navBtnDisabled]}
+            accessibilityRole="button"
+            accessibilityLabel="Next article"
+          >
+            <Ionicons name="chevron-forward" size={28} color={hasNext ? colors.link : colors.textSecondary} />
+          </Pressable>
+        </View>
+      ) : null}
       {display?.feed_name ? (
         <Text style={[styles.feedName, { color: colors.link }]} numberOfLines={1}>
           {display.feed_name}
@@ -409,67 +391,34 @@ export function RssArticleReaderModal({
   );
 
   return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={[styles.sheet, { backgroundColor: colors.background }]}>
         {loading ? (
-          <View style={[styles.center, { paddingTop: insets.top }]}>
-            <ActivityIndicator size="large" color={colors.text} />
-          </View>
+          <>
+            {persistentHeader}
+            <View style={styles.center}>
+              <ActivityIndicator size="large" color={colors.text} />
+            </View>
+          </>
         ) : htmlDoc ? (
           <>
-            <View style={[styles.readerShell, { paddingTop: insets.top }]}>
-              <View style={styles.readerBody}>
-                <WebView
-                  style={[styles.web, { backgroundColor: colors.background }]}
-                  originWhitelist={['*']}
-                  source={{ html: htmlDoc }}
-                  javaScriptEnabled={false}
-                  domStorageEnabled={false}
-                  setSupportMultipleWindows={false}
-                />
-                {navZones ? (
-                  <View style={styles.zoneRow} pointerEvents="box-none" accessibilityLabel="Article navigation zones">
-                    <View style={styles.zoneSide} {...leftZonePan.panHandlers} accessibilityLabel="Previous article zone">
-                      <Ionicons
-                        name="chevron-back"
-                        size={28}
-                        color={chevronTint}
-                        style={{ opacity: hasPrev ? 0.45 : 0.12 }}
-                        pointerEvents="none"
-                      />
-                    </View>
-                    <View style={styles.zoneMiddle} {...middleZonePan.panHandlers} accessibilityLabel="Swipe down for menu" />
-                    <View style={styles.zoneSide} {...rightZonePan.panHandlers} accessibilityLabel="Next article zone">
-                      <Ionicons
-                        name="chevron-forward"
-                        size={28}
-                        color={chevronTint}
-                        style={{ opacity: hasNext ? 0.45 : 0.12 }}
-                        pointerEvents="none"
-                      />
-                    </View>
-                  </View>
-                ) : (
-                  <View style={styles.fullSwipeChrome} {...middleZonePan.panHandlers} accessibilityLabel="Swipe down for menu" />
-                )}
-              </View>
-              {!chromeOpen ? (
-                <Pressable
-                  style={[styles.menuPeek, { top: Math.max(insets.top, 8) + 4 }]}
-                  onPress={() => setChromeOpen(true)}
-                  accessibilityRole="button"
-                  accessibilityLabel="Show article menu"
-                >
-                  <Ionicons name="chevron-down" size={22} color={colors.textSecondary} />
-                </Pressable>
-              ) : null}
+            {persistentHeader}
+            <View style={styles.readerBody}>
+              <WebView
+                style={[styles.web, { backgroundColor: colors.background }]}
+                originWhitelist={['*']}
+                source={{ html: htmlDoc }}
+                javaScriptEnabled={false}
+                domStorageEnabled={false}
+                setSupportMultipleWindows={false}
+              />
             </View>
             {chromeOpen ? (
               <>
                 <View
                   style={[styles.chromeBackdrop, { backgroundColor: 'rgba(0,0,0,0.35)' }]}
                   {...chromeBackdropPan.panHandlers}
-                  accessibilityLabel="Dismiss article menu"
+                  accessibilityLabel="Dismiss article settings"
                 />
                 <View style={styles.chromeWrap} pointerEvents="box-none">
                   {chromePanel}
@@ -478,22 +427,17 @@ export function RssArticleReaderModal({
             ) : null}
           </>
         ) : (
-          <View style={[styles.center, { paddingTop: insets.top }]}>
-            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
-              No article body is stored on the server yet.
-            </Text>
-            <Pressable onPress={() => void openOriginal()} style={styles.openLink}>
-              <Text style={[styles.openLinkText, { color: colors.link }]}>Open original link</Text>
-            </Pressable>
-            <Pressable
-              onPress={onClose}
-              style={styles.emptyClose}
-              accessibilityRole="button"
-              accessibilityLabel="Back to article list"
-            >
-              <Ionicons name="chevron-back" size={28} color={colors.link} />
-            </Pressable>
-          </View>
+          <>
+            {persistentHeader}
+            <View style={styles.emptyBlock}>
+              <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+                No article body is stored on the server yet.
+              </Text>
+              <Pressable onPress={() => void openOriginal()} style={styles.openLink}>
+                <Text style={[styles.openLinkText, { color: colors.link }]}>Open original link</Text>
+              </Pressable>
+            </View>
+          </>
         )}
       </View>
     </Modal>
@@ -502,18 +446,19 @@ export function RssArticleReaderModal({
 
 const styles = StyleSheet.create({
   sheet: { flex: 1 },
-  readerShell: { flex: 1, position: 'relative' },
-  fullSwipeChrome: {
-    ...StyleSheet.absoluteFillObject,
+  persistentHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 4,
+    paddingBottom: 8,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    gap: 4,
   },
-  menuPeek: {
-    position: 'absolute',
-    right: 12,
-    zIndex: 6,
-    padding: 10,
-    borderRadius: 20,
-    backgroundColor: 'rgba(0,0,0,0.12)',
-  },
+  headerIconBtn: { paddingVertical: 8, paddingHorizontal: 8 },
+  headerActions: { flexDirection: 'row', alignItems: 'center' },
+  persistentTitle: { flex: 1, fontSize: 16, fontWeight: '700', minWidth: 0, marginHorizontal: 4 },
+  readerBody: { flex: 1 },
+  web: { flex: 1 },
   chromeBackdrop: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 8,
@@ -521,32 +466,33 @@ const styles = StyleSheet.create({
   chromeWrap: {
     ...StyleSheet.absoluteFillObject,
     zIndex: 9,
-    justifyContent: 'flex-start',
+    justifyContent: 'flex-end',
   },
   chromePanel: {
-    borderBottomLeftRadius: 12,
-    borderBottomRightRadius: 12,
+    borderTopLeftRadius: 12,
+    borderTopRightRadius: 12,
     paddingHorizontal: 4,
-    paddingBottom: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    paddingTop: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.15,
     shadowRadius: 6,
-    elevation: 8,
+    elevation: 12,
+    maxHeight: '55%',
   },
-  header: {
+  navRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    justifyContent: 'space-between',
     paddingHorizontal: 8,
-    paddingBottom: 8,
+    paddingBottom: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  headerBtn: { paddingVertical: 8, paddingHorizontal: 10 },
-  headerBtnText: { fontWeight: '600', fontSize: 15 },
-  headerTitle: { flex: 1, fontSize: 16, fontWeight: '700', textAlign: 'center', minWidth: 0 },
-  feedName: { fontSize: 13, fontWeight: '600', paddingHorizontal: 16, paddingBottom: 6, paddingTop: 4 },
+  navBtn: { padding: 8 },
+  navBtnDisabled: { opacity: 0.35 },
+  navHint: { fontSize: 13, fontWeight: '600', flex: 1, textAlign: 'center' },
+  feedName: { fontSize: 13, fontWeight: '600', paddingHorizontal: 16, paddingBottom: 6, paddingTop: 8 },
   settingsStrip: {
     paddingHorizontal: 12,
     paddingVertical: 8,
@@ -573,22 +519,9 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     marginRight: 8,
   },
-  readerBody: { flex: 1, position: 'relative' },
-  web: { flex: 1 },
-  zoneRow: {
-    ...StyleSheet.absoluteFillObject,
-    flexDirection: 'row',
-  },
-  zoneSide: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    maxWidth: '28%',
-  },
-  zoneMiddle: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+  emptyBlock: { flex: 1, justifyContent: 'center', paddingHorizontal: 24, paddingBottom: 24 },
   emptyText: { fontSize: 15, textAlign: 'center', marginBottom: 16 },
-  openLink: { paddingVertical: 12, paddingHorizontal: 20 },
+  openLink: { paddingVertical: 12, paddingHorizontal: 20, alignSelf: 'center' },
   openLinkText: { fontWeight: '700', fontSize: 16 },
-  emptyClose: { marginTop: 16, padding: 12 },
 });

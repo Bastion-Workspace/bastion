@@ -13,6 +13,7 @@ import {
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getDocumentContent } from '../../../src/api/documents';
 import { isApiError } from '../../../src/api/client';
+import { recordRecentDocument } from '../../../src/session/recentDocumentsStore';
 import { getColors } from '../../../src/theme/colors';
 import { parseFrontmatter } from '../../../src/utils/parseFrontmatter';
 
@@ -51,11 +52,13 @@ export default function DocumentDetailScreen() {
         setText(null);
         setDocFrontmatter({});
         setMeta('This document is encrypted. Open it in the web app to unlock.');
+        void recordRecentDocument(id, documentTitle);
       } else {
         const body = res.content ?? '';
         setText(body);
         setDocFrontmatter(parseFrontmatter(body));
         setMeta('');
+        void recordRecentDocument(id, documentTitle);
       }
     } catch (e) {
       setText(null);

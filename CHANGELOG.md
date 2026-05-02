@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.70.14] - 2026-05-02
+
+- Feature: **eBooks (web, mobile, BBS)** — Directional KoSync: per-device local reading position; when cloud is meaningfully behind local, web and mobile open at local with a dismissible banner to jump to sync; BBS uses one prompt only when session and sync chapters differ by 2+.
+- Fix: **Bastion Mobile** — Full player: album art uses a square frame with `contain` (no top crop); Stop closes the now playing modal.
+- Update: **Bastion Mobile** — Documents: recently opened (local), hybrid search modal, single-tap folder browse; document list uses correct `skip` query; RSS article reader uses a fixed header and bottom settings sheet (no WebView gesture overlay), removes FAB and pageSheet dismiss conflict.
 - Fix: **Bastion Mobile** — appearance preference: sync read from SecureStore and `Appearance.setColorScheme` before first paint; valid storage key (`app.appearancePreference`); write failures propagate; `NavigationThemeBridge` gates on `hydrated`.
 
 ## [0.70.13] - 2026-05-02

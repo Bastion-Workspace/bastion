@@ -45,7 +45,7 @@ const appIcon = resolveAppIcon();
 const config: ExpoConfig = {
   name: 'Bastion',
   slug: 'bastion-mobile',
-  version: '0.70.13',
+  version: '0.70.14',
   orientation: 'portrait',
   scheme: 'bastion',
   userInterfaceStyle: 'automatic',

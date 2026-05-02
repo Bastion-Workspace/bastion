@@ -292,6 +292,7 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
     setPlayMeta({});
     playMetaRef.current = {};
     setShuffleEnabled(false);
+    setFullPlayerVisible(false);
   }, []);
 
   const toggleShuffle = useCallback(() => {

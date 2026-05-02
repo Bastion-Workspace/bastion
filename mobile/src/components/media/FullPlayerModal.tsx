@@ -49,6 +49,8 @@ export function FullPlayerModal() {
   const playing = playbackState === State.Playing;
   const art = activeTrack && typeof activeTrack.artwork === 'string' ? activeTrack.artwork : undefined;
   const seekW = Math.max(0, width - 48);
+  /** Square artwork area so `cover` on a wide strip does not crop the top/bottom of album covers. */
+  const artFrameSize = Math.min(seekW, 320);
   const fillW = duration > 0 && seekBarW > 0 ? (position / duration) * seekBarW : 0;
 
   const onSeekBarPress = useCallback(
@@ -102,17 +104,28 @@ export function FullPlayerModal() {
         {tab === 'now' && activeTrack && (
           <View style={styles.nowBody}>
             {art ? (
-              <Image
-                source={{ uri: art }}
-                style={[styles.bigArt, { width: seekW }]}
-                contentFit="cover"
-                cachePolicy="disk"
-              />
+              <View
+                style={[
+                  styles.artFrame,
+                  {
+                    width: artFrameSize,
+                    height: artFrameSize,
+                    backgroundColor: c.surfaceMuted,
+                  },
+                ]}
+              >
+                <Image
+                  source={{ uri: art }}
+                  style={styles.artImageFill}
+                  contentFit="contain"
+                  cachePolicy="disk"
+                />
+              </View>
             ) : (
               <View
                 style={[
                   styles.bigArtPlaceholder,
-                  { width: seekW, backgroundColor: c.surfaceMuted },
+                  { width: artFrameSize, height: artFrameSize, backgroundColor: c.surfaceMuted },
                 ]}
               >
                 <Ionicons name="musical-notes-outline" size={80} color={c.textSecondary} />
@@ -245,13 +258,18 @@ const styles = StyleSheet.create({
   nowBody: {
     alignItems: 'center',
   },
-  bigArt: {
-    height: 280,
+  artFrame: {
     borderRadius: 12,
     marginBottom: 20,
+    overflow: 'hidden',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  artImageFill: {
+    width: '100%',
+    height: '100%',
   },
   bigArtPlaceholder: {
-    height: 280,
     borderRadius: 12,
     marginBottom: 20,
     alignItems: 'center',
