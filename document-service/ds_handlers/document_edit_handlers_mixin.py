@@ -211,7 +211,15 @@ class DocumentEditHandlersMixin:
     ) -> tool_service_pb2.ApplyOperationsDirectlyResponse:
         """Apply operations directly to a document (for authorized agents only)"""
         try:
-            logger.info(f"ApplyOperationsDirectly: user={request.user_id}, doc={request.document_id}, agent={request.agent_name}, ops={len(request.operations)}")
+            playbook_auto_apply = bool(getattr(request, "playbook_auto_apply", False))
+            logger.info(
+                "ApplyOperationsDirectly: user=%s doc=%s agent=%s ops=%s playbook_auto_apply=%s",
+                request.user_id,
+                request.document_id,
+                request.agent_name,
+                len(request.operations),
+                playbook_auto_apply,
+            )
             
             # Import document editing tool
             from ds_langgraph_tools.document_editing_tools import apply_operations_directly
@@ -240,7 +248,8 @@ class DocumentEditHandlersMixin:
                 document_id=request.document_id,
                 operations=operations,
                 user_id=request.user_id,
-                agent_name=request.agent_name
+                agent_name=request.agent_name,
+                playbook_auto_apply=playbook_auto_apply,
             )
             
             # Build response

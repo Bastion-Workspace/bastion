@@ -14,6 +14,7 @@ from providers.telegram_provider import TelegramProvider
 from providers.discord_provider import DiscordProvider
 from providers.slack_provider import SlackProvider
 from providers.sms_provider import SMSProvider
+from providers.teams_provider import TeamsProvider
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ def get_messaging_providers() -> Dict[str, Type[BaseMessagingProvider]]:
             "discord": DiscordProvider,
             "slack": SlackProvider,
             "sms": SMSProvider,
+            "teams": TeamsProvider,
         }
     return _messaging_providers
 

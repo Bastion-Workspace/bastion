@@ -815,6 +815,7 @@ def dispatch_folder_file_reaction(
         try:
             trigger_text = f"New file: {filename} in {folder_path or folder_id or 'folder'}"
             extra_context = {
+                "trigger_type": "folder_watch",
                 "document_id": document_id,
                 "filename": filename,
                 "folder_id": folder_id,

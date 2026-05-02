@@ -82,6 +82,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { stripTextForSpeech } from '../utils/textForSpeech';
 import { useTTS } from '../hooks/useTTS';
 import AudioExportDialog from './AudioExportDialog';
+import ExportOptionsDialog from './chat/ExportOptionsDialog';
 import { createCollabSession, destroyCollabSession, updateCollabAuthToken } from '../services/collabService';
 import EncryptedDocumentDialog from './EncryptedDocumentDialog';
 import {
@@ -570,6 +571,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [pdfExportDialogOpen, setPdfExportDialogOpen] = useState(false);
+  const [exportDocxDialogOpen, setExportDocxDialogOpen] = useState(false);
   const [audioExportOpen, setAudioExportOpen] = useState(false);
   const [pdfExportOrientation, setPdfExportOrientation] = useState('portrait');
   const [pdfIncludeToc, setPdfIncludeToc] = useState(false);
@@ -2981,6 +2983,24 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     setExportOpen(true);
   };
 
+  const openEditorDocxExport = () => {
+    handleDownloadMenuClose();
+    setExportDocxDialogOpen(true);
+  };
+
+  const handleConfirmEditorDocxExport = async (docxOpts) => {
+    setExportDocxDialogOpen(false);
+    try {
+      await exportService.exportMarkdownAsDOCX(editContent || document.content || '', {
+        ...docxOpts,
+        filename: document.filename || 'document',
+      });
+    } catch (error) {
+      console.error('DOCX export failed:', error);
+      alert(`DOCX export failed: ${error.message}`);
+    }
+  };
+
   // Fullscreen handlers
   const handleToggleFullscreen = async () => {
     if (!fullscreenContainerRef.current) return;
@@ -3852,6 +3872,12 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     </ListItemIcon>
                     <ListItemText>Export as EPUB</ListItemText>
                   </MenuItem>
+                  <MenuItem onClick={openEditorDocxExport}>
+                    <ListItemIcon>
+                      <Description fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText>Export as DOCX…</ListItemText>
+                  </MenuItem>
                 </>
               )}
             </Menu>
@@ -4447,6 +4473,12 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         documentTitle={document?.title}
         documentFilename={document?.filename}
         speechMode={readAloudFilenameLower.endsWith('.org') ? 'org' : 'markdown'}
+      />
+      <ExportOptionsDialog
+        open={exportDocxDialogOpen}
+        title="Export document as DOCX"
+        onClose={() => setExportDocxDialogOpen(false)}
+        onConfirm={handleConfirmEditorDocxExport}
       />
       {/* PDF Export Dialog */}
       <Dialog open={pdfExportDialogOpen} onClose={() => !exporting && setPdfExportDialogOpen(false)} maxWidth="md" fullWidth>

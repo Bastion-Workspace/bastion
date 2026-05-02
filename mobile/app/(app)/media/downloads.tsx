@@ -10,7 +10,12 @@ import {
   useColorScheme,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
-import { clearAllDownloads, listDownloads, removeDownload, type MediaDownloadEntry } from '../../../src/utils/mediaDownloadStore';
+import {
+  clearAllDownloads,
+  listDownloads,
+  removeDownload,
+  type MediaDownloadEntry,
+} from '../../../src/utils/mediaDownloadStore';
 import { getColors } from '../../../src/theme/colors';
 
 function formatBytes(n: number | null | undefined): string {
@@ -44,7 +49,7 @@ export default function MediaDownloadsScreen() {
 
   const onRemove = useCallback(
     (id: string) => {
-      Alert.alert('Remove download', 'Delete this file from the device?', [
+      Alert.alert('Remove download', 'Delete this file from local storage?', [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Remove',
@@ -62,7 +67,7 @@ export default function MediaDownloadsScreen() {
   );
 
   const onClearAll = useCallback(() => {
-    Alert.alert('Clear all', 'Remove all downloaded media?', [
+    Alert.alert('Clear all', 'Remove all downloaded media from this device?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Clear',
@@ -80,6 +85,9 @@ export default function MediaDownloadsScreen() {
   return (
     <View style={[styles.root, { backgroundColor: c.background }]}>
       <View style={[styles.toolbar, { borderBottomColor: c.border }]}>
+        <Text style={[styles.hint, { color: c.textSecondary }]}>
+          Long-press a row to remove it from this device.
+        </Text>
         <Pressable
           onPress={onClearAll}
           disabled={!items.length}
@@ -93,19 +101,23 @@ export default function MediaDownloadsScreen() {
       ) : (
         <ScrollView contentContainerStyle={styles.list}>
           {items.map((e) => (
-            <View key={e.track_id} style={[styles.row, { backgroundColor: c.surface, borderColor: c.border }]}>
+            <Pressable
+              key={e.track_id}
+              onLongPress={() => onRemove(e.track_id)}
+              delayLongPress={450}
+              style={[styles.row, { backgroundColor: c.surface, borderColor: c.border }]}
+              accessibilityLabel={`${e.title}, saved on device. Long press to remove.`}
+              accessibilityRole="button"
+            >
               <View style={styles.rowMid}>
                 <Text style={[styles.title, { color: c.text }]} numberOfLines={2}>
                   {e.title}
                 </Text>
-                <Text style={[styles.meta, { color: c.textSecondary }]} numberOfLines={1}>
-                  {[e.artist, formatBytes(e.file_size)].filter(Boolean).join(' · ')}
+                <Text style={[styles.meta, { color: c.textSecondary }]} numberOfLines={2}>
+                  {[e.artist, formatBytes(e.file_size), 'Saved on device'].filter(Boolean).join(' · ')}
                 </Text>
               </View>
-              <Pressable onPress={() => onRemove(e.track_id)} accessibilityLabel="Remove download">
-                <Text style={[styles.remove, { color: c.danger }]}>Remove</Text>
-              </Pressable>
-            </View>
+            </Pressable>
           ))}
           {!items.length && (
             <Text style={[styles.empty, { color: c.textSecondary }]}>No downloads yet.</Text>
@@ -120,11 +132,14 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   toolbar: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  hint: { flex: 1, fontSize: 12, lineHeight: 16 },
   clearBtn: { paddingVertical: 8, paddingHorizontal: 12 },
   clearTxt: { fontSize: 15, fontWeight: '600' },
   list: { padding: 16, paddingBottom: 120, gap: 10 },
@@ -139,6 +154,5 @@ const styles = StyleSheet.create({
   rowMid: { flex: 1, minWidth: 0 },
   title: { fontSize: 16, fontWeight: '600' },
   meta: { fontSize: 13, marginTop: 4 },
-  remove: { fontSize: 14, fontWeight: '600' },
   empty: { textAlign: 'center', marginTop: 32, fontSize: 15 },
 });

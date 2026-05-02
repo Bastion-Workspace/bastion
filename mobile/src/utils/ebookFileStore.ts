@@ -34,6 +34,18 @@ function epubPath(digest: string): string {
   return `${cacheRoot()}${digest}${EPUB_EXT}`;
 }
 
+/** Whether a cached EPUB file exists for this digest (no file read). */
+export async function ebookCacheExists(digest: string): Promise<boolean> {
+  const epub = epubPath(digest);
+  const info = await FileSystem.getInfoAsync(epub);
+  return info.exists;
+}
+
+/** Local file URI for the cached EPUB; same path `ebookCachePut` writes. */
+export function ebookCacheGetUri(digest: string): string {
+  return epubPath(digest);
+}
+
 function metaPath(digest: string): string {
   return `${cacheRoot()}${digest}${META_EXT}`;
 }
@@ -137,7 +149,8 @@ export async function ebookCacheEnforceQuota(maxEntries: number = DEFAULT_QUOTA)
   }
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
+/** Used by the EPUB WebView reader to embed bytes in inline HTML (avoids file:// fetch). */
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
   let binary = '';
   const bytes = new Uint8Array(buffer);
   const chunk = 0x8000;

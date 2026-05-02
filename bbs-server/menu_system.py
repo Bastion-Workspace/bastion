@@ -37,6 +37,7 @@ async def main_menu(session: "BBSSession") -> None:
     from areas import documents_area
     from areas import games_area
     from areas import org_desk_area
+    from areas import ebooks_area
     from areas import rss_area
     from areas import settings_area
     from areas import wallpaper_area
@@ -61,6 +62,10 @@ async def main_menu(session: "BBSSession") -> None:
             f"{t.fg_bright_green}[O]{t.reset} Org desk       "
             f"{t.fg_bright_green}[N]{t.reset} RSS News       "
             f"{t.fg_bright_green}[D]{t.reset} Data Workspace\r\n"
+        )
+        await session._write(
+            f"{t.fg_bright_green}[E]{t.reset} E-Books (OPDS)   "
+            f"{t.dim}(catalogs from web settings){t.reset}\r\n"
         )
         await session._write(
             f"{t.fg_bright_green}[S]{t.reset} Settings         "
@@ -116,6 +121,10 @@ async def main_menu(session: "BBSSession") -> None:
             await org_desk_area.org_desk_hub(session)
         elif choice == "n" or raw_s.startswith("news") or raw_s.startswith("rss"):
             await rss_area.rss_reader(session)
+        elif (choice == "e" and not raw_s.startswith("exit")) or raw_s.startswith(
+            "ebook"
+        ) or raw_s.startswith("epub"):
+            await ebooks_area.ebooks_hub(session)
         elif choice == "d" or raw_s.startswith("data"):
             await data_area.data_explorer(session)
         elif choice == "s" or raw_s.startswith("sett"):

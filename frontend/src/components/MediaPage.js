@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -46,6 +46,57 @@ import { useQuery } from 'react-query';
 import apiService from '../services/apiService';
 import { useMusic } from '../contexts/MediaContext';
 import EmbyBrowseView from './video/EmbyBrowseView';
+import SplitResizeHandle from './common/SplitResizeHandle';
+import { solidSurfaceBg } from '../theme/wallpaperPaneSx';
+
+const MEDIA_PAGE_SIDEBAR_MIN = 220;
+const MEDIA_PAGE_SIDEBAR_MAX = 600;
+const MEDIA_PAGE_SIDEBAR_DEFAULT = 250;
+
+/** One-line artist credit for sidebar lists (VA / compilation albums). */
+function formatCompactAlbumArtist(artist, { maxNames = 2, maxChars = 72 } = {}) {
+  if (!artist || typeof artist !== 'string') return '';
+  const s = artist.trim();
+  if (!s) return '';
+  let parts;
+  if (/[•·]/.test(s)) {
+    parts = s.split(/\s*[•·]\s*/).map((p) => p.trim()).filter(Boolean);
+  } else if (s.includes(',')) {
+    parts = s.split(/\s*,\s*/).map((p) => p.trim()).filter(Boolean);
+  } else {
+    parts = [s];
+  }
+  if (parts.length <= 1) {
+    return s.length > maxChars ? `${s.slice(0, maxChars - 1).trimEnd()}…` : s;
+  }
+  const shown = parts.slice(0, maxNames).join(', ');
+  const extra = parts.length - maxNames;
+  let out = extra > 0 ? `${shown} +${extra}` : shown;
+  if (out.length > maxChars) {
+    out = `${out.slice(0, maxChars - 1).trimEnd()}…`;
+  }
+  return out;
+}
+
+const listSecondaryTypographyProps = {
+  noWrap: true,
+  sx: { overflow: 'hidden', textOverflow: 'ellipsis' },
+};
+
+function idKeyEq(a, b) {
+  if (a == null || b == null) return false;
+  return String(a) === String(b);
+}
+
+/** Subsonic often omits per-track cover; use album id when enqueueing. */
+function enrichTracksWithAlbumCover(tracks, albumCoverId) {
+  if (!tracks?.length || !albumCoverId || !String(albumCoverId).trim()) return tracks;
+  const cid = String(albumCoverId).trim();
+  return tracks.map((t) => ({
+    ...t,
+    cover_art_id: (t.cover_art_id && String(t.cover_art_id).trim()) || cid,
+  }));
+}
 
 const MediaPage = () => {
   // Load persisted state from localStorage on mount
@@ -113,6 +164,63 @@ const MediaPage = () => {
     }
   });
   const { playTrack, shuffleMode } = useMusic();
+
+  const [mediaSidebarWidth, setMediaSidebarWidth] = useState(() => {
+    try {
+      const saved = localStorage.getItem('mediaPageSidebarWidth');
+      if (saved) {
+        const n = parseInt(saved, 10);
+        if (!Number.isNaN(n)) {
+          return Math.min(
+            MEDIA_PAGE_SIDEBAR_MAX,
+            Math.max(MEDIA_PAGE_SIDEBAR_MIN, n)
+          );
+        }
+      }
+    } catch (_) {}
+    return MEDIA_PAGE_SIDEBAR_DEFAULT;
+  });
+  const [mediaSidebarResizing, setMediaSidebarResizing] = useState(false);
+  const mediaSidebarResizingRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mediaPageSidebarWidth', String(mediaSidebarWidth));
+    } catch (_) {}
+  }, [mediaSidebarWidth]);
+
+  const handleMediaSidebarResizeMove = useCallback((e) => {
+    if (!mediaSidebarResizingRef.current) return;
+    const next = e.clientX;
+    setMediaSidebarWidth(
+      Math.min(MEDIA_PAGE_SIDEBAR_MAX, Math.max(MEDIA_PAGE_SIDEBAR_MIN, next))
+    );
+  }, []);
+
+  const handleMediaSidebarResizeEnd = useCallback(() => {
+    mediaSidebarResizingRef.current = false;
+    setMediaSidebarResizing(false);
+  }, []);
+
+  const handleMediaSidebarResizeStart = useCallback((e) => {
+    e.preventDefault();
+    mediaSidebarResizingRef.current = true;
+    setMediaSidebarResizing(true);
+  }, []);
+
+  useEffect(() => {
+    if (!mediaSidebarResizing) return undefined;
+    document.addEventListener('mousemove', handleMediaSidebarResizeMove);
+    document.addEventListener('mouseup', handleMediaSidebarResizeEnd);
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+    return () => {
+      document.removeEventListener('mousemove', handleMediaSidebarResizeMove);
+      document.removeEventListener('mouseup', handleMediaSidebarResizeEnd);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, [mediaSidebarResizing, handleMediaSidebarResizeMove, handleMediaSidebarResizeEnd]);
 
   // Persist state to localStorage whenever relevant state changes
   useEffect(() => {
@@ -255,6 +363,51 @@ const MediaPage = () => {
     }
   );
 
+  const resolvedHeaderCoverArtId = useMemo(() => {
+    if (!selectedItem || !serviceType) return null;
+    if (selectedItemType === 'album') {
+      const album =
+        library?.albums?.find((a) => idKeyEq(a.id, selectedItem)) ||
+        artistAlbumsData?.albums?.find((a) => idKeyEq(a.id, selectedItem)) ||
+        authorBooksData?.albums?.find((a) => idKeyEq(a.id, selectedItem));
+      let cid =
+        (album?.cover_art_id && String(album.cover_art_id).trim()) || null;
+      if (!cid && tracksData?.tracks?.length) {
+        const t = tracksData.tracks.find(
+          (tr) => tr.cover_art_id && String(tr.cover_art_id).trim()
+        );
+        cid = (t?.cover_art_id && String(t.cover_art_id).trim()) || null;
+      }
+      return cid;
+    }
+    if (selectedItemType === 'playlist') {
+      const pl = library?.playlists?.find((p) => idKeyEq(p.id, selectedItem));
+      const meta = pl?.metadata && typeof pl.metadata === 'object' ? pl.metadata : {};
+      const fromMeta =
+        meta.coverArt ||
+        meta.cover_art ||
+        meta.coverArtId ||
+        (meta.playlist && meta.playlist.coverArt);
+      const raw = fromMeta || pl?.cover_art_id;
+      return raw && String(raw).trim() ? String(raw).trim() : null;
+    }
+    return null;
+  }, [
+    selectedItem,
+    selectedItemType,
+    library?.albums,
+    library?.playlists,
+    artistAlbumsData?.albums,
+    authorBooksData?.albums,
+    tracksData?.tracks,
+    serviceType,
+  ]);
+
+  const headerAlbumArtUrl = useMemo(() => {
+    if (!resolvedHeaderCoverArtId) return null;
+    return apiService.music.getCoverArtUrl(resolvedHeaderCoverArtId, serviceType, 200);
+  }, [resolvedHeaderCoverArtId, serviceType]);
+
   const handleViewChange = (view) => {
     setSelectedView(view);
     setSelectedItem(null);
@@ -317,7 +470,26 @@ const MediaPage = () => {
         const startTrack = shuffleMode && tracks.tracks.length > 1
           ? tracks.tracks[Math.floor(Math.random() * tracks.tracks.length)]
           : tracks.tracks[0];
-        playTrack(startTrack, tracks.tracks, item.id);
+        const albumCover =
+          type === 'album' && item.cover_art_id
+            ? String(item.cover_art_id).trim()
+            : null;
+        const meta = item.metadata && typeof item.metadata === 'object' ? item.metadata : {};
+        const playlistCover =
+          type === 'playlist'
+            ? String(
+                meta.coverArt ||
+                  meta.cover_art ||
+                  meta.coverArtId ||
+                  item.cover_art_id ||
+                  ''
+              ).trim() || null
+            : null;
+        const fallbackCover = albumCover || playlistCover;
+        const queueTracks = fallbackCover
+          ? enrichTracksWithAlbumCover(tracks.tracks, fallbackCover)
+          : tracks.tracks;
+        playTrack(startTrack, queueTracks, item.id);
       }
     } catch (error) {
       console.error('Failed to play item:', error);
@@ -345,7 +517,12 @@ const MediaPage = () => {
 
   const handleTrackDoubleClick = (track) => {
     const tracks = tracksData?.tracks || [];
-    playTrack(track, tracks, selectedItem);
+    const queueTracks =
+      resolvedHeaderCoverArtId &&
+      (selectedItemType === 'album' || selectedItemType === 'playlist')
+        ? enrichTracksWithAlbumCover(tracks, resolvedHeaderCoverArtId)
+        : tracks;
+    playTrack(track, queueTracks, selectedItem);
   };
 
   const formatDuration = (seconds) => {
@@ -530,7 +707,11 @@ const MediaPage = () => {
                         onDoubleClick={() => handleItemDoubleClick(album, 'album')}
                         sx={{ py: 0.5 }}
                       >
-                        <ListItemText primary={album.title} secondary={album.artist} />
+                        <ListItemText
+                          primary={album.title}
+                          secondary={formatCompactAlbumArtist(album.artist)}
+                          secondaryTypographyProps={listSecondaryTypographyProps}
+                        />
                       </ListItemButton>
                     </ListItem>
                   ))
@@ -722,7 +903,8 @@ const MediaPage = () => {
                     >
                       <ListItemText
                         primary={album.title}
-                        secondary={album.artist}
+                        secondary={formatCompactAlbumArtist(album.artist)}
+                        secondaryTypographyProps={listSecondaryTypographyProps}
                       />
                     </ListItemButton>
                   </ListItem>
@@ -884,7 +1066,7 @@ const MediaPage = () => {
               </ListItem>
             ) : (
               displayedItems.map((item) => (
-                <ListItem key={item.id} disablePadding>
+                <ListItem key={`${selectedView}-${item.id}`} disablePadding>
                   <ListItemButton
                     selected={selectedItem === item.id || selectedArtist === item.id}
                     onClick={() => handleItemClick(item, selectedView === 'albums' ? 'album' : selectedView === 'playlists' ? 'playlist' : 'artist')}
@@ -893,11 +1075,35 @@ const MediaPage = () => {
                         handleItemDoubleClick(item, selectedView === 'albums' ? 'album' : 'playlist');
                       }
                     }}
-                    sx={{ py: 0.5 }}
+                    sx={{ py: 0.5, display: 'flex', alignItems: 'center' }}
                   >
+                    {selectedView === 'albums' && item.cover_art_id ? (
+                      <Box
+                        component="img"
+                        src={apiService.music.getCoverArtUrl(item.cover_art_id, serviceType, 64)}
+                        alt=""
+                        loading="lazy"
+                        sx={{
+                          width: 32,
+                          height: 32,
+                          borderRadius: 0.5,
+                          mr: 1,
+                          flexShrink: 0,
+                          objectFit: 'cover',
+                        }}
+                      />
+                    ) : null}
                     <ListItemText
                       primary={item.title || item.name}
-                      secondary={selectedView === 'albums' ? item.artist : null}
+                      secondary={
+                        selectedView === 'albums'
+                          ? formatCompactAlbumArtist(item.artist)
+                          : null
+                      }
+                      secondaryTypographyProps={
+                        selectedView === 'albums' ? listSecondaryTypographyProps : undefined
+                      }
+                      sx={{ flex: 1, minWidth: 0 }}
                     />
                   </ListItemButton>
                 </ListItem>
@@ -1025,8 +1231,12 @@ const MediaPage = () => {
 
     return (
       <>
-        <TableContainer component={Paper} variant="outlined">
-          <Table>
+        <TableContainer
+          component={Paper}
+          variant="outlined"
+          sx={{ width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}
+        >
+          <Table size="small" sx={{ width: '100%' }}>
             <TableHead>
               <TableRow>
                 <TableCell padding="checkbox">
@@ -1118,15 +1328,34 @@ const MediaPage = () => {
     );
   };
 
-  // Adjust activeTab if current tab is not available
+  // Keep activeTab in range and selectedView valid for the tab at that index (sources / tab strip can
+  // change without handleTabChange, e.g. after refresh — otherwise persisted "playlists" on Music
+  // or an invalid view for Audiobooks/Podcasts shows the wrong sidebar list).
   React.useEffect(() => {
     if (availableTabs.length === 0) {
-      return; // No sources configured
+      return;
     }
-    if (activeTab >= availableTabs.length) {
+    const inRange = activeTab < availableTabs.length;
+    if (!inRange) {
       setActiveTab(0);
     }
-  }, [activeTab, availableTabs.length]);
+    const tabIndex = inRange ? activeTab : 0;
+    const tab = availableTabs[tabIndex];
+    if (!tab) return;
+    if (tab.isEmby && !embyMusicMode) return;
+
+    let validViews;
+    if (tab.label === 'Podcasts') {
+      validViews = ['playlists'];
+    } else if (tab.label === 'Audiobooks') {
+      validViews = ['albums', 'artists'];
+    } else {
+      validViews = ['albums', 'artists', 'playlists'];
+    }
+    if (!validViews.includes(selectedView)) {
+      setSelectedView(validViews[0]);
+    }
+  }, [activeTab, availableTabs, embyMusicMode, selectedView]);
 
   if (availableTabs.length === 0) {
     return (
@@ -1139,7 +1368,17 @@ const MediaPage = () => {
   }
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+    <Box
+      sx={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: 1,
+        minHeight: 0,
+        minWidth: 0,
+        width: '100%',
+        overflow: 'hidden',
+      }}
+    >
       {/* Category bar — match Documents / Agent Factory tab strip (44px, paper, chat header alignment) */}
       <Box
         sx={{
@@ -1151,7 +1390,7 @@ const MediaPage = () => {
           pr: 2,
           display: 'flex',
           alignItems: 'center',
-          backgroundColor: 'background.paper',
+          backgroundColor: (theme) => solidSurfaceBg(theme),
           borderBottom: '1px solid',
           borderColor: 'divider',
         }}
@@ -1228,11 +1467,22 @@ const MediaPage = () => {
       {isEmbyTab && !embyMusicMode ? (
         <EmbyBrowseView onOpenMusicLibrary={() => setEmbyMusicMode(true)} />
       ) : (
-        <Box sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+        <Box
+          sx={{
+            display: 'flex',
+            flex: 1,
+            minHeight: 0,
+            minWidth: 0,
+            width: '100%',
+            overflow: 'hidden',
+            position: 'relative',
+            alignItems: 'stretch',
+          }}
+        >
           {/* Sidebar */}
           <Box
             sx={{
-              width: 250,
+              width: mediaSidebarWidth,
               borderRight: 1,
               borderColor: 'divider',
               flexShrink: 0,
@@ -1241,31 +1491,76 @@ const MediaPage = () => {
               overflow: 'hidden',
               minHeight: 0,
               height: '100%',
+              position: 'relative',
+              backgroundColor: (theme) => solidSurfaceBg(theme),
+              boxShadow: (theme) =>
+                theme.palette.mode === 'dark'
+                  ? '2px 0 12px rgba(0,0,0,0.35)'
+                  : '2px 0 8px rgba(0,0,0,0.1)',
             }}
           >
             {renderSidebar()}
+            <SplitResizeHandle
+              edge="trailing"
+              isResizing={mediaSidebarResizing}
+              onMouseDown={handleMediaSidebarResizeStart}
+            />
           </Box>
 
           {/* Main Content */}
           <Box
             sx={{
-              flexGrow: 1,
+              flex: '1 1 0%',
+              minWidth: 0,
               overflow: 'hidden',
               display: 'flex',
               flexDirection: 'column',
               minHeight: 0,
               position: 'relative',
+              width: '100%',
+              backgroundColor: (theme) => solidSurfaceBg(theme),
             }}
           >
-            <Box sx={{ px: 2, pt: 0.5, pb: 0.5, flexShrink: 0, borderBottom: 1, borderColor: 'divider' }}>
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.5,
+                px: 2,
+                pt: 0.5,
+                pb: 0.5,
+                flexShrink: 0,
+                borderBottom: 1,
+                borderColor: 'divider',
+                backgroundColor: (theme) => solidSurfaceBg(theme),
+              }}
+            >
+              {headerAlbumArtUrl ? (
+                <Box
+                  component="img"
+                  src={headerAlbumArtUrl}
+                  alt=""
+                  loading="lazy"
+                  sx={{
+                    width: 100,
+                    height: 100,
+                    borderRadius: 1,
+                    objectFit: 'cover',
+                    flexShrink: 0,
+                  }}
+                />
+              ) : null}
               <Typography variant="h6" sx={{ fontWeight: 500, my: 0 }}>
                 {selectedArtist
                   ? library?.artists?.find((a) => a.id === selectedArtist)?.name || (isAudiobookTab ? 'Author' : 'Artist')
                   : selectedItem
                   ? selectedView === 'albums'
-                    ? library?.albums?.find((a) => a.id === selectedItem)?.title || (isAudiobookTab ? 'Book' : 'Album')
+                    ? library?.albums?.find((a) => idKeyEq(a.id, selectedItem))?.title ||
+                      artistAlbumsData?.albums?.find((a) => idKeyEq(a.id, selectedItem))?.title ||
+                      authorBooksData?.albums?.find((a) => idKeyEq(a.id, selectedItem))?.title ||
+                      (isAudiobookTab ? 'Book' : 'Album')
                     : selectedView === 'playlists'
-                    ? library?.playlists?.find((p) => p.id === selectedItem)?.name || (isPodcastTab ? 'Show' : 'Playlist')
+                    ? library?.playlists?.find((p) => idKeyEq(p.id, selectedItem))?.name || (isPodcastTab ? 'Show' : 'Playlist')
                     : 'Tracks'
                   : isMusicTab
                   ? 'Music Library'
@@ -1280,12 +1575,15 @@ const MediaPage = () => {
             </Box>
             <Box
               sx={{
-                flexGrow: 1,
+                flex: '1 1 0%',
                 overflow: 'auto',
                 overflowX: 'hidden',
                 minHeight: 0,
+                minWidth: 0,
+                width: '100%',
                 p: 2,
                 pt: 0,
+                backgroundColor: (theme) => solidSurfaceBg(theme),
                 '&::-webkit-scrollbar': {
                   width: '8px',
                 },

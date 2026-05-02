@@ -327,6 +327,25 @@ const ChatMessagesArea = forwardRef(function ChatMessagesArea({ darkMode: darkMo
     // Update the ref for next comparison
     lastMessageCountRef.current = currentMessageCount;
 
+    const lastMsg = messages[messages.length - 1];
+    const isFreshUserMessage =
+      hasNewMessages && (lastMsg?.role === 'user' || lastMsg?.type === 'user');
+
+    if (isFreshUserMessage) {
+      setUserHasScrolled(false);
+      setShouldAutoScroll(true);
+      setHasNewMessagesBelow(false);
+      messageCountWhenScrolledUpRef.current = currentMessageCount;
+      requestAnimationFrame(() => {
+        messagesEndRef.current?.scrollIntoView({
+          behavior: 'smooth',
+          block: 'end',
+          inline: 'nearest',
+        });
+      });
+      return;
+    }
+
     // If user is scrolled up and new messages arrived below, show "New Messages" button
     if (userHasScrolled && !isNearBottom() && currentMessageCount > messageCountWhenScrolledUpRef.current) {
       setHasNewMessagesBelow(true);

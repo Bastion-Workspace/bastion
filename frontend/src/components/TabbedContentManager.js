@@ -477,16 +477,19 @@ const TabbedContentManager = forwardRef((props, ref) => {
     }, [tabs]);
 
     const openEbookFromOpds = useCallback((payload) => {
-        const { catalogId, acquisitionUrl, title, digest } = payload || {};
+        const { catalogId, acquisitionUrl, title, digest, format, author } = payload || {};
         if (!catalogId || !acquisitionUrl) return;
+        const fmt = format === 'pdf' ? 'pdf' : 'epub';
         addTab({
             type: 'ebook-reader',
-            title: title || 'EPUB',
+            title: title || (fmt === 'pdf' ? 'PDF' : 'EPUB'),
             icon: '📖',
             catalogId,
             acquisitionUrl,
-            ebookTitle: title || 'EPUB',
+            ebookTitle: title || (fmt === 'pdf' ? 'PDF' : 'EPUB'),
             digest: digest || undefined,
+            ebookFormat: fmt,
+            ebookAuthor: author || undefined,
         });
     }, []);
 
@@ -675,8 +678,8 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         acquisitionUrl={tab.acquisitionUrl}
                         title={tab.ebookTitle || 'EPUB'}
                         digest={tab.digest}
-                        documentsFileTreeCollapsed={documentsFileTreeCollapsed}
-                        documentsIsMobile={documentsIsMobile}
+                        ebookFormat={tab.ebookFormat}
+                        ebookAuthor={tab.ebookAuthor}
                     />
                 );
             default:

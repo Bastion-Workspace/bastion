@@ -532,6 +532,87 @@ class BackendClient:
         except Exception:
             return 0
 
+    # ── Ebooks / OPDS / KoSync (user JWT) ───────────────────
+
+    async def get_ebooks_settings(self, jwt: str) -> Dict[str, Any]:
+        url = f"{self._base}/api/ebooks/settings"
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, headers=self._user_headers(jwt))
+                if resp.status_code >= 400:
+                    return {"error": resp.text}
+                return resp.json()
+        except Exception as e:
+            logger.exception("get_ebooks_settings failed: %s", e)
+            return {"error": str(e)}
+
+    async def opds_fetch_feed(self, jwt: str, catalog_id: str, url: str) -> Dict[str, Any]:
+        ep = f"{self._base}/api/ebooks/opds/fetch"
+        t = max(60.0, float(settings.HTTP_TIMEOUT))
+        try:
+            async with httpx.AsyncClient(timeout=t) as client:
+                resp = await client.post(
+                    ep,
+                    json={"catalog_id": catalog_id, "url": url, "want": "atom"},
+                    headers=self._user_headers(jwt),
+                )
+                if resp.status_code >= 400:
+                    try:
+                        body = resp.json()
+                        detail = body.get("detail", resp.text) if isinstance(body, dict) else resp.text
+                    except Exception:
+                        detail = resp.text
+                    return {"error": str(detail)}
+                return resp.json()
+        except Exception as e:
+            logger.exception("opds_fetch_feed failed: %s", e)
+            return {"error": str(e)}
+
+    async def opds_fetch_binary(self, jwt: str, catalog_id: str, url: str) -> Optional[bytes]:
+        ep = f"{self._base}/api/ebooks/opds/fetch"
+        t = max(180.0, float(settings.BBS_EDITOR_HTTP_TIMEOUT))
+        try:
+            async with httpx.AsyncClient(timeout=t) as client:
+                resp = await client.post(
+                    ep,
+                    json={"catalog_id": catalog_id, "url": url, "want": "binary"},
+                    headers=self._user_headers(jwt),
+                )
+                if resp.status_code >= 400:
+                    return None
+                return resp.content
+        except Exception as e:
+            logger.warning("opds_fetch_binary failed: %s", e)
+            return None
+
+    async def kosync_get_progress(self, jwt: str, document: str) -> Dict[str, Any]:
+        from urllib.parse import quote
+
+        safe_doc = quote(str(document).strip(), safe="")
+        url = f"{self._base}/api/ebooks/kosync/progress/{safe_doc}"
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.get(url, headers=self._user_headers(jwt))
+                if resp.status_code >= 400:
+                    return {}
+                try:
+                    return resp.json()
+                except Exception:
+                    return {}
+        except Exception as e:
+            logger.warning("kosync_get_progress failed: %s", e)
+            return {}
+
+    async def kosync_put_progress(self, jwt: str, payload: Dict[str, Any]) -> bool:
+        url = f"{self._base}/api/ebooks/kosync/progress"
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                resp = await client.put(url, json=payload, headers=self._user_headers(jwt))
+                return resp.status_code in (200, 202)
+        except Exception as e:
+            logger.warning("kosync_put_progress failed: %s", e)
+            return False
+
     async def list_workspaces(self, jwt: str) -> List[Dict[str, Any]]:
         url = f"{self._base}/api/data/workspaces"
         try:

@@ -1,43 +1,82 @@
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { useFocusEffect } from '@react-navigation/native';
+import { useCallback, useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  useColorScheme,
+  View,
+} from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { getDocumentContent } from '../../../src/api/documents';
+import { isApiError } from '../../../src/api/client';
+import { getColors } from '../../../src/theme/colors';
+import { parseFrontmatter } from '../../../src/utils/parseFrontmatter';
 
 const DOC_SNIPPET_MAX = 12_000;
 
 export default function DocumentDetailScreen() {
+  const scheme = useColorScheme();
+  const colors = useMemo(() => getColors(scheme === 'dark' ? 'dark' : 'light'), [scheme]);
+
   const router = useRouter();
-  const { id, documentTitle: titleParam } = useLocalSearchParams<{
+  const { id: idParam, documentTitle: titleParam } = useLocalSearchParams<{
     id: string;
     documentTitle?: string;
   }>();
+  const id =
+    typeof idParam === 'string' ? idParam : Array.isArray(idParam) ? idParam[0] ?? '' : '';
   const [text, setText] = useState<string | null>(null);
   const [meta, setMeta] = useState<string>('');
+  const [docFrontmatter, setDocFrontmatter] = useState<Record<string, unknown>>({});
   const [loading, setLoading] = useState(true);
   const documentTitle =
     typeof titleParam === 'string' && titleParam.trim() ? titleParam.trim() : 'Document';
 
-  useEffect(() => {
-    if (!id) return;
-    void (async () => {
-      try {
-        const res = await getDocumentContent(id);
-        if (res.requires_password || res.is_encrypted) {
-          setText(null);
-          setMeta('This document is encrypted. Open it in the web app to unlock.');
-        } else {
-          setText(res.content ?? '');
-          setMeta('');
-        }
-      } catch (e) {
+  const fetchDoc = useCallback(async () => {
+    if (!id || id === '[id]' || id.includes('..')) {
+      setText(null);
+      setDocFrontmatter({});
+      setMeta('Invalid document link.');
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const res = await getDocumentContent(id);
+      if (res.requires_password || res.is_encrypted) {
         setText(null);
-        setMeta(e instanceof Error ? e.message : 'Failed to load');
-      } finally {
-        setLoading(false);
+        setDocFrontmatter({});
+        setMeta('This document is encrypted. Open it in the web app to unlock.');
+      } else {
+        const body = res.content ?? '';
+        setText(body);
+        setDocFrontmatter(parseFrontmatter(body));
+        setMeta('');
       }
-    })();
+    } catch (e) {
+      setText(null);
+      setDocFrontmatter({});
+      if (isApiError(e) && e.status === 404) {
+        setMeta(
+          'Document not found. It may have been deleted, or your session may need a refresh. Use the back arrow and open it again from the list.'
+        );
+      } else {
+        setMeta(e instanceof Error ? e.message : 'Failed to load');
+      }
+    } finally {
+      setLoading(false);
+    }
   }, [id]);
+
+  useFocusEffect(
+    useCallback(() => {
+      void fetchDoc();
+    }, [fetchDoc])
+  );
 
   function openBastionChatWithDocument() {
     if (!id || text == null) return;
@@ -49,14 +88,15 @@ export default function DocumentDetailScreen() {
         docTitle: documentTitle,
         docSnippet: snippet,
         docSession: String(Date.now()),
+        docFrontmatter: JSON.stringify(docFrontmatter),
       },
     });
   }
 
   if (loading) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" />
+      <View style={[styles.center, { backgroundColor: colors.background }]}>
+        <ActivityIndicator size="large" color={colors.text} />
       </View>
     );
   }
@@ -64,14 +104,16 @@ export default function DocumentDetailScreen() {
   const showChatFab = text != null && !meta;
 
   return (
-    <View style={styles.flex}>
+    <View style={[styles.flex, { backgroundColor: colors.background }]}>
       <ScrollView contentContainerStyle={styles.scroll}>
-        {meta ? <Text style={styles.warn}>{meta}</Text> : null}
-        {text != null ? <Text style={styles.body}>{text}</Text> : null}
+        {meta ? <Text style={[styles.warn, { color: colors.danger }]}>{meta}</Text> : null}
+        {text != null ? (
+          <Text style={[styles.body, { color: colors.text }]}>{text}</Text>
+        ) : null}
       </ScrollView>
       {showChatFab ? (
         <Pressable
-          style={styles.fab}
+          style={[styles.fab, { backgroundColor: colors.chipBgActive }]}
           onPress={openBastionChatWithDocument}
           accessibilityRole="button"
           accessibilityLabel="Open Bastion Chat with this document"
@@ -87,7 +129,7 @@ const styles = StyleSheet.create({
   flex: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   scroll: { padding: 16, paddingBottom: 96 },
-  warn: { color: '#a60', marginBottom: 12 },
+  warn: { marginBottom: 12 },
   body: { fontSize: 14, lineHeight: 22, fontFamily: 'monospace' },
   fab: {
     position: 'absolute',
@@ -96,7 +138,6 @@ const styles = StyleSheet.create({
     width: 56,
     height: 56,
     borderRadius: 28,
-    backgroundColor: '#1a1a2e',
     justifyContent: 'center',
     alignItems: 'center',
     elevation: 6,

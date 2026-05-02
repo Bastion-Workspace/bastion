@@ -12,7 +12,6 @@ from models.provider_models import PROVIDER_TYPES
 from services.user_llm_provider_service import user_llm_provider_service
 from services.user_settings_kv_service import get_user_setting, set_user_setting
 from utils.auth_middleware import get_current_user
-from models.api_models import AuthenticatedUserResponse
 
 logger = logging.getLogger(__name__)
 
@@ -138,17 +137,27 @@ async def set_user_enabled_models(
 
 MODEL_ROLE_KEYS = ("user_chat_model", "user_fast_model", "user_image_gen_model", "user_image_analysis_model")
 
+SEND_WHILE_STREAMING_KEY = "send_while_streaming_behavior"
+_VALID_SEND_WHILE_STREAMING = frozenset({"queue", "stop_and_send"})
+
+
+def _normalize_send_while_streaming_behavior(raw: Optional[str]) -> str:
+    v = (raw or "queue").strip().lower()
+    return v if v in _VALID_SEND_WHILE_STREAMING else "queue"
+
 
 @router.get("/models/roles")
 async def get_user_model_roles(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
-    """Return all four per-user model role overrides (empty string = use admin default)."""
+    """Return per-user model role overrides and chat send-while-streaming behavior."""
     try:
-        roles = {}
+        roles: Dict[str, str] = {}
         for key in MODEL_ROLE_KEYS:
             val = await get_user_setting(current_user.user_id, key)
             roles[key] = val or ""
+        sw = await get_user_setting(current_user.user_id, SEND_WHILE_STREAMING_KEY)
+        roles[SEND_WHILE_STREAMING_KEY] = _normalize_send_while_streaming_behavior(sw)
         return roles
     except Exception as e:
         logger.exception("get_user_model_roles failed")
@@ -157,10 +166,10 @@ async def get_user_model_roles(
 
 @router.put("/models/roles")
 async def set_user_model_roles(
-    request: Dict[str, str],
+    request: Dict[str, Any],
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
-    """Set one or more per-user model role keys. Body: user_chat_model?, user_fast_model?, user_image_gen_model?, user_image_analysis_model?."""
+    """Set model role keys and/or send_while_streaming_behavior (queue | stop_and_send)."""
     try:
         for key in MODEL_ROLE_KEYS:
             if key in request:
@@ -168,13 +177,34 @@ async def set_user_model_roles(
                 await set_user_setting(
                     current_user.user_id,
                     key,
-                    (value or "").strip(),
+                    (str(value) if value is not None else "").strip(),
                     "string",
                 )
-        roles = {}
+        if SEND_WHILE_STREAMING_KEY in request:
+            raw = request.get(SEND_WHILE_STREAMING_KEY)
+            s = str(raw).strip().lower() if raw is not None else ""
+            if not s:
+                s = "queue"
+            if s not in _VALID_SEND_WHILE_STREAMING:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"{SEND_WHILE_STREAMING_KEY} must be one of: "
+                        f"{', '.join(sorted(_VALID_SEND_WHILE_STREAMING))}"
+                    ),
+                )
+            await set_user_setting(
+                current_user.user_id,
+                SEND_WHILE_STREAMING_KEY,
+                s,
+                "string",
+            )
+        roles: Dict[str, str] = {}
         for key in MODEL_ROLE_KEYS:
             val = await get_user_setting(current_user.user_id, key)
             roles[key] = val or ""
+        sw = await get_user_setting(current_user.user_id, SEND_WHILE_STREAMING_KEY)
+        roles[SEND_WHILE_STREAMING_KEY] = _normalize_send_while_streaming_behavior(sw)
         return {"status": "success", "roles": roles}
     except Exception as e:
         logger.exception("set_user_model_roles failed")

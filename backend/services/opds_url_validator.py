@@ -100,42 +100,22 @@ def strip_url_fragment(url: str) -> str:
     return urlunparse((p.scheme, p.netloc, p.path, p.params, p.query, ""))
 
 
-def catalog_fetch_prefix(catalog_root: str) -> str:
-    """
-    Build URL prefix for allowed fetches: same origin as catalog, path is directory
-    containing the catalog file (or catalog path with trailing slash).
-    """
-    r = strip_url_fragment(catalog_root.strip())
-    p = urlparse(r)
-    path = p.path or "/"
-    pl = path.lower()
-    if pl.endswith(".xml") or pl.endswith(".atom") or pl.endswith(".opds"):
-        if "/" in path:
-            path = path.rsplit("/", 1)[0] + "/"
-        else:
-            path = "/"
-    elif not path.endswith("/"):
-        path = path + "/"
-    base = urlunparse((p.scheme, p.netloc, path, "", "", ""))
-    if not base.endswith("/"):
-        base = base + "/"
-    return base
-
-
 def is_fetch_url_allowed(*, catalog_root: str, target_url: str) -> bool:
-    """Allow target only if same host/scheme as catalog and path is under catalog directory prefix."""
-    prefix_url = catalog_fetch_prefix(catalog_root)
+    """
+    Allow target if it is same origin (scheme + host/port) as the configured catalog root.
+
+    OPDS search templates and acquisition links often live outside the directory that holds
+    the root feed file; restricting to a single path prefix broke OpenSearch and many catalogs.
+    The catalog URL is user-chosen; we still require same origin and block unsafe resolved IPs.
+    """
+    root = strip_url_fragment(catalog_root.strip())
     target = strip_url_fragment(target_url.strip())
-    pu, tu = urlparse(prefix_url), urlparse(target)
+    pr, tu = urlparse(root), urlparse(target)
     if tu.scheme not in ("http", "https"):
         return False
     host = tu.hostname
     if host and _host_is_blocked(host):
         return False
-    if pu.scheme.lower() != tu.scheme.lower() or pu.netloc.lower() != tu.netloc.lower():
+    if (pr.scheme or "").lower() != tu.scheme.lower() or pr.netloc.lower() != tu.netloc.lower():
         return False
-    pp = pu.path or "/"
-    tp = tu.path or "/"
-    if not pp.endswith("/"):
-        pp = pp + "/"
-    return tp == pp.rstrip("/") or tp.startswith(pp)
+    return True

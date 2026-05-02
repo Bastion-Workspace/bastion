@@ -838,6 +838,9 @@ def validate_playbook_definition(definition: Dict[str, Any]) -> List[str]:
             if "enabled" in step and step.get("enabled") is not None and not isinstance(step.get("enabled"), bool):
                 warnings.append(f"{label}: 'enabled' must be a boolean when set (JSON true/false)")
 
+            if "auto_apply" in step and step.get("auto_apply") is not None and not isinstance(step.get("auto_apply"), bool):
+                warnings.append(f"{label}: 'auto_apply' must be a boolean when set (JSON true/false)")
+
             # Guardrails for common authoring mistakes discovered in the wild.
             if "loop_over" in step:
                 warnings.append(

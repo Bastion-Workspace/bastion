@@ -86,6 +86,8 @@ class BBSSession:
         self.messaging_rooms_cache: List[dict] = []
         # RSS article list: False = All, True = Unread only (persists until disconnect).
         self.rss_list_unread_only: bool = False
+        # In-session ebook reading: KoSync digest (partial MD5) -> last chapter index.
+        self.ebook_positions: Dict[str, int] = {}
         # Main-menu messaging unread: terminal bell when total unread increases (user-to-user rooms).
         self.messaging_bell_enabled: bool = True
         self._messaging_unread_baseline: Optional[int] = None

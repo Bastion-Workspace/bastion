@@ -27,6 +27,17 @@ import {
 } from '../../../src/api/rss';
 import { RSS_SOURCE_ALL, useRssPrefs } from '../../../src/hooks/useRssPrefs';
 import { RssArticleReaderModal } from '../../../src/components/RssArticleReaderModal';
+import { useModalSheetBottomPadding } from '../../../src/components/ScreenShell';
+import {
+  dequeuePendingMarkRead,
+  enqueuePendingMarkRead,
+  takeAllPendingMarkReads,
+} from '../../../src/session/rssPendingReadsStore';
+import {
+  clearLastOpenRssArticleId,
+  loadLastOpenRssArticleId,
+  saveLastOpenRssArticleId,
+} from '../../../src/session/lastRssArticleStore';
 import { getColors } from '../../../src/theme/colors';
 
 type FeedRow = RssFeed & { unread: number };
@@ -45,6 +56,7 @@ export default function RssUnifiedReaderScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [readerArticle, setReaderArticle] = useState<RssArticle | null>(null);
+  const modalSheetBottomPad = useModalSheetBottomPadding(16);
 
   const autoMarkReadRef = useRef(autoMarkRead);
   autoMarkReadRef.current = autoMarkRead;
@@ -59,6 +71,15 @@ export default function RssUnifiedReaderScreen() {
     await refreshFromStore();
     setError(null);
     try {
+      const pendingIds = await takeAllPendingMarkReads();
+      for (const aid of pendingIds) {
+        try {
+          await markArticleRead(aid);
+        } catch {
+          await enqueuePendingMarkRead(aid);
+        }
+      }
+
       const [feedList, unreadMap] = await Promise.all([listRssFeeds(), getRssUnreadByFeed()]);
       const rows = feedList.map((f) => ({
         ...f,
@@ -82,6 +103,16 @@ export default function RssUnifiedReaderScreen() {
       }
       const visible = listFilter === 'starred' ? raw.filter((a) => a.is_starred) : raw;
       setArticles(visible);
+
+      const lastOpenId = await loadLastOpenRssArticleId();
+      if (lastOpenId) {
+        const found = visible.find((a) => a.article_id === lastOpenId);
+        if (found) {
+          setReaderArticle(found);
+        } else {
+          await clearLastOpenRssArticleId();
+        }
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load');
       setArticles([]);
@@ -123,14 +154,21 @@ export default function RssUnifiedReaderScreen() {
   const openArticle = useCallback(async (a: RssArticle) => {
     try {
       if (!a.is_read) {
-        await markArticleRead(a.article_id);
-        setArticles((prev) =>
-          prev.map((x) => (x.article_id === a.article_id ? { ...x, is_read: true } : x))
-        );
+        await enqueuePendingMarkRead(a.article_id);
+        try {
+          await markArticleRead(a.article_id);
+          await dequeuePendingMarkRead(a.article_id);
+          setArticles((prev) =>
+            prev.map((x) => (x.article_id === a.article_id ? { ...x, is_read: true } : x))
+          );
+        } catch {
+          /* pending queue will retry */
+        }
       }
     } catch {
       /* still open reader */
     }
+    await saveLastOpenRssArticleId(a.article_id);
     setReaderArticle(a);
   }, []);
 
@@ -199,21 +237,24 @@ export default function RssUnifiedReaderScreen() {
   }, [source]);
 
   const onViewableItemsChanged = useRef(
-    ({ viewableItems }: { viewableItems: ViewToken[] }) => {
+    ({ changed }: { viewableItems: ViewToken[]; changed: ViewToken[] }) => {
       if (!autoMarkReadRef.current) return;
-      for (const vt of viewableItems) {
+      for (const vt of changed ?? []) {
+        if (vt.isViewable) continue;
         const a = vt.item as RssArticle | undefined;
         if (!a?.article_id || a.is_read) continue;
         if (markingIds.current.has(a.article_id)) continue;
         markingIds.current.add(a.article_id);
         void (async () => {
+          await enqueuePendingMarkRead(a.article_id);
           try {
             await markArticleRead(a.article_id);
+            await dequeuePendingMarkRead(a.article_id);
             setArticles((prev) =>
               prev.map((x) => (x.article_id === a.article_id ? { ...x, is_read: true } : x))
             );
           } catch {
-            /* ignore */
+            /* pending queue retries on next load */
           } finally {
             markingIds.current.delete(a.article_id);
           }
@@ -364,13 +405,41 @@ export default function RssUnifiedReaderScreen() {
       <RssArticleReaderModal
         visible={readerArticle !== null}
         article={readerArticle}
-        onClose={() => setReaderArticle(null)}
+        hasPrev={
+          readerArticle != null &&
+          articles.findIndex((x) => x.article_id === readerArticle.article_id) > 0
+        }
+        hasNext={
+          readerArticle != null &&
+          articles.findIndex((x) => x.article_id === readerArticle.article_id) >= 0 &&
+          articles.findIndex((x) => x.article_id === readerArticle.article_id) < articles.length - 1
+        }
+        onPrevArticle={() => {
+          if (!readerArticle) return;
+          const i = articles.findIndex((x) => x.article_id === readerArticle.article_id);
+          if (i <= 0) return;
+          const p = articles[i - 1];
+          setReaderArticle(p);
+          void saveLastOpenRssArticleId(p.article_id);
+        }}
+        onNextArticle={() => {
+          if (!readerArticle) return;
+          const i = articles.findIndex((x) => x.article_id === readerArticle.article_id);
+          if (i < 0 || i >= articles.length - 1) return;
+          const n = articles[i + 1];
+          setReaderArticle(n);
+          void saveLastOpenRssArticleId(n.article_id);
+        }}
+        onClose={() => {
+          void clearLastOpenRssArticleId();
+          setReaderArticle(null);
+        }}
       />
 
       <Modal visible={pickerOpen} animationType="slide" transparent onRequestClose={closePicker}>
         <Pressable style={styles.modalBackdrop} onPress={closePicker}>
           <Pressable
-            style={[styles.sheet, { backgroundColor: colors.background }]}
+            style={[styles.sheet, { backgroundColor: colors.background, paddingBottom: modalSheetBottomPad }]}
             onPress={(e) => e.stopPropagation()}
           >
             <Text style={[styles.sheetTitle, { color: colors.text, borderBottomColor: colors.border }]}>
@@ -491,7 +560,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     maxHeight: '55%',
-    paddingBottom: 16,
   },
   sheetTitle: { fontSize: 18, fontWeight: '700', padding: 16, borderBottomWidth: 1 },
   sheetList: { maxHeight: 320 },

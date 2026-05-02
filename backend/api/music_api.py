@@ -9,6 +9,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import httpx
 
+from config import settings
+from services.music_cover_cache import (
+    compute_etag,
+    etag_header_value,
+    fetch_cover_upstream,
+    get_cached_etag_only,
+    get_or_fetch,
+    if_none_match_matches,
+)
 from services.music_service import music_service
 from utils.auth_middleware import get_current_user
 from models.api_models import AuthenticatedUserResponse
@@ -442,8 +451,7 @@ async def stream_proxy(
                 logger.debug(f"Cleaned stream URL: {final_stream_url[:200]}...")
         
         # Open upstream stream first so we can mirror status and partial-content headers.
-        # Returning 206 without Content-Range/Content-Length (as we did when keying only off the
-        # client's Range header) breaks HTML5 media elements with format/network errors.
+        # Partial responses (Content-Range) must also forward Content-Length for HTML5 media.
         logger.debug(
             "Streaming from URL: %s... (headers: %s)",
             final_stream_url[:200],
@@ -473,19 +481,27 @@ async def stream_proxy(
         uct = upstream.headers.get("content-type")
         if uct:
             out_headers["Content-Type"] = uct.split(";")[0].strip()
+        # Only forward Content-Length together with Content-Range (partial content).
+        # Forwarding upstream Content-Length on a full 200 while streaming bytes through
+        # this proxy caused Uvicorn "Response content shorter than Content-Length" when
+        # the upstream closed the socket early (timeout, proxy, etc.). Full responses use
+        # chunked encoding to the client when we omit Content-Length.
         cr = upstream.headers.get("content-range")
         if cr:
             out_headers["Content-Range"] = cr
-        cl = upstream.headers.get("content-length")
-        if cl:
-            out_headers["Content-Length"] = cl
+            cl = upstream.headers.get("content-length")
+            if cl:
+                out_headers["Content-Length"] = cl
 
         async def stream_audio() -> AsyncIterator[bytes]:
             try:
                 async for chunk in upstream.aiter_bytes():
                     yield chunk
+            except (httpx.RemoteProtocolError, httpx.ReadError) as e:
+                # Upstream dropped the connection mid-body; already logged at httpx layer.
+                logger.warning("Upstream audio stream ended early: %s", e)
             except Exception as e:
-                logger.error(f"Error during audio streaming: {e}", exc_info=True)
+                logger.error("Error during audio streaming: %s", e, exc_info=True)
             finally:
                 await upstream.aclose()
                 await client.aclose()
@@ -500,6 +516,206 @@ async def stream_proxy(
         raise
     except Exception as e:
         logger.error(f"Error setting up stream proxy: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/music/cover-art/{cover_art_id}")
+async def cover_art_proxy(
+    cover_art_id: str,
+    request: Request,
+    token: Optional[str] = None,
+) -> Response:
+    """
+    Proxy cover art from the media server (Subsonic getCoverArt).
+    Authenticates like stream-proxy (Bearer header or token query param).
+    """
+    try:
+        user_id = None
+        if token:
+            try:
+                from utils.auth_middleware import decode_jwt_token
+                payload = decode_jwt_token(token)
+                user_id = payload.get("user_id")
+                if not user_id:
+                    raise HTTPException(status_code=401, detail="Invalid token")
+            except ValueError as e:
+                logger.error(f"Token validation failed: {e}")
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+            except Exception as e:
+                logger.error(f"Token validation error: {e}")
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+        else:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+                try:
+                    from utils.auth_middleware import decode_jwt_token
+                    payload = decode_jwt_token(token)
+                    user_id = payload.get("user_id")
+                except ValueError:
+                    raise HTTPException(status_code=401, detail="Invalid or expired token")
+                except Exception:
+                    raise HTTPException(status_code=401, detail="Invalid or expired token")
+            else:
+                raise HTTPException(status_code=401, detail="Authentication required")
+
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User ID not found in token")
+
+        query_service_type = request.query_params.get("service_type")
+        creds = await music_service.get_credentials(
+            user_id, query_service_type if query_service_type else None
+        )
+        if not creds:
+            raise HTTPException(
+                status_code=404, detail="Cover art not available for this source"
+            )
+        resolved_service_type = creds.get("service_type", "subsonic")
+
+        size_raw = request.query_params.get("size", "300")
+        try:
+            size = int(size_raw)
+        except ValueError:
+            size = 300
+        size = max(32, min(size, 1200))
+
+        etag_hex = compute_etag(
+            user_id, resolved_service_type, cover_art_id, size
+        )
+        cache_headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+            "ETag": etag_header_value(etag_hex),
+            "Vary": "Accept",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+        }
+
+        # Only 304 when we have previously stored this key. Otherwise native image
+        # stacks can send If-None-Match matching our deterministic ETag without a
+        # usable cached body and would render blank art.
+        rls_context = {"user_id": user_id}
+        if if_none_match_matches(
+            request.headers.get("If-None-Match"), etag_hex
+        ):
+            row_etag = await get_cached_etag_only(
+                user_id,
+                resolved_service_type,
+                cover_art_id,
+                size,
+                rls_context,
+            )
+            if row_etag is not None:
+                return Response(status_code=304, headers=cache_headers)
+
+        if getattr(settings, "MUSIC_COVER_CACHE_ENABLED", True):
+
+            async def fetch_body_from_upstream() -> tuple:
+                url = await music_service.get_cover_art_url(
+                    user_id, cover_art_id, resolved_service_type, size
+                )
+                if not url:
+                    raise RuntimeError("no_cover_art_url")
+                return await fetch_cover_upstream(url)
+
+            def normalize_image_media_type(raw) -> str:
+                s = str(raw) if raw is not None else "image/jpeg"
+                return s.split(";")[0].strip() or "image/jpeg"
+
+            try:
+                body, media_type, etag_out = await get_or_fetch(
+                    user_id,
+                    resolved_service_type,
+                    cover_art_id,
+                    size,
+                    rls_context,
+                    fetch_body_from_upstream,
+                )
+            except RuntimeError as e:
+                err = str(e)
+                if err == "no_cover_art_url":
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Cover art not available for this source",
+                    )
+                if err.startswith("upstream_http_"):
+                    code = err.replace("upstream_http_", "")
+                    logger.error("Upstream cover art rejected: HTTP %s", code)
+                    raise HTTPException(
+                        status_code=502,
+                        detail="Media server refused cover art",
+                    )
+                raise
+            except Exception as cache_err:
+                logger.warning(
+                    "Cover art cache failed, fetching upstream only: %s",
+                    cache_err,
+                    exc_info=True,
+                )
+                try:
+                    body, media_type = await fetch_body_from_upstream()
+                except RuntimeError as e:
+                    err = str(e)
+                    if err == "no_cover_art_url":
+                        raise HTTPException(
+                            status_code=404,
+                            detail="Cover art not available for this source",
+                        )
+                    if err.startswith("upstream_http_"):
+                        code = err.replace("upstream_http_", "")
+                        logger.error("Upstream cover art rejected: HTTP %s", code)
+                        raise HTTPException(
+                            status_code=502,
+                            detail="Media server refused cover art",
+                        )
+                    raise
+                media_type = normalize_image_media_type(media_type)
+                return Response(
+                    content=body,
+                    media_type=media_type,
+                    headers=cache_headers,
+                )
+
+            media_type = normalize_image_media_type(media_type)
+            out_headers = {
+                **cache_headers,
+                "ETag": etag_header_value(etag_out),
+            }
+            return Response(
+                content=body, media_type=media_type, headers=out_headers
+            )
+
+        art_url = await music_service.get_cover_art_url(
+            user_id, cover_art_id, resolved_service_type, size
+        )
+        if not art_url:
+            raise HTTPException(
+                status_code=404, detail="Cover art not available for this source"
+            )
+
+        try:
+            body, media_type = await fetch_cover_upstream(art_url)
+        except RuntimeError as e:
+            err = str(e)
+            if err.startswith("upstream_http_"):
+                code = err.replace("upstream_http_", "")
+                logger.error("Upstream cover art rejected: HTTP %s", code)
+                raise HTTPException(
+                    status_code=502, detail="Media server refused cover art"
+                )
+            raise
+        media_type = (
+            str(media_type).split(";")[0].strip() if media_type else "image/jpeg"
+        ) or "image/jpeg"
+
+        return Response(
+            content=body,
+            media_type=media_type,
+            headers=cache_headers,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error proxying cover art: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

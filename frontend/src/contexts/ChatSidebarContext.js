@@ -250,6 +250,12 @@ export const ChatSidebarProvider = ({ children }) => {
   const streamAbortControllerRef = React.useRef(null);
   /** Assistant placeholder message id for the in-flight stream (Stop / abort UI). */
   const activeStreamMessageIdRef = React.useRef(null);
+  /** From GET /api/user/models/roles: queue | stop_and_send */
+  const sendWhileStreamingBehaviorRef = React.useRef('queue');
+  /** Single follow-up message to send after current stream completes. */
+  const pendingMessageRef = React.useRef(null);
+  /** Roll back optimistic user + assistant rows and restore composer when Stop cancels the active stream. */
+  const streamRollbackRef = React.useRef(null);
   const lastCreatedConversationIdRef = React.useRef(null); // Skip redundant refetch after creating new conversation
   /** True while applying conversation metadata into UI state; blocks model save/select until flushed. */
   const isLoadingFromMetadataRef = React.useRef(false);
@@ -271,7 +277,8 @@ export const ChatSidebarProvider = ({ children }) => {
     return conversationActivityState.get(currentConversationId) || {
       isLoading: false,
       currentJobId: null,
-      executingPlans: new Set()
+      executingPlans: new Set(),
+      hasPendingMessage: false,
     };
   }, [currentConversationId, conversationActivityState]);
   
@@ -284,7 +291,8 @@ export const ChatSidebarProvider = ({ children }) => {
       const currentState = newMap.get(currentConversationId) || {
         isLoading: false,
         currentJobId: null,
-        executingPlans: new Set()
+        executingPlans: new Set(),
+        hasPendingMessage: false,
       };
       
       // Merge updates with current state
@@ -293,11 +301,17 @@ export const ChatSidebarProvider = ({ children }) => {
       return newMap;
     });
   }, [currentConversationId]);
+
+  const clearPendingMessage = useCallback(() => {
+    pendingMessageRef.current = null;
+    updateCurrentActivityState({ hasPendingMessage: false });
+  }, [updateCurrentActivityState]);
   
   // Expose as computed values for backward compatibility
   const isLoading = getCurrentActivityState().isLoading;
   const currentJobId = getCurrentActivityState().currentJobId;
   const executingPlans = getCurrentActivityState().executingPlans;
+  const hasPendingMessage = getCurrentActivityState().hasPendingMessage;
   
   // **ROOSEVELT'S PREFERENCE MANAGEMENT**: Store user preferences separately from what gets sent to backend
   // User preference: what the user actually toggled (persists across navigation)
@@ -379,6 +393,53 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const queryClient = useQueryClient();
 
+  const applyStreamCancelRollback = useCallback(() => {
+    const rb = streamRollbackRef.current;
+    if (!rb) return;
+    const { draftPlain, userLocalId, streamLocalId, serverUserMessageId } = rb;
+    streamRollbackRef.current = null;
+    setMessages((prev) =>
+      prev.filter((m) => {
+        const mid = m.message_id != null ? String(m.message_id) : '';
+        const localId = m.id != null ? String(m.id) : '';
+        if (userLocalId != null && (m.id === userLocalId || localId === String(userLocalId))) {
+          return false;
+        }
+        if (streamLocalId != null && (m.id === streamLocalId || localId === String(streamLocalId))) {
+          return false;
+        }
+        if (
+          serverUserMessageId &&
+          (mid === String(serverUserMessageId) || String(m.message_id || '') === String(serverUserMessageId))
+        ) {
+          return false;
+        }
+        return true;
+      })
+    );
+    setQuery(typeof draftPlain === 'string' ? draftPlain : '');
+    const cid = currentConversationIdRef.current;
+    if (cid) {
+      queryClient.invalidateQueries(['conversationMessages', cid]);
+    }
+  }, [queryClient, setQuery, setMessages]);
+
+  const { data: userModelRolesForChat } = useQuery(
+    'userModelRoles',
+    () => apiService.getUserModelRoles(),
+    {
+      enabled: !!(isAuthenticated && user?.user_id && !authLoading),
+      staleTime: 60000,
+    }
+  );
+  useEffect(() => {
+    if (!userModelRolesForChat) return;
+    sendWhileStreamingBehaviorRef.current =
+      userModelRolesForChat.send_while_streaming_behavior === 'stop_and_send'
+        ? 'stop_and_send'
+        : 'queue';
+  }, [userModelRolesForChat]);
+
   const { data: enabledModelsCatalog } = useQuery(
     ['enabledModels', user?.user_id],
     () => apiService.getEnabledModels(),
@@ -395,6 +456,8 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const clearConversationWorkspace = useCallback(() => {
     const id = currentConversationIdRef.current;
+    pendingMessageRef.current = null;
+    streamRollbackRef.current = null;
     if (backgroundJobService) {
       backgroundJobService.setCurrentConversationId(null);
       backgroundJobService.disconnectAll();
@@ -1128,7 +1191,23 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const selectConversation = (conversationId) => {
     devLog('🔄 ChatSidebarContext: Selecting conversation:', conversationId);
-    
+
+    pendingMessageRef.current = null;
+    streamRollbackRef.current = null;
+    if (currentConversationId) {
+      setConversationActivityState((prev) => {
+        const newMap = new Map(prev);
+        const st = newMap.get(currentConversationId) || {
+          isLoading: false,
+          currentJobId: null,
+          executingPlans: new Set(),
+          hasPendingMessage: false,
+        };
+        newMap.set(currentConversationId, { ...st, hasPendingMessage: false });
+        return newMap;
+      });
+    }
+
     // Clear current state to prevent cross-conversation contamination
     setMessages([]);
     setAllMessages([]);
@@ -1183,11 +1262,33 @@ export const ChatSidebarProvider = ({ children }) => {
     
     if (!actualQuery || !backgroundJobService) {
       devLog('❌ sendMessage early return:', { hasQuery: !!actualQuery, hasService: !!backgroundJobService });
-      return;
+      return { clearComposer: false };
+    }
+
+    if (getCurrentActivityState().isLoading) {
+      if (sendWhileStreamingBehaviorRef.current === 'stop_and_send') {
+        await cancelCurrentJob({ skipComposerRollback: true });
+      } else {
+        pendingMessageRef.current = {
+          executionMode: executionMode || 'auto',
+          payloadQuery: actualQuery,
+          sendOptions,
+        };
+        if (replyToMessage && !overrideQuery) {
+          setReplyToMessage(null);
+        }
+        setQuery('');
+        updateCurrentActivityState({ hasPendingMessage: true });
+        return { clearComposer: true };
+      }
     }
 
     const currentQuery = actualQuery;
-    
+    const draftPlain =
+      overrideQuery != null && overrideQuery !== undefined && String(overrideQuery).trim() !== ''
+        ? String(overrideQuery).trim()
+        : String(query || '').trim();
+
     // Clear reply state after using it
     if (replyToMessage && !overrideQuery) {
       setReplyToMessage(null);
@@ -1195,9 +1296,7 @@ export const ChatSidebarProvider = ({ children }) => {
     let conversationId = currentConversationId;
 
     // Clear input immediately for better UX (only if not using override query)
-    if (!overrideQuery) {
-      setQuery('');
-    }
+    setQuery('');
 
     // ROOSEVELT'S HITL PRIORITY: Check for HITL permission responses FIRST
     if (isHITLPermissionResponse(currentQuery)) {
@@ -1210,8 +1309,9 @@ export const ChatSidebarProvider = ({ children }) => {
     }
 
     // Add user message immediately
+    const userMsgId = Date.now();
     const userMessage = {
-      id: Date.now(),
+      id: userMsgId,
       role: 'user',
       type: 'user', // Add type field for consistency
       content: currentQuery,
@@ -1233,9 +1333,17 @@ export const ChatSidebarProvider = ({ children }) => {
       } catch (error) {
         console.error('❌ Failed to create conversation:', error);
         setQuery(currentQuery); // Restore query on failure
-        return;
+        return { clearComposer: false };
       }
     }
+
+    streamRollbackRef.current = {
+      draftPlain,
+      userLocalId: userMsgId,
+      streamLocalId: null,
+      serverUserMessageId: null,
+      conversationId,
+    };
 
     // Add user message to UI immediately
     setMessages(prev => [...prev, userMessage]);
@@ -1258,6 +1366,7 @@ export const ChatSidebarProvider = ({ children }) => {
         
       } catch (error) {
         console.error('❌ LangGraph failed:', error);
+        streamRollbackRef.current = null;
         setMessages(prev => [...prev, {
           id: Date.now(),
           role: 'system',
@@ -1268,7 +1377,22 @@ export const ChatSidebarProvider = ({ children }) => {
         }]);
       } finally {
         updateCurrentActivityState({ isLoading: false });
+        const pending = pendingMessageRef.current;
+        if (pending) {
+          pendingMessageRef.current = null;
+          updateCurrentActivityState({ hasPendingMessage: false });
+          try {
+            await sendMessage(
+              pending.executionMode ?? 'auto',
+              pending.payloadQuery,
+              pending.sendOptions
+            );
+          } catch (flushErr) {
+            console.error('Failed to flush queued message:', flushErr);
+          }
+        }
       }
+    return { clearComposer: true };
   };
 
   // 🌊 ROOSEVELT'S UNIVERSAL STREAMING POLICY: All queries deserve real-time responses!
@@ -1277,13 +1401,18 @@ export const ChatSidebarProvider = ({ children }) => {
   const handleStreamingResponse = async (query, conversationId, sessionId, streamOptions = {}) => {
     const { isBranchResend, branchMessageId, agent_profile_id: streamAgentProfileId } = streamOptions;
     devLog('🌊 Starting streaming response for:', query);
-    
+
+    if (isBranchResend) {
+      streamRollbackRef.current = null;
+    }
+
     try {
       updateCurrentActivityState({ currentJobId: null });
 
       // Add streaming message placeholder (server assigns run_id in first SSE run_started)
+      const streamPlaceholderId = Date.now() + 1;
       const streamingMessage = {
-        id: Date.now() + 1,
+        id: streamPlaceholderId,
         role: 'assistant',
         type: 'assistant',
         content: '',
@@ -1295,7 +1424,15 @@ export const ChatSidebarProvider = ({ children }) => {
           agent_type: null
         }
       };
-      
+
+      if (
+        !isBranchResend &&
+        streamRollbackRef.current &&
+        String(streamRollbackRef.current.conversationId) === String(conversationId)
+      ) {
+        streamRollbackRef.current.streamLocalId = streamPlaceholderId;
+      }
+
       setMessages(prev => [...prev, streamingMessage]);
       activeStreamMessageIdRef.current = streamingMessage.id;
 
@@ -1567,21 +1704,18 @@ export const ChatSidebarProvider = ({ children }) => {
                         : msg
                     )
                   );
+                } else if (data.type === 'user_message_persisted' && data.message_id) {
+                  const uid = streamRollbackRef.current?.userLocalId;
+                  if (uid != null) {
+                    streamRollbackRef.current.serverUserMessageId = data.message_id;
+                    setMessages((prev) =>
+                      prev.map((m) =>
+                        m.id === uid ? { ...m, message_id: data.message_id } : m
+                      )
+                    );
+                  }
                 } else if (data.type === 'cancelled') {
-                  setMessages((prev) =>
-                    prev.map((msg) =>
-                      msg.id === streamingMessage.id
-                        ? {
-                            ...msg,
-                            content: msg.content?.trim()
-                              ? `${msg.content}\n\n_(Stopped)_`
-                              : '_(Stopped)_',
-                            isStreaming: false,
-                            isCancelled: true,
-                          }
-                        : msg
-                    )
-                  );
+                  applyStreamCancelRollback();
                   updateCurrentActivityState({ currentJobId: null, isLoading: false });
                   streamAbortControllerRef.current = null;
                   queryClient.invalidateQueries(['conversationMessages', conversationId]);
@@ -1861,7 +1995,8 @@ export const ChatSidebarProvider = ({ children }) => {
                   
                   // Don't clear job ID yet - we're waiting for user input
                   updateCurrentActivityState({ isLoading: false });
-                  
+                  streamRollbackRef.current = null;
+
                   // Refresh conversations to ensure state is saved
                   queryClient.invalidateQueries(['conversations']);
                   queryClient.invalidateQueries(['conversation', conversationId]);
@@ -1930,7 +2065,8 @@ export const ChatSidebarProvider = ({ children }) => {
                   updateCurrentActivityState({ currentJobId: null });
                   streamAbortControllerRef.current = null;
                   activeStreamMessageIdRef.current = null;
-                  
+                  streamRollbackRef.current = null;
+
                   // Refresh conversations - title may have been updated from "New Conversation"
                   // Force a refetch to ensure we get the latest title
                   queryClient.invalidateQueries(['conversations']);
@@ -1948,6 +2084,7 @@ export const ChatSidebarProvider = ({ children }) => {
                 } else if (data.type === 'done') {
                   streamAbortControllerRef.current = null;
                   activeStreamMessageIdRef.current = null;
+                  streamRollbackRef.current = null;
                   if (data.active_line_id) {
                     setActiveLineRouting({
                       id: data.active_line_id,
@@ -1987,9 +2124,11 @@ export const ChatSidebarProvider = ({ children }) => {
       streamAbortControllerRef.current = null;
       activeStreamMessageIdRef.current = null;
       if (error?.name === 'AbortError') {
+        applyStreamCancelRollback();
         updateCurrentActivityState({ currentJobId: null, isLoading: false });
         return;
       }
+      streamRollbackRef.current = null;
       console.error('❌ Streaming failed:', error);
       
       // Update message to show error
@@ -2062,6 +2201,7 @@ export const ChatSidebarProvider = ({ children }) => {
   };
 
   const clearChat = () => {
+    pendingMessageRef.current = null;
     setMessages([]);
     setAllMessages([]);
     setCurrentNodeId(null);
@@ -2069,11 +2209,17 @@ export const ChatSidebarProvider = ({ children }) => {
     setQuery('');
     // Activity state is conversation-scoped, so clearing conversation clears its state
     if (currentConversationId) {
-      updateCurrentActivityState({ currentJobId: null, isLoading: false });
+      updateCurrentActivityState({
+        currentJobId: null,
+        isLoading: false,
+        hasPendingMessage: false,
+      });
     }
   };
 
-  const cancelCurrentJob = async () => {
+  const cancelCurrentJob = async (opts = {}) => {
+    const skipComposerRollback = !!(opts && opts.skipComposerRollback);
+    pendingMessageRef.current = null;
     const runId = currentJobId;
     const streamMid = activeStreamMessageIdRef.current;
     const isUuidRun =
@@ -2094,24 +2240,50 @@ export const ChatSidebarProvider = ({ children }) => {
     streamAbortControllerRef.current?.abort();
     streamAbortControllerRef.current = null;
 
-    if (streamMid != null) {
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === streamMid && msg.isStreaming
-            ? {
-                ...msg,
-                content: (msg.content || '').trim()
-                  ? `${msg.content}\n\n_(Stopped)_`
-                  : '_(Stopped)_',
-                isCancelled: true,
-                isStreaming: false,
-              }
-            : msg
-        )
-      );
+    if (skipComposerRollback) {
+      streamRollbackRef.current = null;
+      if (streamMid != null) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === streamMid && msg.isStreaming
+              ? {
+                  ...msg,
+                  content: (msg.content || '').trim()
+                    ? `${msg.content}\n\n_(Stopped)_`
+                    : '_(Stopped)_',
+                  isCancelled: true,
+                  isStreaming: false,
+                }
+              : msg
+          )
+        );
+      }
+    } else {
+      const hadRollback = streamRollbackRef.current != null;
+      applyStreamCancelRollback();
+      if (!hadRollback && streamMid != null) {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === streamMid && msg.isStreaming
+              ? {
+                  ...msg,
+                  content: (msg.content || '').trim()
+                    ? `${msg.content}\n\n_(Stopped)_`
+                    : '_(Stopped)_',
+                  isCancelled: true,
+                  isStreaming: false,
+                }
+              : msg
+          )
+        );
+      }
     }
 
-    updateCurrentActivityState({ currentJobId: null, isLoading: false });
+    updateCurrentActivityState({
+      currentJobId: null,
+      isLoading: false,
+      hasPendingMessage: false,
+    });
     activeStreamMessageIdRef.current = null;
   };
 
@@ -2124,6 +2296,7 @@ export const ChatSidebarProvider = ({ children }) => {
     editAndResendMessage,
     switchBranch,
     cancelCurrentJob,
+    clearPendingMessage,
   };
 
   const stableToggleSidebar = useCallback(() => {
@@ -2147,8 +2320,12 @@ export const ChatSidebarProvider = ({ children }) => {
   const stableSwitchBranch = useCallback((messageId, direction) => {
     return chatSidebarActionsRef.current.switchBranch(messageId, direction);
   }, []);
-  const stableCancelCurrentJob = useCallback(() => {
-    return chatSidebarActionsRef.current.cancelCurrentJob();
+  const stableCancelCurrentJob = useCallback((opts) => {
+    return chatSidebarActionsRef.current.cancelCurrentJob(opts);
+  }, []);
+
+  const stableClearPendingMessage = useCallback(() => {
+    return chatSidebarActionsRef.current.clearPendingMessage();
   }, []);
 
   const value = useMemo(
@@ -2172,6 +2349,7 @@ export const ChatSidebarProvider = ({ children }) => {
       replyToMessage,
       setReplyToMessage,
       isLoading,
+      hasPendingMessage,
       selectedModel,
       setSelectedModel,
       backgroundJobService,
@@ -2189,6 +2367,7 @@ export const ChatSidebarProvider = ({ children }) => {
       switchBranch: stableSwitchBranch,
 
       cancelCurrentJob: stableCancelCurrentJob, // Add cancellation function
+      clearPendingMessage: stableClearPendingMessage,
 
       // **ROOSEVELT**: Editor preference (active = sent to backend, user = checkbox state)
       editorPreference, // Active preference sent to backend (context-aware)
@@ -2227,6 +2406,7 @@ export const ChatSidebarProvider = ({ children }) => {
       query,
       replyToMessage,
       isLoading,
+      hasPendingMessage,
       selectedModel,
       backgroundJobService,
       sessionId,
@@ -2253,6 +2433,7 @@ export const ChatSidebarProvider = ({ children }) => {
       stableEditAndResendMessage,
       stableSwitchBranch,
       stableCancelCurrentJob,
+      stableClearPendingMessage,
       setActiveArtifact,
     ]
   );

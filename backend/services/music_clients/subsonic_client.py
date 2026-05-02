@@ -270,6 +270,7 @@ class SubSonicClient(BaseMusicClient):
                 data = response.json()
                 
                 album_data = data.get("subsonic-response", {}).get("album", {})
+                album_cover = album_data.get("coverArt") or ""
                 track_list = album_data.get("song", [])
                 if not isinstance(track_list, list):
                     track_list = [track_list] if track_list else []
@@ -277,6 +278,8 @@ class SubSonicClient(BaseMusicClient):
                 tracks = []
                 for track in track_list:
                     normalized = self.normalize_track(track, parent_id=album_id)
+                    if album_cover and not (normalized.get("cover_art_id") or "").strip():
+                        normalized["cover_art_id"] = str(album_cover)
                     tracks.append(normalized)
                 
                 return tracks
@@ -316,6 +319,14 @@ class SubSonicClient(BaseMusicClient):
             return stream_url
         except Exception as e:
             logger.error(f"Failed to generate stream URL: {e}")
+            return None
+    
+    def get_cover_art_url(self, cover_art_id: str, size: int = 300) -> Optional[str]:
+        """Build authenticated getCoverArt URL for album/track artwork."""
+        try:
+            return self._build_url("getCoverArt", {"id": cover_art_id, "size": size})
+        except Exception as e:
+            logger.error(f"Failed to generate cover art URL: {e}")
             return None
     
     async def add_to_playlist(self, playlist_id: str, track_ids: List[str]) -> Dict[str, Any]:

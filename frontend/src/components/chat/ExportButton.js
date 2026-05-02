@@ -17,8 +17,10 @@ import {
   Description,
   Edit,
   BookmarkAdd,
+  Article,
 } from '@mui/icons-material';
 import exportService from '../../services/exportService';
+import ExportOptionsDialog from './ExportOptionsDialog';
 
 const ExportButton = ({
   message,
@@ -32,7 +34,9 @@ const ExportButton = ({
   const [anchorEl, setAnchorEl] = useState(null);
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportingDocx, setExportingDocx] = useState(false);
+  const [exportingMarkdown, setExportingMarkdown] = useState(false);
   const [exportingForEditor, setExportingForEditor] = useState(false);
+  const [docxOptionsOpen, setDocxOptionsOpen] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
 
   const handleClick = (event) => {
@@ -66,15 +70,33 @@ const ExportButton = ({
     }
   };
 
-  const handleExportDOCX = async () => {
+  const handleOpenDocxOptions = () => {
+    handleClose();
+    setDocxOptionsOpen(true);
+  };
+
+  const handleConfirmDocxExport = async (options) => {
+    setDocxOptionsOpen(false);
     setExportingDocx(true);
     try {
-      await exportService.exportAsDOCX(message);
+      await exportService.exportAsDOCX(message, options);
       setSnackbar({ open: true, message: 'DOCX exported successfully!', severity: 'success' });
     } catch (error) {
       setSnackbar({ open: true, message: error.message, severity: 'error' });
     } finally {
       setExportingDocx(false);
+    }
+  };
+
+  const handleExportMarkdown = async () => {
+    setExportingMarkdown(true);
+    try {
+      await exportService.exportAsMarkdown(message);
+      setSnackbar({ open: true, message: 'Markdown exported successfully!', severity: 'success' });
+    } catch (error) {
+      setSnackbar({ open: true, message: error.message, severity: 'error' });
+    } finally {
+      setExportingMarkdown(false);
       handleClose();
     }
   };
@@ -154,7 +176,7 @@ const ExportButton = ({
           </ListItemText>
         </MenuItem>
         
-        <MenuItem onClick={handleExportDOCX} disabled={exportingDocx}>
+        <MenuItem onClick={handleOpenDocxOptions} disabled={exportingDocx}>
           <ListItemIcon>
             {exportingDocx ? (
               <CircularProgress size={16} />
@@ -163,10 +185,23 @@ const ExportButton = ({
             )}
           </ListItemIcon>
           <ListItemText>
-            {exportingDocx ? "Exporting..." : "Export as DOCX"}
+            {exportingDocx ? 'Exporting...' : 'Export as DOCX...'}
           </ListItemText>
         </MenuItem>
-        
+
+        <MenuItem onClick={handleExportMarkdown} disabled={exportingMarkdown}>
+          <ListItemIcon>
+            {exportingMarkdown ? (
+              <CircularProgress size={16} />
+            ) : (
+              <Article fontSize="small" />
+            )}
+          </ListItemIcon>
+          <ListItemText>
+            {exportingMarkdown ? 'Exporting...' : 'Export as Markdown'}
+          </ListItemText>
+        </MenuItem>
+
         <MenuItem onClick={handleExportForEditor} disabled={exportingForEditor}>
           <ListItemIcon>
             {exportingForEditor ? (
@@ -195,7 +230,14 @@ const ExportButton = ({
           </MenuItem>
         )}
       </Menu>
-      
+
+      <ExportOptionsDialog
+        open={docxOptionsOpen}
+        title="DOCX export options"
+        onClose={() => setDocxOptionsOpen(false)}
+        onConfirm={handleConfirmDocxExport}
+      />
+
       <Snackbar
         open={snackbar.open}
         autoHideDuration={6000}

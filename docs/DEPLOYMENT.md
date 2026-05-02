@@ -125,7 +125,7 @@ On **`v*`** tags, CI builds and pushes first-party images (see [`.github/workflo
   `ghcr.io/<owner_lowercase>/bastion-dev-<service>:<tag>`  
   Same services as above, but a separate **private** package family so prerelease images are not mixed with public production packages.
 
-**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/postgres_init` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.9`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/postgres_init`.
+**Postgres init without the monorepo:** CI also publishes **`bastion-postgres`** and **`bastion-postgres-data`**, which embed `backend/postgres_init` and `data-service/sql` at build time. Use the **same version tag** as your app images (e.g. `ghcr.io/<owner_lowercase>/bastion-postgres:0.70.12`). Point the `postgres` / `postgres-data` services at those images and keep only the named data volumes (no bind mount of SQL from disk). You still need a compose file and `.env`, but you do **not** need a git checkout of `backend/postgres_init`.
 
 **Typical operator pattern:**
 

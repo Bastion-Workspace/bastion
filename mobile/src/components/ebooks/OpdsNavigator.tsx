@@ -19,11 +19,11 @@ import {
 import { getColors } from '../../theme/colors';
 import { BookCard } from './BookCard';
 import { OpdsCatalogPicker } from './OpdsCatalogPicker';
-import { pickAcquisitionHrefFromEntry, pickNavigationHrefFromEntry } from './opdsUtils';
+import { pickAcquisitionFormatFromEntry, pickAcquisitionHrefFromEntry, pickNavigationHrefFromEntry } from './opdsUtils';
 
 type Props = {
   catalogs: OpdsCatalogEntryResponse[];
-  onOpenEbook: (args: { catalogId: string; acquisitionUrl: string; title: string }) => void;
+  onOpenEbook: (args: { catalogId: string; acquisitionUrl: string; title: string; format: 'epub' | 'pdf' }) => void;
 };
 
 export function OpdsNavigator({ catalogs, onOpenEbook }: Props) {
@@ -104,17 +104,24 @@ export function OpdsNavigator({ catalogs, onOpenEbook }: Props) {
   const renderEntry = useCallback(
     ({ item }: { item: OpdsFeedEntry }) => {
       const acq = pickAcquisitionHrefFromEntry(item);
+      const acqFormat = pickAcquisitionFormatFromEntry(item);
       const navHref = pickNavigationHrefFromEntry(item);
       return (
         <BookCard
           entry={item}
           baseUrl={currentBase}
           scheme={scheme}
+          acquisitionFormat={acq ? acqFormat : undefined}
           onPressAcquisition={
             acq
               ? () => {
                   const abs = new URL(acq, currentBase).href;
-                  onOpenEbook({ catalogId, acquisitionUrl: abs, title: item.title || 'Book' });
+                  onOpenEbook({
+                    catalogId,
+                    acquisitionUrl: abs,
+                    title: item.title || 'Book',
+                    format: acqFormat,
+                  });
                 }
               : undefined
           }

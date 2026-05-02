@@ -3,8 +3,8 @@ import { Routes, Route, useLocation, Navigate, useParams } from 'react-router-do
 import { Container, Box, IconButton, Tooltip, SwipeableDrawer, useTheme } from '@mui/material';
 import { ChevronRight } from '@mui/icons-material';
 import { motion } from 'framer-motion';
-import { QueryClient, QueryClientProvider, useQuery } from 'react-query';
-import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { useQuery } from 'react-query';
+import { useAuth } from './contexts/AuthContext';
 import AuthQueryCacheBoundary from './components/AuthQueryCacheBoundary';
 import { VoiceAvailabilityProvider } from './contexts/VoiceAvailabilityContext';
 import { CapabilitiesProvider } from './contexts/CapabilitiesContext';
@@ -58,16 +58,6 @@ function LegacyAgentLineRedirect() {
   const { lineId } = useParams();
   return <Navigate to={`/agent-factory/line/${lineId}`} replace />;
 }
-
-// Create a client
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      retry: 1,
-      refetchOnWindowFocus: false,
-    },
-  },
-});
 
 // Main content component that uses the chat sidebar context
 const MainContent = () => {
@@ -338,8 +328,7 @@ const MainContent = () => {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <AuthProvider queryClient={queryClient}>
+    <>
         <AuthQueryCacheBoundary />
         <VoiceAvailabilityProvider>
         <CapabilitiesProvider>
@@ -401,8 +390,7 @@ function App() {
         </ModelProvider>
         </CapabilitiesProvider>
         </VoiceAvailabilityProvider>
-      </AuthProvider>
-    </QueryClientProvider>
+    </>
   );
 }
 

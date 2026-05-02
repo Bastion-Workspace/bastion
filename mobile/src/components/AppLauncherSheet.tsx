@@ -12,6 +12,7 @@ import {
   View,
   useColorScheme,
 } from 'react-native';
+import { filterActiveConfiguredSources, getMediaSources } from '../api/media';
 import { getColors } from '../theme/colors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppLauncher } from '../context/AppLauncherContext';
@@ -45,6 +46,31 @@ export function AppLauncherSheet() {
   const slide = useRef(new Animated.Value(SHEET_MAX)).current;
   const [sheetVisible, setSheetVisible] = useState(false);
   const wasOpenRef = useRef(false);
+  /** Default true: show Media until a successful fetch proves there are no sources (plan). On API error, stay true. */
+  const [showMediaInLauncher, setShowMediaInLauncher] = useState(true);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const src = await getMediaSources();
+        if (cancelled) return;
+        const filtered = filterActiveConfiguredSources(src.sources);
+        setShowMediaInLauncher(filtered.length > 0);
+      } catch {
+        if (!cancelled) setShowMediaInLauncher(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  const launcherSections = useMemo(
+    () => SECTIONS.filter((item) => item.key !== 'media' || showMediaInLauncher),
+    [showMediaInLauncher]
+  );
 
   useEffect(() => {
     if (open) {
@@ -106,7 +132,7 @@ export function AppLauncherSheet() {
             {
               backgroundColor: c.background,
               paddingBottom: Math.max(insets.bottom, 12),
-              maxHeight: SHEET_MAX,
+              height: SHEET_MAX,
               transform: [{ translateY: slide }],
             },
           ]}
@@ -116,12 +142,13 @@ export function AppLauncherSheet() {
           </Pressable>
           <Text style={[styles.sheetTitle, { color: c.textSecondary }]}>Go to</Text>
           <FlatList
-            data={SECTIONS}
+            style={styles.list}
+            data={launcherSections}
             keyExtractor={(i) => i.key}
             numColumns={2}
             columnWrapperStyle={styles.rowWrap}
-            scrollEnabled={false}
             renderItem={renderItem}
+            initialNumToRender={8}
           />
         </Animated.View>
       </View>
@@ -158,6 +185,9 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginBottom: 12,
     textAlign: 'center',
+  },
+  list: {
+    flex: 1,
   },
   rowWrap: {
     gap: 12,

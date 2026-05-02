@@ -1,21 +1,34 @@
-import { buildReaderHtml } from './readerHtml';
+import * as FileSystem from 'expo-file-system';
+import { buildReaderHtmlFromUri } from './readerHtml';
 
-/**
- * Builds self-contained reader HTML (embedded EPUB base64) for WebView `source={{ html }}`.
- */
-export function prepareReaderSession(epubBytes: ArrayBuffer): { sourceHtml: string } {
-  const b64 = arrayBufferToBase64(epubBytes);
-  const html = buildReaderHtml(b64);
-  return { sourceHtml: html };
+function digestFromEpubUri(epubUri: string): string {
+  const m = epubUri.match(/\/([^/]+)\.epub$/);
+  if (!m) {
+    throw new Error('Invalid EPUB URI (expected .../<digest>.epub)');
+  }
+  return m[1];
 }
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    const sub = bytes.subarray(i, i + chunk);
-    binary += String.fromCharCode.apply(null, Array.from(sub) as unknown as number[]);
+function epubDirFromUri(epubUri: string): string {
+  const idx = epubUri.lastIndexOf('/');
+  if (idx < 0) {
+    throw new Error('Invalid EPUB URI');
   }
-  return btoa(binary);
+  return epubUri.slice(0, idx + 1);
+}
+
+/**
+ * Writes a small self-contained reader HTML next to the EPUB and returns its `file://` URI for WebView `source={{ uri }}`.
+ * The EPUB is loaded inside the WebView via `fetch()` relative to that HTML file (same directory as the `.epub`).
+ */
+export async function prepareReaderSession(
+  epubUri: string
+): Promise<{ sourceUri: string; allowingReadAccessToURL: string }> {
+  const digest = digestFromEpubUri(epubUri);
+  const dir = epubDirFromUri(epubUri);
+  const htmlPath = `${dir}ebook_reader_${digest}.html`;
+  const relativeEpub = `./${digest}.epub`;
+  const html = buildReaderHtmlFromUri(relativeEpub);
+  await FileSystem.writeAsStringAsync(htmlPath, html, { encoding: FileSystem.EncodingType.UTF8 });
+  return { sourceUri: htmlPath, allowingReadAccessToURL: dir };
 }

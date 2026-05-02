@@ -253,6 +253,7 @@ async def emby_show_episodes(
 class PlaybackInfoBody(BaseModel):
     max_streaming_bitrate: int = Field(default=140_000_000)
     start_time_ticks: int = 0
+    device_profile: Optional[Dict[str, Any]] = None
 
 
 @router.post("/api/emby/items/{item_id}/playback-info")
@@ -263,13 +264,15 @@ async def emby_playback_info(
 ):
     client = await _emby_client_for_user(current_user.user_id)
     b = body or PlaybackInfoBody()
-    payload = {
+    payload: Dict[str, Any] = {
         "MaxStreamingBitrate": b.max_streaming_bitrate,
         "StartTimeTicks": b.start_time_ticks,
         "EnableDirectPlay": True,
         "EnableDirectStream": True,
         "EnableTranscoding": True,
     }
+    if b.device_profile is not None:
+        payload["DeviceProfile"] = b.device_profile
     return await client.post_playback_info(item_id, payload)
 
 

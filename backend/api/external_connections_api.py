@@ -59,6 +59,14 @@ class SlackConnectRequest(BaseModel):
     app_token: str  # xapp-... for Socket Mode
 
 
+class TeamsConnectRequest(BaseModel):
+    """Azure Bot / Microsoft Teams: App ID + client secret (Bot Framework token scope)."""
+
+    app_id: str
+    app_password: str
+    tenant_id: str = "common"
+
+
 class SMSConnectRequest(BaseModel):
     account_sid: str
     auth_token: str
@@ -732,6 +740,25 @@ async def _validate_slack_token(bot_token: str) -> str:
     return data.get("user", "") or ""
 
 
+async def _validate_teams_credentials(app_id: str, app_password: str, tenant_id: str) -> None:
+    """Validate Microsoft App ID + secret by requesting a Bot Framework access token."""
+    tid = (tenant_id or "common").strip() or "common"
+    token_url = f"https://login.microsoftonline.com/{tid}/oauth2/v2.0/token"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            token_url,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": app_id.strip(),
+                "client_secret": app_password.strip(),
+                "scope": "https://api.botframework.com/.default",
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+    if resp.status_code != 200:
+        raise ValueError(resp.text[:500] or f"HTTP {resp.status_code}")
+
+
 @router.post("/connections/telegram")
 async def connect_telegram_bot(
     body: TelegramConnectRequest,
@@ -850,6 +877,55 @@ async def connect_slack_bot(
         if not result.get("success") and result.get("error"):
             logger.warning("Connections-service RegisterBot failed: %s", result.get("error"))
     return {"connection_id": conn_id, "bot_username": bot_username}
+
+
+@router.post("/connections/teams")
+async def connect_teams_bot(
+    body: TeamsConnectRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Register a Microsoft Teams bot (Azure Bot Framework App ID + client secret)."""
+    app_id = (body.app_id or "").strip()
+    app_password = (body.app_password or "").strip()
+    tenant_id = (body.tenant_id or "common").strip() or "common"
+    if not app_id or not app_password:
+        raise HTTPException(status_code=400, detail="app_id and app_password are required")
+    try:
+        await _validate_teams_credentials(app_id, app_password, tenant_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid Teams / Bot Framework credentials: {e}")
+    config = {"app_password": app_password, "tenant_id": tenant_id}
+    conn_id = await external_connections_service.store_connection(
+        user_id=current_user.user_id,
+        provider="teams",
+        connection_type="chat_bot",
+        account_identifier=app_id,
+        access_token=app_id,
+        refresh_token=app_id,
+        expires_in=365 * 24 * 3600,
+        scopes=["bot"],
+        display_name=app_id,
+        provider_metadata=config,
+    )
+    token = await external_connections_service.get_valid_access_token(conn_id)
+    if token:
+        from clients.connections_service_client import get_connections_service_client
+
+        client = await get_connections_service_client()
+        result = await client.register_bot(
+            connection_id=conn_id,
+            user_id=current_user.user_id,
+            provider="teams",
+            bot_token=token,
+            display_name=app_id,
+            config=config,
+        )
+        if not result.get("success") and result.get("error"):
+            logger.warning("Connections-service RegisterBot failed: %s", result.get("error"))
+    base = (settings.SITE_URL or "").rstrip("/")
+    webhook_path = f"/teams/webhook/{conn_id}"
+    webhook_url = f"{base}{webhook_path}" if base else webhook_path
+    return {"connection_id": conn_id, "bot_username": app_id, "webhook_url": webhook_url}
 
 
 @router.post("/connections/sms")

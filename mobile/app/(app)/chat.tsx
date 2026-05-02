@@ -19,7 +19,6 @@ import {
 import Markdown from 'react-native-markdown-display';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import {
-  addUserMessage,
   createConversation,
   getConversationMessages,
   listConversations,
@@ -29,10 +28,11 @@ import {
 import { setActiveConversationForNotifications } from '../../src/session/activeConversationRef';
 import { getEnabledModels, getModelRoles, setUserChatModelRole, type EnabledModel } from '../../src/api/models';
 import { streamOrchestrator } from '../../src/api/orchestratorStream';
+import { useModalSheetBottomPadding } from '../../src/components/ScreenShell';
 
 dayjs.extend(relativeTime);
 
-type Row = { id: string; role: string; content: string };
+type Row = { id: string; role: string; content: string; statusText?: string };
 
 const DOC_SNIPPET_MAX = 12_000;
 
@@ -72,15 +72,21 @@ function shortModelLabel(modelId: string): string {
 function buildActiveEditor(
   documentId: string,
   title: string,
-  snippet: string
+  snippet: string,
+  frontmatter: Record<string, unknown> = {}
 ): Record<string, unknown> {
+  const filename = title.match(/\.(md|org|txt|pdf|docx|srt|vtt)$/i) ? title : `${title}.md`;
   return {
     is_editable: false,
-    filename: title,
+    filename,
     language: 'markdown',
     content: snippet,
     content_length: snippet.length,
-    frontmatter: { document_id: documentId, source: 'bastion-mobile' },
+    document_id: documentId,
+    cursor_offset: -1,
+    selection_start: -1,
+    selection_end: -1,
+    frontmatter: { document_id: documentId, source: 'bastion-mobile', ...frontmatter },
   };
 }
 
@@ -93,6 +99,8 @@ export default function BastionChatScreen() {
     docSnippet?: string;
     /** Present when opening from document FAB so each open gets a fresh conversation. */
     docSession?: string;
+    /** JSON-serialized Record from document YAML frontmatter (FAB flow). */
+    docFrontmatter?: string;
     conversationId?: string;
   }>();
 
@@ -109,11 +117,13 @@ export default function BastionChatScreen() {
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [enabledModels, setEnabledModels] = useState<EnabledModel[]>([]);
   const [selectedModelId, setSelectedModelId] = useState<string>('');
+  const modalSheetBottomPad = useModalSheetBottomPadding(16);
 
   const [docContext, setDocContext] = useState<{
     documentId: string;
     title: string;
     snippet: string;
+    frontmatter: Record<string, unknown>;
   } | null>(null);
   const docBootstrapRef = useRef<string | null>(null);
 
@@ -139,14 +149,6 @@ export default function BastionChatScreen() {
       }
     })();
   }, [loadConversations]);
-
-  useEffect(() => {
-    const fromRoute =
-      typeof params.conversationId === 'string' ? params.conversationId.trim() : '';
-    if (fromRoute) {
-      setConversationId(fromRoute);
-    }
-  }, [params.conversationId]);
 
   useEffect(() => {
     setActiveConversationForNotifications(conversationId);
@@ -186,12 +188,17 @@ export default function BastionChatScreen() {
   }, []);
 
   useEffect(() => {
-    if (conversationId) {
-      void loadMessages(conversationId);
-    } else {
-      setRows([]);
+    if (!conversationId) setRows([]);
+  }, [conversationId]);
+
+  useEffect(() => {
+    const fromRoute =
+      typeof params.conversationId === 'string' ? params.conversationId.trim() : '';
+    if (fromRoute) {
+      setConversationId(fromRoute);
+      void loadMessages(fromRoute);
     }
-  }, [conversationId, loadMessages]);
+  }, [params.conversationId, loadMessages]);
 
   const recentConversations = useMemo(() => {
     const list = [...conversations];
@@ -209,24 +216,25 @@ export default function BastionChatScreen() {
     const docSession = typeof params.docSession === 'string' ? params.docSession.trim() : '';
     const rawSnippet = typeof params.docSnippet === 'string' ? params.docSnippet : '';
     if (!docId || !docTitle || !docSession) return;
+
+    const fmRaw = typeof params.docFrontmatter === 'string' ? params.docFrontmatter.trim() : '';
+    let parsedFm: Record<string, unknown> = {};
+    if (fmRaw) {
+      try {
+        const o = JSON.parse(fmRaw) as unknown;
+        if (o && typeof o === 'object' && !Array.isArray(o)) {
+          parsedFm = o as Record<string, unknown>;
+        }
+      } catch {
+        /* ignore invalid JSON */
+      }
+    }
     const bootKey = `${docId}:${docSession}`;
     if (docBootstrapRef.current === bootKey) return;
     docBootstrapRef.current = bootKey;
     const snippet = rawSnippet.slice(0, DOC_SNIPPET_MAX);
-    setDocContext({ documentId: docId, title: docTitle, snippet });
-    void (async () => {
-      const res = await createConversation({
-        title: `Document: ${docTitle}`,
-        initial_message: null,
-      });
-      const id = res.conversation?.conversation_id;
-      if (id) {
-        setConversationId(id);
-        await loadConversations();
-        await loadMessages(id);
-      }
-    })();
-  }, [params.docId, params.docTitle, params.docSnippet, params.docSession, loadConversations, loadMessages]);
+    setDocContext({ documentId: docId, title: docTitle, snippet, frontmatter: parsedFm });
+  }, [params.docId, params.docTitle, params.docSnippet, params.docSession, params.docFrontmatter]);
 
   function clearDocRouteParams() {
     router.setParams({
@@ -234,6 +242,7 @@ export default function BastionChatScreen() {
       docTitle: '',
       docSnippet: '',
       docSession: '',
+      docFrontmatter: '',
     });
   }
 
@@ -264,7 +273,12 @@ export default function BastionChatScreen() {
 
   const activeEditorPayload = useMemo(() => {
     if (!docContext) return null;
-    return buildActiveEditor(docContext.documentId, docContext.title, docContext.snippet);
+    return buildActiveEditor(
+      docContext.documentId,
+      docContext.title,
+      docContext.snippet,
+      docContext.frontmatter
+    );
   }, [docContext]);
 
   async function onSend() {
@@ -272,18 +286,21 @@ export default function BastionChatScreen() {
     if (!q || streaming) return;
     setInput('');
     let cid = conversationId;
+
     if (!cid) {
-      const res = await createConversation({ title: null, initial_message: q });
-      cid = res.conversation?.conversation_id ?? null;
+      const title = docContext ? `Document: ${docContext.title}` : null;
+      try {
+        const res = await createConversation({ title, initial_message: null });
+        cid = res.conversation?.conversation_id ?? null;
+      } catch {
+        return;
+      }
       if (!cid) return;
       setConversationId(cid);
-      await loadConversations();
-      await loadMessages(cid);
-    } else {
-      await addUserMessage(cid, q);
-      setRows((prev) => [...prev, { id: `local-${Date.now()}`, role: 'user', content: q }]);
+      void loadConversations();
     }
 
+    setRows((prev) => [...prev, { id: `local-${Date.now()}`, role: 'user', content: q }]);
     const assistantId = `asst-${Date.now()}`;
     setRows((prev) => [...prev, { id: assistantId, role: 'assistant', content: '' }]);
     setStreaming(true);
@@ -301,16 +318,33 @@ export default function BastionChatScreen() {
         editor_preference: activeEditorPayload ? 'prefer' : undefined,
         signal: abortRef.current.signal,
         onChunk: (chunk) => {
+          if (chunk.type === 'status') {
+            const msg = String(chunk.message || chunk.content || '').trim();
+            if (msg && !acc) {
+              setRows((prev) =>
+                prev.map((r) => (r.id === assistantId ? { ...r, statusText: msg } : r))
+              );
+            }
+          }
           if (chunk.type === 'content' && typeof chunk.content === 'string') {
             acc += chunk.content;
             setRows((prev) =>
-              prev.map((r) => (r.id === assistantId ? { ...r, content: acc } : r))
+              prev.map((r) =>
+                r.id === assistantId ? { ...r, content: acc, statusText: undefined } : r
+              )
             );
           }
-          if (chunk.type === 'complete' && typeof chunk.content === 'string') {
-            acc += chunk.content;
+          if (
+            chunk.type === 'complete' &&
+            typeof chunk.content === 'string' &&
+            chunk.content &&
+            !acc
+          ) {
+            acc = chunk.content;
             setRows((prev) =>
-              prev.map((r) => (r.id === assistantId ? { ...r, content: acc } : r))
+              prev.map((r) =>
+                r.id === assistantId ? { ...r, content: acc, statusText: undefined } : r
+              )
             );
           }
         },
@@ -318,12 +352,14 @@ export default function BastionChatScreen() {
     } catch {
       setRows((prev) =>
         prev.map((r) =>
-          r.id === assistantId ? { ...r, content: r.content || '(Stream failed)' } : r
+          r.id === assistantId
+            ? { ...r, content: r.content || '(Stream failed)', statusText: undefined }
+            : r
         )
       );
     } finally {
       setStreaming(false);
-      if (cid) void loadMessages(cid);
+      if (cid && !acc) void loadMessages(cid);
     }
   }
 
@@ -392,9 +428,13 @@ export default function BastionChatScreen() {
             ]}
           >
             {item.role === 'assistant' ? (
-              <Markdown style={assistantMarkdownStyles}>
-                {item.content.trim() ? item.content : '\u00a0'}
-              </Markdown>
+              item.content.trim() ? (
+                <Markdown style={assistantMarkdownStyles}>{item.content}</Markdown>
+              ) : item.statusText ? (
+                <Text style={styles.statusText}>{item.statusText}</Text>
+              ) : (
+                <Text style={assistantMarkdownStyles.body}>{'\u00a0'}</Text>
+              )
             ) : (
               <Text style={[styles.msg, styles.msgUser]}>{item.content}</Text>
             )}
@@ -426,7 +466,10 @@ export default function BastionChatScreen() {
 
       <Modal visible={historyOpen} animationType="slide" transparent onRequestClose={() => setHistoryOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setHistoryOpen(false)}>
-          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+          <Pressable
+            style={[styles.sheet, { paddingBottom: modalSheetBottomPad }]}
+            onPress={(e) => e.stopPropagation()}
+          >
             <Text style={styles.sheetTitle}>Recent chats</Text>
             <FlatList
               data={recentConversations}
@@ -456,7 +499,10 @@ export default function BastionChatScreen() {
 
       <Modal visible={modelPickerOpen} animationType="fade" transparent onRequestClose={() => setModelPickerOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setModelPickerOpen(false)}>
-          <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
+          <Pressable
+            style={[styles.sheet, { paddingBottom: modalSheetBottomPad }]}
+            onPress={(e) => e.stopPropagation()}
+          >
             <Text style={styles.sheetTitle}>Chat model</Text>
             <ScrollView style={styles.sheetList} keyboardShouldPersistTaps="handled">
               {enabledModels.length === 0 ? (
@@ -533,6 +579,7 @@ const styles = StyleSheet.create({
   bubbleAsst: { alignSelf: 'flex-start', backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd' },
   msg: { fontSize: 15, color: '#111' },
   msgUser: { color: '#fff' },
+  statusText: { fontSize: 14, color: '#888', fontStyle: 'italic' },
   composer: { flexDirection: 'row', padding: 8, alignItems: 'flex-end', borderTopWidth: 1, borderColor: '#ddd', gap: 8 },
   headerModelBtn: {
     flexDirection: 'row',
@@ -573,7 +620,6 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 16,
     borderTopRightRadius: 16,
     maxHeight: '55%',
-    paddingBottom: 16,
   },
   sheetTitle: { fontSize: 18, fontWeight: '700', padding: 16, borderBottomWidth: 1, borderColor: '#eee' },
   sheetList: { maxHeight: 320 },

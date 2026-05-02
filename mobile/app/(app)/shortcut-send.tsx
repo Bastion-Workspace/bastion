@@ -2,6 +2,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import { quickSendToDefaultAgent, QUICK_SEND_MAX_MESSAGE_CHARS } from '../../src/api/quickSend';
+import { ScreenShell } from '../../src/components/ScreenShell';
 
 type SendStatus = 'sending' | 'done' | 'error';
 
@@ -63,6 +64,7 @@ export default function ShortcutSendScreen() {
   }, [params.m, router]);
 
   return (
+    <ScreenShell>
     <View style={styles.container}>
       {status === 'sending' ? (
         <>
@@ -85,6 +87,7 @@ export default function ShortcutSendScreen() {
         </>
       ) : null}
     </View>
+    </ScreenShell>
   );
 }
 

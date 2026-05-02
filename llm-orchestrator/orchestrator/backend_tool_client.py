@@ -1064,7 +1064,8 @@ class BackendToolClient:
         document_id: str,
         operations: List[Dict[str, Any]],
         user_id: str = "system",
-        agent_name: str = "unknown"
+        agent_name: str = "unknown",
+        playbook_auto_apply: bool = False,
     ) -> Dict[str, Any]:
         """
         Apply operations directly to a document (for authorized agents only)
@@ -1074,6 +1075,7 @@ class BackendToolClient:
             operations: List of EditorOperation dicts to apply
             user_id: User ID (required - must match document owner)
             agent_name: Name of agent requesting this operation (for security check)
+            playbook_auto_apply: When True, document-service resolves semantic ops and skips allowlist.
         
         Returns:
             Dict with success, document_id, applied_count, and message
@@ -1111,7 +1113,8 @@ class BackendToolClient:
                 user_id=user_id,
                 document_id=document_id,
                 operations=operations_proto,
-                agent_name=agent_name
+                agent_name=agent_name,
+                playbook_auto_apply=playbook_auto_apply,
             )
             
             response = await self._doc_stub.ApplyOperationsDirectly(request)

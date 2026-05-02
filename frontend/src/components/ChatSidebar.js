@@ -17,7 +17,9 @@ import {
   ChevronRight,
   History,
   Close,
-  FileDownload,
+  PictureAsPdf,
+  Description,
+  Article,
   Fullscreen,
   FullscreenExit,
   Edit,
@@ -28,6 +30,7 @@ import {
   Add,
 } from '@mui/icons-material';
 import ChatMessagesArea from './chat/ChatMessagesArea';
+import ExportOptionsDialog from './chat/ExportOptionsDialog';
 import ChatInputArea from './chat/ChatInputArea';
 import ArtifactDrawerPanel from './chat/ArtifactDrawerPanel';
 import { artifactTypeIcon } from './chat/artifactTypeIcons';
@@ -80,6 +83,7 @@ const ChatSidebar = () => {
 
   const [historyWindowOpen, setHistoryWindowOpen] = useState(false);
   const [moreMenuAnchor, setMoreMenuAnchor] = useState(null);
+  const [conversationDocxDialogOpen, setConversationDocxDialogOpen] = useState(false);
   const [tempWidth, setTempWidth] = useState(sidebarWidth); // Local state for resize
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(320);
   const [isArtifactResizing, setIsArtifactResizing] = useState(false);
@@ -377,18 +381,19 @@ const ChatSidebar = () => {
     setIsArtifactResizing(true);
   }, [artifactPanelWidth]);
 
-  const handleExportConversation = async () => {
+  const buildConversationForExport = useCallback(() => {
     if (!currentConversationId || !conversationData?.conversation) {
-      console.warn('No conversation to export');
-      return;
+      return null;
     }
-
-    try {
-      await exportService.exportConversation(conversationData.conversation, 'pdf');
-    } catch (error) {
-      console.error('Failed to export conversation:', error);
-    }
-  };
+    return {
+      ...conversationData.conversation,
+      messages: (messages || []).map((m) => ({
+        role: m.role || m.message_type || 'assistant',
+        content: m.content || '',
+        timestamp: m.timestamp || m.created_at,
+      })),
+    };
+  }, [currentConversationId, conversationData, messages]);
 
   const closeMoreMenu = () => setMoreMenuAnchor(null);
 
@@ -397,9 +402,48 @@ const ChatSidebar = () => {
     chatMessagesAreaRef.current?.openConversationSearch?.();
   };
 
-  const handleMoreExport = () => {
+  const handleMoreExportPdf = () => {
     closeMoreMenu();
-    handleExportConversation();
+    const conv = buildConversationForExport();
+    if (!conv) {
+      console.warn('No conversation to export');
+      return;
+    }
+    exportService.exportConversation(conv, 'pdf').catch((error) => {
+      console.error('Failed to export conversation:', error);
+    });
+  };
+
+  const handleMoreExportDocx = () => {
+    closeMoreMenu();
+    if (!buildConversationForExport()) {
+      console.warn('No conversation to export');
+      return;
+    }
+    setConversationDocxDialogOpen(true);
+  };
+
+  const handleConfirmConversationDocx = async (options) => {
+    setConversationDocxDialogOpen(false);
+    const conv = buildConversationForExport();
+    if (!conv) return;
+    try {
+      await exportService.exportConversation(conv, 'docx', options);
+    } catch (error) {
+      console.error('Failed to export conversation:', error);
+    }
+  };
+
+  const handleMoreExportMarkdown = () => {
+    closeMoreMenu();
+    const conv = buildConversationForExport();
+    if (!conv) {
+      console.warn('No conversation to export');
+      return;
+    }
+    exportService.exportConversationAsMarkdown(conv).catch((error) => {
+      console.error('Failed to export conversation:', error);
+    });
   };
 
   const handleMoreFullWidth = () => {
@@ -560,11 +604,23 @@ const ChatSidebar = () => {
               </ListItemIcon>
               <ListItemText>Find in chat</ListItemText>
             </MenuItem>
-            <MenuItem onClick={handleMoreExport} disabled={!currentConversationId} dense>
+            <MenuItem onClick={handleMoreExportPdf} disabled={!currentConversationId} dense>
               <ListItemIcon sx={{ minWidth: 36 }}>
-                <FileDownload fontSize="small" />
+                <PictureAsPdf fontSize="small" />
               </ListItemIcon>
-              <ListItemText>Export conversation</ListItemText>
+              <ListItemText>Export as PDF</ListItemText>
+            </MenuItem>
+            <MenuItem onClick={handleMoreExportDocx} disabled={!currentConversationId} dense>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Description fontSize="small" />
+              </ListItemIcon>
+              <ListItemText>Export as DOCX...</ListItemText>
+            </MenuItem>
+            <MenuItem onClick={handleMoreExportMarkdown} disabled={!currentConversationId} dense>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Article fontSize="small" />
+              </ListItemIcon>
+              <ListItemText>Export as Markdown</ListItemText>
             </MenuItem>
             <MenuItem onClick={handleMoreFullWidth} dense>
               <ListItemIcon sx={{ minWidth: 36 }}>
@@ -733,6 +789,13 @@ const ChatSidebar = () => {
           transformOrigin={{ vertical: 'top', horizontal: 'right' }}
         />
       )}
+
+      <ExportOptionsDialog
+        open={conversationDocxDialogOpen}
+        title="Conversation DOCX export"
+        onClose={() => setConversationDocxDialogOpen(false)}
+        onConfirm={handleConfirmConversationDocx}
+      />
     </Box>
   );
 };

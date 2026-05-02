@@ -7,6 +7,7 @@ type Props = {
   entry: OpdsFeedEntry;
   baseUrl: string;
   scheme: 'light' | 'dark' | null | undefined;
+  acquisitionFormat?: 'epub' | 'pdf';
   onPressAcquisition?: () => void;
   onPressNavigation?: () => void;
   disabled?: boolean;
@@ -16,6 +17,7 @@ export function BookCard({
   entry,
   baseUrl,
   scheme,
+  acquisitionFormat,
   onPressAcquisition,
   onPressNavigation,
   disabled,
@@ -51,7 +53,9 @@ export function BookCard({
         {hasNav && !hasAcq ? (
           <Text style={[styles.hint, { color: c.textSecondary }]}>Folder</Text>
         ) : hasAcq ? (
-          <Text style={[styles.hint, { color: c.textSecondary }]}>EPUB</Text>
+          <Text style={[styles.hint, { color: c.textSecondary }]}>
+            {acquisitionFormat === 'pdf' ? 'PDF' : 'EPUB'}
+          </Text>
         ) : null}
       </View>
     </Pressable>

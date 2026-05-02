@@ -36,8 +36,8 @@ class EmbyService extends ApiServiceBase {
       `/api/emby/shows/${encodeURIComponent(seriesId)}/episodes?season_id=${encodeURIComponent(seasonId)}`
     );
 
-  getPlaybackInfo = (itemId, body = null) =>
-    this.post(`/api/emby/items/${encodeURIComponent(itemId)}/playback-info`, body || {});
+  getPlaybackInfo = (itemId, body = {}) =>
+    this.post(`/api/emby/items/${encodeURIComponent(itemId)}/playback-info`, body);
 
   getVideoStreamUrl = (itemId, mediaSourceId, playSessionId, extra = {}) => {
     const apiBase = (this.baseURL || '').replace(/\/$/, '');

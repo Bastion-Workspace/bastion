@@ -8,17 +8,23 @@ export type EpubReaderCommand =
   | { type: 'PREV' }
   | { type: 'NEXT' }
   | { type: 'GOTO_CFI'; cfi: string }
-  | { type: 'SET_THEME'; theme: ReaderTheme; fontSize?: number }
-  | { type: 'SET_FONT_SIZE'; fontSize: number; theme?: ReaderTheme }
+  | { type: 'SET_THEME'; theme: ReaderTheme; fontSize?: number; fontFamily?: string }
+  | { type: 'SET_FONT_SIZE'; fontSize: number; theme?: ReaderTheme; fontFamily?: string }
   | { type: 'SEEK_PERCENT'; pct: number };
 
 export type WebToNativeMessage =
   | { type: 'READY' }
   | { type: 'RELOCATED'; cfi: string; percentage: number }
-  | { type: 'ERROR'; message: string };
+  | { type: 'ERROR'; message: string }
+  | { type: 'OPEN_CHROME' };
 
 type Props = {
-  sourceHtml: string;
+  /** Inline reader document (preferred; avoids Android WebView file-scheme fetch restrictions). */
+  html?: string;
+  /** Legacy: load reader from a file HTML path (uses fetch for the sibling .epub). */
+  sourceUri?: string;
+  /** iOS WKWebView: directory containing the reader HTML and EPUB when using sourceUri. */
+  allowingReadAccessToURL?: string;
   onMessage: (msg: WebToNativeMessage) => void;
 };
 
@@ -30,7 +36,7 @@ export const EpubReaderWebView = forwardRef<EpubReaderWebViewHandle, Props>(func
   props: Props,
   ref
 ) {
-  const { sourceHtml, onMessage } = props;
+  const { html, sourceUri, allowingReadAccessToURL, onMessage } = props;
   const webRef = useRef<WebView | null>(null);
 
   const sendCommand = useCallback((cmd: EpubReaderCommand) => {
@@ -58,12 +64,18 @@ export const EpubReaderWebView = forwardRef<EpubReaderWebViewHandle, Props>(func
 
   const originWhitelist = useMemo(() => ['*'], []);
 
+  const iosReadAccess =
+    !html && allowingReadAccessToURL ? { allowingReadAccessToURL: allowingReadAccessToURL as string } : {};
+
   return (
     <WebView
       ref={webRef}
       style={styles.web}
-      source={{ html: sourceHtml, baseUrl: '' }}
+      source={html ? { html } : sourceUri ? { uri: sourceUri } : { html: '' }}
       originWhitelist={originWhitelist}
+      allowFileAccess
+      allowFileAccessFromFileURLs={Boolean(sourceUri && !html)}
+      {...(iosReadAccess as object)}
       onMessage={onWebMessage}
       javaScriptEnabled
       domStorageEnabled

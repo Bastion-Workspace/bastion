@@ -316,13 +316,14 @@ const SettingsPage = () => {
   const { data: userModelRolesData, refetch: refetchUserModelRoles } = useQuery(
     'userModelRoles',
     () => apiService.getUserModelRoles(),
-    { enabled: useOwnProviders, staleTime: 60000 }
+    { staleTime: 60000 }
   );
   const userModelRoles = userModelRolesData || {
     user_chat_model: '',
     user_fast_model: '',
     user_image_gen_model: '',
     user_image_analysis_model: '',
+    send_while_streaming_behavior: 'queue',
   };
 
   const setUserModelRolesMutation = useMutation(
@@ -335,7 +336,11 @@ const SettingsPage = () => {
   );
 
   const handleUserModelRoleChange = (key, value) => {
-    setUserModelRolesMutation.mutate({ ...userModelRoles, [key]: value || '' });
+    const next =
+      key === 'send_while_streaming_behavior'
+        ? { ...userModelRoles, [key]: value }
+        : { ...userModelRoles, [key]: value || '' };
+    setUserModelRolesMutation.mutate(next);
   };
 
   // Fetch enabled models from backend
@@ -2777,6 +2782,50 @@ const SettingsPage = () => {
 
         <Grid item xs={12}>
           <UserVoiceProviders />
+        </Grid>
+
+        <Grid item xs={12}>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.04 }}
+          >
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Psychology sx={{ mr: 1 }} />
+                  While the AI is responding
+                </Typography>
+                <Typography variant="body2" color="text.secondary" gutterBottom>
+                  If you type another message and send before the current reply finishes, choose what happens.
+                </Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  fullWidth
+                  size="small"
+                  value={userModelRoles.send_while_streaming_behavior === 'stop_and_send' ? 'stop_and_send' : 'queue'}
+                  onChange={(_, v) => {
+                    if (v != null) {
+                      handleUserModelRoleChange('send_while_streaming_behavior', v);
+                    }
+                  }}
+                  disabled={setUserModelRolesMutation.isLoading}
+                  sx={{ mt: 2 }}
+                >
+                  <ToggleButton value="queue">
+                    Queue next message
+                  </ToggleButton>
+                  <ToggleButton value="stop_and_send">
+                    Stop and send now
+                  </ToggleButton>
+                </ToggleButtonGroup>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1.5 }}>
+                  Queue waits for the current stream to end, then sends. Stop and send cancels the in-flight reply
+                  and sends your new message (checkpoints for that turn are cleared on stop).
+                </Typography>
+              </CardContent>
+            </Card>
+          </motion.div>
         </Grid>
 
         {/* Global model status (admin): reflects shared settings table, not per-user chat/sidebar choice */}

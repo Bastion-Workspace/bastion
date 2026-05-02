@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useMemo } from 'react';
 import { Pressable, StyleSheet, Text, View, useColorScheme } from 'react-native';
+import { useSegments } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DOCK_CONTENT_HEIGHT } from '../constants/dock';
 import { useAppLauncher } from '../context/AppLauncherContext';
@@ -9,12 +10,30 @@ import { getColors } from '../theme/colors';
 import { useVoiceModal } from '../voice/VoiceModalContext';
 
 export function BottomDock() {
+  const segments = useSegments();
   const insets = useSafeAreaInsets();
   const { openLauncher } = useAppLauncher();
   const { openVoice } = useVoiceModal();
   const { label, icon } = useActiveRoute();
   const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
   const c = useMemo(() => getColors(scheme), [scheme]);
+
+  const panePillStyle = useMemo(
+    () => ({
+      backgroundColor: scheme === 'dark' ? c.surfaceMuted : c.chipBg,
+      borderColor: scheme === 'dark' ? 'rgba(255,255,255,0.14)' : 'rgba(0,0,0,0.1)',
+      shadowColor: '#000',
+      shadowOpacity: scheme === 'dark' ? 0.42 : 0.16,
+      shadowRadius: scheme === 'dark' ? 8 : 7,
+      shadowOffset: { width: 0, height: 2 } as const,
+      elevation: scheme === 'dark' ? 6 : 5,
+    }),
+    [c.chipBg, c.surfaceMuted, scheme]
+  );
+
+  if (segments.includes('video')) {
+    return null;
+  }
 
   return (
     <View
@@ -31,7 +50,7 @@ export function BottomDock() {
     >
       <View style={styles.row}>
         <Pressable
-          style={[styles.leftPill, { backgroundColor: c.chipBg }]}
+          style={[styles.leftPill, panePillStyle]}
           onPress={openLauncher}
           accessibilityRole="button"
           accessibilityLabel={`Open app launcher. Current section: ${label}`}
@@ -62,24 +81,25 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'space-between',
     gap: 10,
     paddingHorizontal: 14,
     minHeight: DOCK_CONTENT_HEIGHT,
   },
   leftPill: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    maxWidth: '78%',
     gap: 10,
-    minWidth: 0,
     paddingVertical: 8,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     borderRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth * 2,
   },
   label: {
     fontSize: 16,
     fontWeight: '600',
-    flex: 1,
+    flexShrink: 1,
   },
   micBtn: {
     width: 44,

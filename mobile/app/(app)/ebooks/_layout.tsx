@@ -10,7 +10,10 @@ export default function EbooksLayout() {
     >
       <Stack.Screen name="index" options={{ title: 'eBooks' }} />
       <Stack.Screen name="settings" options={{ title: 'eBooks & OPDS' }} />
-      <Stack.Screen name="reader" options={{ headerShown: false, title: 'Reader' }} />
+      <Stack.Screen
+        name="reader"
+        options={{ headerShown: false, title: 'Reader', gestureEnabled: false }}
+      />
     </Stack>
   );
 }

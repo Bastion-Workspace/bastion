@@ -19,7 +19,7 @@ CRITICAL_SUBTYPES = frozenset(
     {"approval_required", "budget_exceeded", "shell_command_approval"}
 )
 
-DEFAULT_CASCADE = ["push", "telegram", "discord", "slack", "email"]
+DEFAULT_CASCADE = ["push", "telegram", "discord", "slack", "teams", "email"]
 
 
 async def _log_notification(
@@ -202,6 +202,30 @@ async def _channel_slack(ctx: ChannelContext) -> bool:
         return False
 
 
+async def _channel_teams(ctx: ChannelContext) -> bool:
+    if ctx.prefs.get("teams_enabled") is False:
+        return False
+    try:
+        from clients.connections_service_client import get_connections_service_client
+
+        client = await get_connections_service_client()
+        text = f"**{ctx.payload.get('title', 'Bastion')}**\n\n{ctx.payload.get('preview') or ctx.payload.get('message') or ''}"[
+            :4000
+        ]
+        result = await client.send_outbound_message(
+            user_id=ctx.user_id,
+            provider="teams",
+            connection_id="",
+            message=text,
+            format="markdown",
+            recipient_chat_id="",
+        )
+        return bool(result.get("success"))
+    except Exception as e:
+        logger.debug("teams cascade failed: %s", e)
+        return False
+
+
 async def _channel_email(ctx: ChannelContext) -> bool:
     if ctx.prefs.get("email_enabled") is False:
         return False
@@ -224,6 +248,7 @@ CHANNEL_HANDLERS: Dict[str, ChannelSendFn] = {
     "telegram": _channel_telegram,
     "discord": _channel_discord,
     "slack": _channel_slack,
+    "teams": _channel_teams,
     "email": _channel_email,
 }
 

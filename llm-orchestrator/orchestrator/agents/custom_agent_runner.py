@@ -26,6 +26,7 @@ from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.middleware.summarization_node import SummarizationNode
 from orchestrator.utils.message_sanitizer import strip_tool_actions_prefix
 from orchestrator.utils.async_invoke_timeout import invoke_with_optional_timeout
+from orchestrator.checkpointer import clear_checkpoint_thread
 
 logger = logging.getLogger(__name__)
 
@@ -1731,6 +1732,7 @@ class CustomAgentRunner(BaseAgent):
                 return self._create_error_response(f"Resume failed: {e}")
 
         checkpoint_state = None
+        config: Optional[Dict[str, Any]] = None
         try:
             workflow = await self._get_workflow()
             config = self._get_checkpoint_config(metadata)
@@ -1768,6 +1770,20 @@ class CustomAgentRunner(BaseAgent):
                 settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC,
             )
         except asyncio.CancelledError:
+            if config:
+                try:
+                    outer_thread = config.get("configurable", {}).get("thread_id")
+                    if outer_thread:
+                        await clear_checkpoint_thread(outer_thread)
+                    playbook_id = metadata.get("playbook_id")
+                    if playbook_id:
+                        await clear_checkpoint_thread(
+                            f"playbook_{user_id}_{playbook_id}"
+                        )
+                except Exception as cleanup_err:
+                    logger.warning(
+                        "Checkpoint cleanup after cancel failed: %s", cleanup_err
+                    )
             raise
         except asyncio.TimeoutError:
             cap = settings.PLAYBOOK_GRAPH_INVOKE_TIMEOUT_SEC

@@ -105,6 +105,14 @@ class BaseMusicClient(ABC):
         """
         pass
     
+    def get_cover_art_url(self, cover_art_id: str, size: int = 300) -> Optional[str]:
+        """
+        Build authenticated URL for cover art image if the service supports it.
+        
+        Returns None when unsupported (default); Subsonic overrides this.
+        """
+        return None
+    
     async def add_to_playlist(self, playlist_id: str, track_ids: List[str]) -> Dict[str, Any]:
         """
         Add tracks to a playlist (optional - implement if service supports it)
@@ -244,7 +252,9 @@ class BaseMusicClient(ABC):
             "title": raw_track.get("title") or raw_track.get("name", ""),
             "artist": raw_track.get("artist") or raw_track.get("artistName", ""),
             "album": raw_track.get("album") or raw_track.get("albumName", ""),
-            "duration": raw_track.get("duration") or raw_track.get("runtimeTicks", 0) // 10000000 if raw_track.get("runtimeTicks") else 0,
+            "duration": raw_track.get("duration") or (
+                raw_track.get("runtimeTicks", 0) // 10000000 if raw_track.get("runtimeTicks") else 0
+            ),
             "track_number": raw_track.get("track") or raw_track.get("trackNumber") or raw_track.get("IndexNumber"),
             "cover_art_id": raw_track.get("coverArt") or raw_track.get("cover_art_id") or raw_track.get("thumb", ""),
             "parent_id": parent_id,

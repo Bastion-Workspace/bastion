@@ -4,9 +4,10 @@ import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useEffect } from 'react';
-import { useColorScheme } from 'react-native';
 import * as Notifications from 'expo-notifications';
 import { AuthProvider } from '../src/context/AuthContext';
+import { useAppearancePreference } from '../src/context/AppearancePreferenceContext';
+import { RssPrefsProvider } from '../src/context/RssPrefsContext';
 import { AppearanceThemeRoot } from '../src/components/AppearanceThemeRoot';
 import { NotificationSurfaceBootstrap } from '../src/components/NotificationSurfaceBootstrap';
 import TrackPlayer from 'react-native-track-player';
@@ -34,8 +35,8 @@ function PushNavigationEffect() {
 }
 
 function RootStatusBar() {
-  const scheme = useColorScheme();
-  const isDark = scheme === 'dark';
+  const { resolvedScheme } = useAppearancePreference();
+  const isDark = resolvedScheme === 'dark';
   return <StatusBar style={isDark ? 'light' : 'dark'} />;
 }
 
@@ -43,17 +44,18 @@ export default function RootLayout() {
   return (
     <AuthProvider>
       <AppearanceThemeRoot>
-        <NotificationSurfaceBootstrap />
-        <PushNavigationEffect />
-        <SafeAreaProvider>
-          <RootStatusBar />
-          <Stack screenOptions={{ headerBackTitle: 'Back' }}>
-            <Stack.Screen name="index" options={{ headerShown: false }} />
-            <Stack.Screen name="(auth)/login" options={{ title: 'Sign in' }} />
-            <Stack.Screen name="(auth)/server" options={{ title: 'Server' }} />
-            <Stack.Screen name="(app)" options={{ headerShown: false, title: 'Bastion' }} />
-          </Stack>
-        </SafeAreaProvider>
+        <RssPrefsProvider>
+          <NotificationSurfaceBootstrap />
+          <PushNavigationEffect />
+          <SafeAreaProvider>
+            <RootStatusBar />
+            <Stack screenOptions={{ headerBackTitle: 'Back' }}>
+              <Stack.Screen name="index" options={{ headerShown: false }} />
+              <Stack.Screen name="(auth)" options={{ headerShown: false }} />
+              <Stack.Screen name="(app)" options={{ headerShown: false, title: 'Bastion' }} />
+            </Stack>
+          </SafeAreaProvider>
+        </RssPrefsProvider>
       </AppearanceThemeRoot>
     </AuthProvider>
   );

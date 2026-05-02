@@ -65,7 +65,7 @@ export default function EbooksLibraryScreen() {
   }, [navigation, router, c.text]);
 
   const openReader = useCallback(
-    (p: { catalogId: string; acquisitionUrl: string; title: string; digest?: string }) => {
+    (p: { catalogId: string; acquisitionUrl: string; title: string; digest?: string; format?: 'epub' | 'pdf' }) => {
       router.push({
         pathname: '/(app)/ebooks/reader',
         params: {
@@ -73,6 +73,7 @@ export default function EbooksLibraryScreen() {
           acquisitionUrl: p.acquisitionUrl,
           title: p.title,
           digest: p.digest || '',
+          format: p.format === 'pdf' ? 'pdf' : 'epub',
         },
       });
     },
@@ -126,6 +127,7 @@ export default function EbooksLibraryScreen() {
                       acquisitionUrl: String(r.acquisition_url),
                       title: String(r.title || 'Book'),
                       digest: r.digest ? String(r.digest) : undefined,
+                      format: r.acquisition_format === 'pdf' ? 'pdf' : 'epub',
                     });
                   }
                 }}

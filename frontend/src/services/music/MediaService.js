@@ -100,6 +100,32 @@ class MediaService extends ApiServiceBase {
     return query ? `${base}?${query}` : base;
   }
 
+  getCoverArtUrl = (coverArtId, serviceType = null, size = 300) => {
+    if (!coverArtId) return null;
+    const apiBase = (this.baseURL || '').replace(/\/$/, '');
+    const path = `/api/music/cover-art/${encodeURIComponent(coverArtId)}`;
+    const base = apiBase ? `${apiBase}${path}` : path;
+    const params = new URLSearchParams();
+    if (serviceType) params.set('service_type', serviceType);
+    if (size !== 300) params.set('size', String(size));
+    const token = typeof localStorage !== 'undefined'
+      ? (localStorage.getItem('auth_token') || localStorage.getItem('token'))
+      : null;
+    if (token) params.set('token', token);
+    const query = params.toString();
+    let url = query ? `${base}?${query}` : base;
+    // Absolute URL so <img src> resolves correctly when VITE_API_URL is empty (path-only)
+    // or when the app lives under a subpath (relative /api/... must not be ambiguous).
+    if (typeof window !== 'undefined' && url.startsWith('/')) {
+      try {
+        url = new URL(url, window.location.href).href;
+      } catch {
+        // keep path-only url
+      }
+    }
+    return url;
+  };
+
   // Playlist management
   addTracksToPlaylist = async (playlistId, trackIds, serviceType = null) => {
     let url = `/api/music/playlist/${playlistId}/add-tracks`;

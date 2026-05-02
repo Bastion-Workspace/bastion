@@ -6,13 +6,22 @@
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "ios": {
+        "image": "macos-sequoia-15.6-xcode-26.2"
+      }
     }
   },
   "submit": {

@@ -1803,6 +1803,8 @@ message ApplyOperationsDirectlyRequest {
   string document_id = 2;
   repeated EditorOperationProto operations = 3;
   string agent_name = 4;  // For security check
+  // When true, skip trusted-agent allowlist (playbook step had auto_apply and unattended trigger).
+  bool playbook_auto_apply = 5;
 }
 
 message ApplyOperationsDirectlyResponse {

@@ -9,6 +9,7 @@ import React, {
 import { getCurrentUser, login as apiLogin, logout as apiLogout } from '../api/auth';
 import { getApiBaseUrl, normalizeBastionOrigin, setRuntimeApiBaseUrl } from '../api/config';
 import { getStoredBaseUrl, setStoredBaseUrl } from '../session/baseUrlStore';
+import { clearLastAppRoute } from '../session/lastAppRouteStore';
 import { clearStoredToken, getStoredToken } from '../session/tokenStore';
 import { registerDevicePushWithServer, revokeDevicePushOnServer } from '../api/notifications';
 
@@ -56,6 +57,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch {
         setUser(null);
         await clearStoredToken();
+        await clearLastAppRoute();
         setToken(null);
       }
     } else {
@@ -76,6 +78,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setServerEpoch((n) => n + 1);
     if (normalized !== prev) {
       await clearStoredToken();
+      await clearLastAppRoute();
       setToken(null);
       setUser(null);
     }
@@ -91,6 +94,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const logout = useCallback(async () => {
     await revokeDevicePushOnServer();
     await apiLogout();
+    await clearLastAppRoute();
     setToken(null);
     setUser(null);
   }, []);

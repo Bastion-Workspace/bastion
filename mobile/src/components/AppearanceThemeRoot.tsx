@@ -5,7 +5,10 @@ import { AppearancePreferenceProvider, useAppearancePreference } from '../contex
 type Props = { children: ReactNode };
 
 function NavigationThemeBridge({ children }: Props) {
-  const { resolvedScheme } = useAppearancePreference();
+  const { resolvedScheme, hydrated } = useAppearancePreference();
+  if (!hydrated) {
+    return null;
+  }
   const theme = resolvedScheme === 'dark' ? DarkTheme : DefaultTheme;
   return <ThemeProvider value={theme}>{children}</ThemeProvider>;
 }

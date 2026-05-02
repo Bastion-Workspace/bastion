@@ -10,10 +10,12 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useColorScheme,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { ScreenShell } from '../../../src/components/ScreenShell';
 import { listUserDocuments, type DocumentInfo } from '../../../src/api/documents';
 import {
   getFolderContents,
@@ -23,6 +25,7 @@ import {
   type FolderDocumentRow,
   type FolderTreeApiResponse,
 } from '../../../src/api/folders';
+import { getColors, type AppColors } from '../../../src/theme/colors';
 
 type ScopeFilter = 'all' | 'user' | 'team' | 'global';
 
@@ -48,6 +51,104 @@ function filterRoots(roots: DocumentFolderNode[], scope: ScopeFilter): DocumentF
   return roots.filter((f) => (f.collection_type || 'user') === scope);
 }
 
+function makeListStyles(colors: AppColors) {
+  return StyleSheet.create({
+    center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+    list: { padding: 16, paddingTop: 8 },
+    listHeader: { marginBottom: 12 },
+    titleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 8,
+    },
+    screenTitle: { fontSize: 22, fontWeight: '700', color: colors.text },
+    browseIconBtn: { padding: 6 },
+    errorBanner: {
+      backgroundColor: colors.surfaceMuted,
+      color: colors.danger,
+      padding: 12,
+      borderRadius: 8,
+      fontSize: 14,
+    },
+    empty: { textAlign: 'center', marginTop: 48, color: colors.textSecondary },
+    row: {
+      backgroundColor: colors.surface,
+      padding: 14,
+      borderRadius: 8,
+      marginBottom: 10,
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    title: { fontSize: 16, fontWeight: '600', color: colors.text },
+    sub: { fontSize: 13, color: colors.textSecondary, marginTop: 4 },
+  });
+}
+
+function makeModalStyles(colors: AppColors) {
+  return StyleSheet.create({
+    modalSafe: { flex: 1, backgroundColor: colors.background },
+    modalHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingHorizontal: 8,
+      paddingVertical: 10,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
+    },
+    modalBackBtn: { padding: 4, width: 44 },
+    modalTitle: { flex: 1, fontSize: 17, fontWeight: '700', color: colors.text, textAlign: 'center' },
+    scopeScroll: { maxHeight: 48, marginBottom: 8 },
+    scopeScrollInner: { paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' },
+    scopeChip: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 20,
+      backgroundColor: colors.chipBg,
+      marginRight: 8,
+    },
+    scopeChipOn: { backgroundColor: colors.chipBgActive },
+    scopeChipText: { fontSize: 14, fontWeight: '600', color: colors.chipText },
+    scopeChipTextOn: { color: colors.chipTextActive },
+    modalError: {
+      marginHorizontal: 16,
+      marginBottom: 8,
+      padding: 12,
+      backgroundColor: colors.surfaceMuted,
+      color: colors.danger,
+      borderRadius: 8,
+      fontSize: 14,
+    },
+    modalCenter: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
+    modalList: { paddingHorizontal: 12, paddingBottom: 24 },
+    modalEmpty: { textAlign: 'center', marginTop: 32, color: colors.textSecondary, paddingHorizontal: 24 },
+    folderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingVertical: 14,
+      paddingHorizontal: 12,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
+      backgroundColor: colors.surface,
+      marginBottom: 4,
+      borderRadius: 8,
+    },
+    docRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      paddingVertical: 12,
+      paddingHorizontal: 12,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      borderBottomColor: colors.border,
+    },
+    folderRowIcon: { marginRight: 12 },
+    folderRowText: { flex: 1 },
+    folderRowTitle: { fontSize: 16, fontWeight: '600', color: colors.text },
+    folderRowMeta: { fontSize: 12, color: colors.textSecondary, marginTop: 4 },
+    docRowTitle: { fontSize: 15, fontWeight: '600', color: colors.text },
+  });
+}
+
 function FolderBrowseModal({
   visible,
   onClose,
@@ -57,6 +158,10 @@ function FolderBrowseModal({
   onClose: () => void;
   onOpenDocument: (documentId: string, title: string) => void;
 }) {
+  const scheme = useColorScheme();
+  const modalColors = useMemo(() => getColors(scheme === 'dark' ? 'dark' : 'light'), [scheme]);
+  const styles = useMemo(() => makeModalStyles(modalColors), [modalColors]);
+
   const [scope, setScope] = useState<ScopeFilter>('all');
   const [stack, setStack] = useState<StackEntry[]>([{ kind: 'roots' }]);
   const [tree, setTree] = useState<FolderTreeApiResponse | null>(null);
@@ -172,13 +277,13 @@ function FolderBrowseModal({
       <SafeAreaView style={styles.modalSafe} edges={['top', 'left', 'right']}>
         <View style={styles.modalHeader}>
           <Pressable onPress={goBack} hitSlop={12} style={styles.modalBackBtn} accessibilityRole="button">
-            <Ionicons name="chevron-back" size={28} color="#1a1a2e" />
+            <Ionicons name="chevron-back" size={28} color={modalColors.text} />
           </Pressable>
           <Text style={styles.modalTitle} numberOfLines={1}>
             {atRoots ? 'Browse folders' : top.kind === 'folder' ? top.title : 'Browse'}
           </Text>
           <Pressable onPress={closeAndReset} hitSlop={12} accessibilityRole="button" accessibilityLabel="Close">
-            <Ionicons name="close" size={26} color="#1a1a2e" />
+            <Ionicons name="close" size={26} color={modalColors.text} />
           </Pressable>
         </View>
 
@@ -209,9 +314,9 @@ function FolderBrowseModal({
         ) : null}
 
         {atRoots ? (
-          treeLoading ? (
+            treeLoading ? (
             <View style={styles.modalCenter}>
-              <ActivityIndicator size="large" />
+              <ActivityIndicator size="large" color={modalColors.text} />
             </View>
           ) : (
             <FlatList
@@ -228,7 +333,7 @@ function FolderBrowseModal({
                     setStack((prev) => [...prev, { kind: 'folder', folderId: item.folder_id, title: item.name }])
                   }
                 >
-                  <Ionicons name="folder-outline" size={22} color="#5c6bc0" style={styles.folderRowIcon} />
+                  <Ionicons name="folder-outline" size={22} color={modalColors.link} style={styles.folderRowIcon} />
                   <View style={styles.folderRowText}>
                     <Text style={styles.folderRowTitle} numberOfLines={2}>
                       {item.name}
@@ -237,14 +342,14 @@ function FolderBrowseModal({
                       <Text style={styles.folderRowMeta}>{item.document_count} document(s)</Text>
                     ) : null}
                   </View>
-                  <Ionicons name="chevron-forward" size={20} color="#999" />
+                  <Ionicons name="chevron-forward" size={20} color={modalColors.textSecondary} />
                 </Pressable>
               )}
             />
           )
         ) : contentsLoading ? (
           <View style={styles.modalCenter}>
-            <ActivityIndicator size="large" />
+            <ActivityIndicator size="large" color={modalColors.text} />
           </View>
         ) : contentsError ? (
           <Text style={styles.modalError}>{contentsError}</Text>
@@ -267,9 +372,9 @@ function FolderBrowseModal({
                     ])
                   }
                 >
-                  <Ionicons name="folder-outline" size={22} color="#5c6bc0" style={styles.folderRowIcon} />
+                  <Ionicons name="folder-outline" size={22} color={modalColors.link} style={styles.folderRowIcon} />
                   <Text style={styles.folderRowTitle}>{item.sf.name}</Text>
-                  <Ionicons name="chevron-forward" size={20} color="#999" />
+                  <Ionicons name="chevron-forward" size={20} color={modalColors.textSecondary} />
                 </Pressable>
               ) : (
                 <Pressable
@@ -280,7 +385,7 @@ function FolderBrowseModal({
                     closeAndReset();
                   }}
                 >
-                  <Ionicons name="document-text-outline" size={22} color="#1a1a2e" style={styles.folderRowIcon} />
+                  <Ionicons name="document-text-outline" size={22} color={modalColors.text} style={styles.folderRowIcon} />
                   <View style={styles.folderRowText}>
                     <Text style={styles.docRowTitle} numberOfLines={2}>
                       {item.d.title || item.d.filename}
@@ -301,6 +406,10 @@ function FolderBrowseModal({
 
 export default function DocumentsListScreen() {
   const router = useRouter();
+  const scheme = useColorScheme();
+  const colors = useMemo(() => getColors(scheme === 'dark' ? 'dark' : 'light'), [scheme]);
+  const styles = useMemo(() => makeListStyles(colors), [colors]);
+
   const [docs, setDocs] = useState<DocumentInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -336,14 +445,16 @@ export default function DocumentsListScreen() {
 
   if (loading && docs.length === 0) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" />
-      </View>
+      <ScreenShell>
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={colors.text} />
+        </View>
+      </ScreenShell>
     );
   }
 
   return (
-    <>
+    <ScreenShell>
       <FlatList
         data={docs}
         keyExtractor={(item) => item.document_id}
@@ -361,7 +472,7 @@ export default function DocumentsListScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="Browse folder tree"
               >
-                <Ionicons name="folder-open-outline" size={26} color="#1a1a2e" />
+                <Ionicons name="folder-open-outline" size={26} color={colors.text} />
               </Pressable>
             </View>
             {error ? (
@@ -397,97 +508,6 @@ export default function DocumentsListScreen() {
           });
         }}
       />
-    </>
+    </ScreenShell>
   );
 }
-
-const styles = StyleSheet.create({
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  list: { padding: 16, paddingTop: 8 },
-  listHeader: { marginBottom: 12 },
-  titleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 8,
-  },
-  screenTitle: { fontSize: 22, fontWeight: '700', color: '#1a1a2e' },
-  browseIconBtn: { padding: 6 },
-  errorBanner: {
-    backgroundColor: '#fee',
-    color: '#a00',
-    padding: 12,
-    borderRadius: 8,
-    fontSize: 14,
-  },
-  empty: { textAlign: 'center', marginTop: 48, color: '#666' },
-  row: {
-    backgroundColor: '#fff',
-    padding: 14,
-    borderRadius: 8,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-  },
-  title: { fontSize: 16, fontWeight: '600' },
-  sub: { fontSize: 13, color: '#666', marginTop: 4 },
-  modalSafe: { flex: 1, backgroundColor: '#fff' },
-  modalHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#e0e0e0',
-  },
-  modalBackBtn: { padding: 4, width: 44 },
-  modalTitle: { flex: 1, fontSize: 17, fontWeight: '700', color: '#1a1a2e', textAlign: 'center' },
-  scopeScroll: { maxHeight: 48, marginBottom: 8 },
-  scopeScrollInner: { paddingHorizontal: 12, paddingVertical: 8, flexDirection: 'row', alignItems: 'center' },
-  scopeChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: '#e8e8e8',
-    marginRight: 8,
-  },
-  scopeChipOn: { backgroundColor: '#1a1a2e' },
-  scopeChipText: { fontSize: 14, fontWeight: '600', color: '#424242' },
-  scopeChipTextOn: { color: '#fff' },
-  modalError: {
-    marginHorizontal: 16,
-    marginBottom: 8,
-    padding: 12,
-    backgroundColor: '#fee',
-    color: '#a00',
-    borderRadius: 8,
-    fontSize: 14,
-  },
-  modalCenter: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  modalList: { paddingHorizontal: 12, paddingBottom: 24 },
-  modalEmpty: { textAlign: 'center', marginTop: 32, color: '#666', paddingHorizontal: 24 },
-  folderRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#eee',
-    backgroundColor: '#fafafa',
-    marginBottom: 4,
-    borderRadius: 8,
-  },
-  docRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#eee',
-  },
-  folderRowIcon: { marginRight: 12 },
-  folderRowText: { flex: 1 },
-  folderRowTitle: { fontSize: 16, fontWeight: '600', color: '#111' },
-  folderRowMeta: { fontSize: 12, color: '#757575', marginTop: 4 },
-  docRowTitle: { fontSize: 15, fontWeight: '600', color: '#1a1a2e' },
-});

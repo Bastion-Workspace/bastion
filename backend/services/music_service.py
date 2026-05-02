@@ -273,6 +273,14 @@ class MusicService:
                     user_id, service_type,
                     rls_context=rls_context
                 )
+                try:
+                    from services.music_cover_cache import purge_cover_cache_for_user_service
+
+                    await purge_cover_cache_for_user_service(
+                        user_id, service_type, rls_context
+                    )
+                except Exception as purge_err:
+                    logger.warning("Cover disk cache purge failed: %s", purge_err)
                 await execute(
                     "DELETE FROM music_cache_metadata WHERE user_id = $1 AND service_type = $2",
                     user_id, service_type,
@@ -283,6 +291,12 @@ class MusicService:
                 # Delete all services (backward compatibility)
                 await execute("DELETE FROM music_service_configs WHERE user_id = $1", user_id, rls_context=rls_context)
                 await execute("DELETE FROM music_cache WHERE user_id = $1", user_id, rls_context=rls_context)
+                try:
+                    from services.music_cover_cache import purge_cover_cache_for_user
+
+                    await purge_cover_cache_for_user(user_id, rls_context)
+                except Exception as purge_err:
+                    logger.warning("Cover disk cache purge (all) failed: %s", purge_err)
                 await execute("DELETE FROM music_cache_metadata WHERE user_id = $1", user_id, rls_context=rls_context)
                 logger.info(f"Deleted all music service configs for user {user_id}")
             return True
@@ -460,6 +474,29 @@ class MusicService:
                 )
                 playlist_count += 1
             
+            warm_seen = set()
+            warm_ids = []
+            for album in albums:
+                cid = album.get("cover_art_id")
+                if cid and cid not in warm_seen:
+                    warm_seen.add(cid)
+                    warm_ids.append(cid)
+            max_warm = int(getattr(settings, "MUSIC_COVER_CACHE_WARM_COUNT", 200) or 200)
+            warm_ids = warm_ids[:max_warm]
+            if getattr(settings, "MUSIC_COVER_CACHE_ENABLED", True) and warm_ids:
+                try:
+                    from services.celery_tasks.music_cover_warm_tasks import warm_user_covers
+                    from services.music_cover_cache import parse_warm_sizes
+
+                    warm_user_covers.delay(
+                        user_id,
+                        service_type,
+                        warm_ids,
+                        parse_warm_sizes(settings.MUSIC_COVER_CACHE_WARM_SIZES),
+                    )
+                except Exception as warm_err:
+                    logger.warning("Cover warm task enqueue failed: %s", warm_err)
+
             # Fetch tracks for each album (limit to avoid timeout)
             track_count = 0
             for album in albums[:100]:
@@ -532,6 +569,56 @@ class MusicService:
             )
             return {"success": False, "error": str(e)}
     
+    async def _enrich_tracks_with_parent_album_cover(
+        self,
+        user_id: str,
+        parent_album_id: str,
+        service_type: Optional[str],
+        tracks: List[Dict[str, Any]],
+    ) -> None:
+        """Fill missing track cover_art_id from cached album row (Subsonic often omits per-song coverArt)."""
+        if not tracks:
+            return
+
+        def needs_cover(t: Dict[str, Any]) -> bool:
+            cid = t.get("cover_art_id")
+            if cid is None:
+                return True
+            if isinstance(cid, str) and not cid.strip():
+                return True
+            return False
+
+        if not any(needs_cover(t) for t in tracks):
+            return
+
+        rls_context = {"user_id": user_id}
+        if service_type:
+            row = await fetch_one(
+                """SELECT cover_art_id FROM music_cache
+                   WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND item_id = $3""",
+                user_id,
+                service_type,
+                parent_album_id,
+                rls_context=rls_context,
+            )
+        else:
+            row = await fetch_one(
+                """SELECT cover_art_id FROM music_cache
+                   WHERE user_id = $1 AND cache_type = 'album' AND item_id = $2""",
+                user_id,
+                parent_album_id,
+                rls_context=rls_context,
+            )
+
+        album_cover = (row or {}).get("cover_art_id")
+        if album_cover is None or (isinstance(album_cover, str) and not str(album_cover).strip()):
+            return
+
+        album_cover_str = str(album_cover).strip()
+        for t in tracks:
+            if needs_cover(t):
+                t["cover_art_id"] = album_cover_str
+
     async def get_tracks(self, user_id: str, parent_id: str, parent_type: str, service_type: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get tracks for an album or playlist"""
         try:
@@ -578,6 +665,9 @@ class MusicService:
                             track_dict["metadata"] = {}
                         track_dict["metadata"]["parent_id"] = track.get("parent_id")
                     result.append(track_dict)
+                await self._enrich_tracks_with_parent_album_cover(
+                    user_id, parent_id, service_type, result
+                )
                 return result
             else:
                 # For albums, try cache first, then fall back to live API if no cached tracks
@@ -633,6 +723,9 @@ class MusicService:
                                     "metadata": track.get("metadata", {}),
                                     "service_type": service_type  # Include service_type for frontend
                                 })
+                            await self._enrich_tracks_with_parent_album_cover(
+                                user_id, parent_id, service_type, result
+                            )
                             return result
                     return []
                 
@@ -650,6 +743,9 @@ class MusicService:
                         track_dict["service_type"] = service_type
                     tracks.append(track_dict)
                 
+                await self._enrich_tracks_with_parent_album_cover(
+                    user_id, parent_id, service_type, tracks
+                )
                 return tracks
         except Exception as e:
             logger.error(f"Failed to get tracks: {e}")
@@ -735,6 +831,40 @@ class MusicService:
             return stream_url
         except Exception as e:
             logger.error(f"Failed to generate stream URL: {e}")
+            return None
+    
+    async def get_cover_art_url(
+        self,
+        user_id: str,
+        cover_art_id: str,
+        service_type: Optional[str] = None,
+        size: int = 300,
+    ) -> Optional[str]:
+        """Build authenticated cover art URL for the user's configured media server."""
+        try:
+            if not cover_art_id:
+                return None
+            if not service_type:
+                service_type = "subsonic"
+            creds = await self.get_credentials(user_id, service_type)
+            if not creds:
+                logger.error(f"No credentials found for service_type: {service_type}")
+                return None
+            service_type = creds.get("service_type", service_type)
+            client = MusicClientFactory.create_client(
+                service_type=service_type,
+                server_url=creds["server_url"],
+                username=creds["username"],
+                password=creds["password"],
+                auth_type=creds["auth_type"],
+            )
+            if not client:
+                logger.error(f"Unsupported service type: {service_type}")
+                return None
+            art_url = client.get_cover_art_url(cover_art_id, size)
+            return art_url
+        except Exception as e:
+            logger.error(f"Failed to generate cover art URL: {e}")
             return None
     
     async def search_tracks(self, user_id: str, query: str, service_type: str, limit: int = 25) -> List[Dict[str, Any]]:

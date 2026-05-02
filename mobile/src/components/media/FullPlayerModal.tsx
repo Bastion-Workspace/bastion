@@ -1,17 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
-import {
-  FlatList,
-  Image,
-  Modal,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-  useColorScheme,
-  useWindowDimensions,
-} from 'react-native';
+import { Image } from 'expo-image';
+import { FlatList, Modal, Pressable, StyleSheet, Text, View, useColorScheme, useWindowDimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { State, useProgress } from 'react-native-track-player';
+import { State, useProgress, type Track } from 'react-native-track-player';
 import TrackPlayer from 'react-native-track-player';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMediaPlayer } from '../../context/MediaPlayerContext';
@@ -35,6 +26,8 @@ export function FullPlayerModal() {
     skipToPrevious,
     seekTo,
     stop,
+    shuffleEnabled,
+    toggleShuffle,
   } = useMediaPlayer();
   const progress = useProgress(400);
   const [tab, setTab] = useState<'now' | 'queue'>('now');
@@ -109,7 +102,12 @@ export function FullPlayerModal() {
         {tab === 'now' && activeTrack && (
           <View style={styles.nowBody}>
             {art ? (
-              <Image source={{ uri: art }} style={[styles.bigArt, { width: seekW }]} />
+              <Image
+                source={{ uri: art }}
+                style={[styles.bigArt, { width: seekW }]}
+                contentFit="cover"
+                cachePolicy="disk"
+              />
             ) : (
               <View
                 style={[
@@ -124,21 +122,20 @@ export function FullPlayerModal() {
             <Text style={[styles.trackArtist, { color: c.textSecondary }]}>{activeTrack.artist ?? ''}</Text>
 
             {activeTrack.id ? (
-              <View style={styles.dlRow}>
-                <Text style={[styles.dlLabel, { color: c.textSecondary }]}>Offline</Text>
-                <DownloadButton
-                  track={{
-                    id: String(activeTrack.id),
-                    title: String(activeTrack.title ?? ''),
-                    artist: activeTrack.artist ?? undefined,
-                    album: activeTrack.album ?? undefined,
-                    duration: activeTrack.duration,
-                    service_type: playMeta.serviceType ?? undefined,
-                  }}
-                  serviceType={playMeta.serviceType}
-                  parentId={playMeta.parentId}
-                />
-              </View>
+              <DownloadButton
+                showCaption
+                removeRequiresLongPress
+                track={{
+                  id: String(activeTrack.id),
+                  title: String(activeTrack.title ?? ''),
+                  artist: activeTrack.artist ?? undefined,
+                  album: activeTrack.album ?? undefined,
+                  duration: activeTrack.duration,
+                  service_type: playMeta.serviceType ?? undefined,
+                }}
+                serviceType={playMeta.serviceType}
+                parentId={playMeta.parentId}
+              />
             ) : null}
 
             <Pressable
@@ -158,6 +155,9 @@ export function FullPlayerModal() {
             <View style={styles.controls}>
               <Pressable onPress={() => void skipToPrevious()} accessibilityLabel="Previous">
                 <Ionicons name="play-skip-back" size={36} color={c.text} />
+              </Pressable>
+              <Pressable onPress={() => void toggleShuffle()} accessibilityLabel={shuffleEnabled ? 'Shuffle on' : 'Shuffle off'}>
+                <Ionicons name="shuffle" size={28} color={shuffleEnabled ? c.link : c.textSecondary} />
               </Pressable>
               <Pressable onPress={() => void (playing ? pause() : resume())} accessibilityLabel={playing ? 'Pause' : 'Play'}>
                 <Ionicons name={playing ? 'pause-circle' : 'play-circle'} size={64} color={c.text} />
@@ -187,12 +187,15 @@ export function FullPlayerModal() {
                   void TrackPlayer.skip(index);
                 }}
               >
-                <Text style={[styles.qTitle, { color: c.text }]} numberOfLines={1}>
+                <Text style={[styles.qTitle, { color: c.text }]} numberOfLines={2}>
                   {item.title}
                 </Text>
-                <Text style={[styles.qSub, { color: c.textSecondary }]} numberOfLines={1}>
+                <Text style={[styles.qSub, { color: c.textSecondary }]} numberOfLines={2}>
                   {item.artist ?? ''}
                 </Text>
+                {!!item.duration && (
+                  <Text style={[styles.qDur, { color: c.textSecondary }]}>{formatClock(item.duration)}</Text>
+                )}
               </Pressable>
             )}
             ListEmptyComponent={
@@ -265,16 +268,6 @@ const styles = StyleSheet.create({
     marginTop: 6,
     textAlign: 'center',
   },
-  dlRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    marginTop: 16,
-    alignSelf: 'flex-start',
-  },
-  dlLabel: {
-    fontSize: 14,
-  },
   seekTrack: {
     height: 6,
     borderRadius: 3,
@@ -302,7 +295,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 36,
+    gap: 24,
     marginTop: 28,
   },
   bottomRow: {
@@ -317,12 +310,16 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   qTitle: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: '500',
   },
   qSub: {
-    fontSize: 13,
-    marginTop: 4,
+    fontSize: 11,
+    marginTop: 3,
+  },
+  qDur: {
+    fontSize: 11,
+    marginTop: 2,
   },
   empty: {
     textAlign: 'center',

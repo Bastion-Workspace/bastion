@@ -34,6 +34,32 @@ logger = logging.getLogger(__name__)
 def _step_type(step: Dict[str, Any]) -> str:
     return (step.get("step_type") or step.get("type") or "tool") or "tool"
 
+
+# trigger_type values from Celery / gRPC dispatch; manual chat is absent or "manual"
+UNATTENDED_TRIGGERS = frozenset(
+    {
+        "scheduled",
+        "folder_watch",
+        "team_heartbeat",
+        "worker_dispatch",
+        "message_dispatch",
+        "user_timeline_post",
+        "line_chat_dispatch",
+        "team_heartbeat_committee_chair",
+    }
+)
+
+
+def _pipeline_metadata_for_step(
+    step: Dict[str, Any], metadata: Optional[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Copy of metadata with auto_apply set when the step opts in and the run is unattended."""
+    base = dict(metadata or {})
+    if step.get("auto_apply") and base.get("trigger_type") in UNATTENDED_TRIGGERS:
+        base["auto_apply"] = True
+    return base
+
+
 # Pattern for variable references: {step_name.field} or {var_name}
 _REF_PATTERN = re.compile(r"\{([^}]+)\}")
 
@@ -1118,6 +1144,7 @@ async def _execute_deep_agent_step(
     )
     _eff_cmap = build_step_effective_connections_map(metadata, step)
     metadata = {**(metadata or {}), "active_connections_map": json.dumps(_eff_cmap)}
+    metadata = _pipeline_metadata_for_step(step, metadata)
     _deep_step_label = step.get("name") or step.get("output_key") or "deep_agent"
     _format_step_connection_summary(_deep_step_label, step, _eff_cmap)
     tool_names = list(_resolution.tool_names)
@@ -1878,6 +1905,7 @@ async def _execute_llm_agent_step(
     )
     _eff_cmap = build_step_effective_connections_map(metadata, step)
     metadata = {**(metadata or {}), "active_connections_map": json.dumps(_eff_cmap)}
+    tool_invocation_metadata = _pipeline_metadata_for_step(step, metadata)
     _format_step_connection_summary(step_name, step, _eff_cmap)
     tool_names = list(_resolution.tool_names)
     skill_guidance = _resolution.skill_guidance
@@ -1914,7 +1942,14 @@ async def _execute_llm_agent_step(
         logger.debug("LLM agent step %s: max_iterations=%s (raw=%r)", step_name, max_iterations, raw_max)
 
     wrapped_tools = [
-        _wrap_tool_for_llm_agent(_sanitize_tool_name_for_llm(name), func, user_id, metadata, contract, description_override)
+        _wrap_tool_for_llm_agent(
+            _sanitize_tool_name_for_llm(name),
+            func,
+            user_id,
+            tool_invocation_metadata,
+            contract,
+            description_override,
+        )
         for name, func, contract, description_override in resolved_tools
     ]
     tool_map = {
@@ -2067,7 +2102,7 @@ async def _execute_llm_agent_step(
                     if "user_id" not in args and "user_id" in sig.parameters:
                         args["user_id"] = user_id
                     if "_pipeline_metadata" in sig.parameters:
-                        args["_pipeline_metadata"] = metadata or {}
+                        args["_pipeline_metadata"] = tool_invocation_metadata
                     if "_editor_content" in sig.parameters:
                         active_editor = (metadata or {}).get("shared_memory", {}).get("active_editor", {})
                         args["_editor_content"] = (active_editor or {}).get("content", "")
@@ -2176,7 +2211,9 @@ async def _execute_llm_agent_step(
                             for rname, rfunc, rcontract, rdesc in new_resolved:
                                 san = _sanitize_tool_name_for_llm(rname)
                                 wrapped_tools.append(
-                                    _wrap_tool_for_llm_agent(san, rfunc, user_id, metadata, rcontract, rdesc)
+                                    _wrap_tool_for_llm_agent(
+                                        san, rfunc, user_id, tool_invocation_metadata, rcontract, rdesc
+                                    )
                                 )
                                 tool_map[_normalize_tool_name(san)] = (rname, rfunc, rcontract)
                             bound_llm = llm.bind_tools(wrapped_tools)
@@ -2249,7 +2286,9 @@ async def _execute_llm_agent_step(
                                 for rname, rfunc, rcontract, rdesc in new_resolved:
                                     san = _sanitize_tool_name_for_llm(rname)
                                     wrapped_tools.append(
-                                        _wrap_tool_for_llm_agent(san, rfunc, user_id, metadata, rcontract, rdesc)
+                                        _wrap_tool_for_llm_agent(
+                                            san, rfunc, user_id, tool_invocation_metadata, rcontract, rdesc
+                                        )
                                     )
                                     tool_map[_normalize_tool_name(san)] = (rname, rfunc, rcontract)
                                 bound_llm = llm.bind_tools(wrapped_tools)
@@ -2465,7 +2504,7 @@ async def execute_step(
             if "user_id" not in sig.parameters and "user_id" in kwargs:
                 final_kwargs.pop("user_id", None)
             if "_pipeline_metadata" in sig.parameters:
-                final_kwargs["_pipeline_metadata"] = metadata or {}
+                final_kwargs["_pipeline_metadata"] = _pipeline_metadata_for_step(step, metadata)
             try:
                 if inspect.iscoroutinefunction(tool_fn):
                     result = await tool_fn(**final_kwargs)
@@ -2559,7 +2598,7 @@ async def execute_step(
         if profile_name:
             final_kwargs["agent_name"] = profile_name
     if "_pipeline_metadata" in sig.parameters:
-        final_kwargs["_pipeline_metadata"] = metadata or {}
+        final_kwargs["_pipeline_metadata"] = _pipeline_metadata_for_step(step, metadata)
 
     step_name = step.get("name") or step.get("output_key") or "?"
     logger.debug("Tool step: action=%s step=%s", action_name, step_name)

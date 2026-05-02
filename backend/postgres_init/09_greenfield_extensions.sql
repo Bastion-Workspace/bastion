@@ -7,9 +7,13 @@
 -- Per-user shell command policy (164; idempotent with 01_init.sql merge).
 -- Code workspace RLS (165; idempotent with 01_init.sql merge).
 -- device_tokens capabilities_policy (167; idempotent for DBs created before column merge).
+-- Music cover art disk cache index (168; idempotent with 01_init.sql merge).
+-- Widen cover_art_id to TEXT (169; idempotent).
 
 \c bastion_knowledge_base
 
+\ir migrations/168_music_cover_cache_index.sql
+\ir migrations/169_music_cover_art_id_text.sql
 \ir migrations/167_device_capabilities_policy.sql
 \ir migrations/162_add_zettelkasten_settings.sql
 \ir migrations/163_code_chunks.sql

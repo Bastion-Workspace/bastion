@@ -34,6 +34,7 @@ export type RecentlyOpenedEntry = {
   catalog_id?: string;
   acquisition_url?: string;
   opened_at?: string;
+  acquisition_format?: 'epub' | 'pdf';
 };
 
 export type EbooksSettingsUpdate = {
@@ -64,6 +65,7 @@ export type OpdsFeedEntry = {
   id?: string;
   title?: string;
   acquisition_href?: string;
+  acquisition_type?: string;
   navigation_links?: OpdsLink[];
   links?: OpdsLink[];
 };

@@ -45,7 +45,7 @@ const appIcon = resolveAppIcon();
 const config: ExpoConfig = {
   name: 'Bastion',
   slug: 'bastion-mobile',
-  version: '0.70.9',
+  version: '0.70.12',
   orientation: 'portrait',
   scheme: 'bastion',
   userInterfaceStyle: 'automatic',
@@ -57,6 +57,20 @@ const config: ExpoConfig = {
     infoPlist: {
       NSMicrophoneUsageDescription: 'Used to record voice instructions for Bastion.',
       UIBackgroundModes: ['audio'],
+    },
+    /**
+     * Dark/light splash art for the system splash (separate from the expo-splash-screen plugin).
+     * Without `ios.splash.dark` / `android.splash.dark`, SDK 52+ prebuild can omit night resources so
+     * dark mode still shows the light splash image on some devices (see expo/expo#32860).
+     */
+    splash: {
+      image: bastionSplashLight,
+      resizeMode: 'contain',
+      backgroundColor: splashBackgroundLight,
+      dark: {
+        image: bastionSplashDark,
+        backgroundColor: splashBackgroundDark,
+      },
     },
   },
   android: {
@@ -71,6 +85,15 @@ const config: ExpoConfig = {
       'FOREGROUND_SERVICE_MEDIA_PLAYBACK',
       'WAKE_LOCK',
     ],
+    splash: {
+      image: bastionSplashLight,
+      resizeMode: 'contain',
+      backgroundColor: splashBackgroundLight,
+      dark: {
+        image: bastionSplashDark,
+        backgroundColor: splashBackgroundDark,
+      },
+    },
   },
   plugins: [
     'expo-router',

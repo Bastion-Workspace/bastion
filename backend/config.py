@@ -87,6 +87,18 @@ class Settings(BaseSettings):
     VECTOR_EMBED_BACKLOG_MAX_ATTEMPTS: int = 10
     VECTOR_EMBED_BACKLOG_PURGE_DAYS: int = 14
     REDIS_URL: str = "redis://localhost:6379"
+
+    # Music cover art: per-user disk LRU under MUSIC_COVER_CACHE_DIR (shared volume backend + celery-worker)
+    MUSIC_COVER_CACHE_ENABLED: bool = True
+    MUSIC_COVER_CACHE_DIR: str = "/app/music_cover_cache"
+    MUSIC_COVER_CACHE_MAX_BYTES_PER_USER: int = 209715200  # 200 MiB
+    MUSIC_COVER_CACHE_WARM_COUNT: int = 200
+    MUSIC_COVER_CACHE_WARM_SIZES: str = "200,64"
+    # Limit parallel getCoverArt calls to upstream (Navidrome/Subsonic); retries on 502/503/504.
+    MUSIC_COVER_UPSTREAM_MAX_CONCURRENT: int = 8
+    MUSIC_COVER_UPSTREAM_TIMEOUT_S: float = 45.0
+    MUSIC_COVER_UPSTREAM_CONNECT_TIMEOUT_S: float = 15.0
+    MUSIC_COVER_UPSTREAM_RETRY_ATTEMPTS: int = 4
     # Encrypted documents: Redis-backed unlock sessions and rate limits
     FILE_ENCRYPTION_SESSION_TTL_SECONDS: int = 900
     FILE_ENCRYPTION_MAX_ATTEMPTS: int = 5

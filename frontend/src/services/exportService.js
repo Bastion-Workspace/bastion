@@ -1,8 +1,8 @@
 import { jsPDF } from 'jspdf';
 import html2canvas from 'html2canvas';
 import html2pdf from 'html2pdf.js';
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
-import { markdownToPlainText } from '../utils/chatUtils';
+import { Packer, Paragraph, TextRun, HeadingLevel, AlignmentType } from 'docx';
+import { markdownToDocxChildren, buildDocxDocument } from '../utils/docxUtils';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 import { devLog } from '../utils/devConsole';
 
@@ -1300,81 +1300,134 @@ class ExportService {
     }
   };
 
-  /**
-   * Export message content as DOCX
-   */
-  exportAsDOCX = async (message) => {
-    try {
-      // Create document
-      const doc = new Document({
-        sections: [{
-          properties: {},
-          children: [
-            // Title
-            new Paragraph({
-              text: `Chat Message - ${new Date(message.timestamp).toLocaleString()}`,
-              heading: HeadingLevel.HEADING_1,
-              alignment: AlignmentType.CENTER,
-            }),
-            
-            // Spacing
-            new Paragraph({
-              children: [new TextRun({ text: "", break: 1 })],
-            }),
-            
-            // Content
-            new Paragraph({
-              children: [
-                new TextRun({
-                  text: markdownToPlainText(message.content),
-                  size: 24, // 12pt
-                }),
-              ],
-            }),
-            
-            // Metadata if available
-            ...(message.queryTime || message.iterations || message.executionMode ? [
-              new Paragraph({
-                children: [new TextRun({ text: "", break: 1 })],
-              }),
-              new Paragraph({
-                children: [
-                  new TextRun({
-                    text: this._formatMetadata(message),
-                    size: 20, // 10pt
-                    color: "666666",
-                  }),
-                ],
-              }),
-            ] : []),
-          ],
-        }],
-      });
+  _triggerBlobDownload = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  };
 
-      // Generate the document
-      const buffer = await Packer.toBuffer(doc);
-      
-      // Create blob and download
-      const blob = new Blob([buffer], { 
-        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
-      });
-      
-      // Generate filename
-      const timestamp = new Date(message.timestamp).toISOString().split('T')[0];
+  /**
+   * Export message content as Markdown file
+   */
+  exportAsMarkdown = async (message) => {
+    const content = message.content || '';
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
+    const timestamp = new Date(message.timestamp || Date.now()).toISOString().split('T')[0];
+    const filename = `chat-message-${timestamp}.md`;
+    this._triggerBlobDownload(blob, filename);
+    return { success: true, filename };
+  };
+
+  /**
+   * Export conversation as Markdown file
+   */
+  exportConversationAsMarkdown = async (conversation) => {
+    const parts = [];
+    const title = conversation.title || 'Untitled Conversation';
+    parts.push(`# ${title}\n\n`);
+    if (conversation.created_at) {
+      parts.push(`*Created: ${new Date(conversation.created_at).toLocaleString()}*\n\n`);
+    }
+    for (const message of conversation.messages || []) {
+      const roleLabel =
+        message.role === 'user'
+          ? 'User'
+          : message.role === 'assistant'
+            ? 'Assistant'
+            : String(message.role || 'message');
+      const ts = message.timestamp ? new Date(message.timestamp).toLocaleString() : '';
+      parts.push(`## ${roleLabel}${ts ? ` — ${ts}` : ''}\n\n`);
+      parts.push(`${message.content || ''}\n\n---\n\n`);
+    }
+    const blob = new Blob([parts.join('')], { type: 'text/markdown;charset=utf-8' });
+    const timestamp = new Date().toISOString().split('T')[0];
+    const filename = `conversation-${timestamp}.md`;
+    this._triggerBlobDownload(blob, filename);
+    return { success: true, filename };
+  };
+
+  /**
+   * Export message content as DOCX (markdown-aware)
+   * @param {object} message
+   * @param {object} [docxOptions] fontFamily, fontSizePt, orientation, paper, includeTimestamps, includeMetadata
+   */
+  exportAsDOCX = async (message, docxOptions = {}) => {
+    try {
+      const font = docxOptions.fontFamily || 'Calibri';
+      const sizeHalf = Math.round((docxOptions.fontSizePt ?? 11) * 2);
+
+      const { children: bodyChildren, usesLists } = markdownToDocxChildren(
+        message.content || '',
+        docxOptions,
+      );
+
+      const headerChildren = [
+        new Paragraph({
+          text: 'Chat Message',
+          heading: HeadingLevel.HEADING_1,
+          alignment: AlignmentType.CENTER,
+        }),
+      ];
+
+      if (docxOptions.includeTimestamps !== false && message.timestamp) {
+        headerChildren.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [
+              new TextRun({
+                text: new Date(message.timestamp).toLocaleString(),
+                size: Math.max(16, sizeHalf - 2),
+                color: '666666',
+                font,
+              }),
+            ],
+          }),
+        );
+      }
+
+      headerChildren.push(
+        new Paragraph({
+          children: [new TextRun({ text: '', font, size: sizeHalf })],
+        }),
+      );
+
+      if (
+        docxOptions.includeMetadata &&
+        (message.queryTime || message.iterations || message.executionMode)
+      ) {
+        headerChildren.push(
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: this._formatMetadata(message),
+                size: Math.max(18, sizeHalf - 2),
+                color: '666666',
+                font,
+              }),
+            ],
+          }),
+        );
+        headerChildren.push(
+          new Paragraph({
+            children: [new TextRun({ text: '', font, size: sizeHalf })],
+          }),
+        );
+      }
+
+      const allChildren = [...headerChildren, ...bodyChildren];
+      const doc = buildDocxDocument(allChildren, usesLists, docxOptions);
+      const blob = await Packer.toBlob(doc);
+
+      const timestamp = new Date(message.timestamp || Date.now()).toISOString().split('T')[0];
       const filename = `chat-message-${timestamp}.docx`;
-      
-      // Download the file
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-      
+      this._triggerBlobDownload(blob, filename);
+
       return { success: true, filename };
-      
     } catch (error) {
       console.error('Failed to export DOCX:', error);
       throw new Error('Failed to export DOCX. Please try again.');
@@ -1436,7 +1489,9 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
         
         return await this._exportPdfViaBackend(payload);
       } else if (format === 'docx') {
-        return await this._exportConversationAsDOCX(conversation);
+        return await this._exportConversationAsDOCX(conversation, options);
+      } else if (format === 'markdown') {
+        return await this.exportConversationAsMarkdown(conversation);
       } else {
         throw new Error(`Unsupported format: ${format}`);
       }
@@ -1793,91 +1848,83 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
 
   /**
    * Export conversation as DOCX
+   * @param {object} conversation
+   * @param {object} [docxOptions]
    */
-  _exportConversationAsDOCX = async (conversation) => {
+  _exportConversationAsDOCX = async (conversation, docxOptions = {}) => {
+    const font = docxOptions.fontFamily || 'Calibri';
+    const sizeHalf = Math.round((docxOptions.fontSizePt ?? 11) * 2);
+
     const children = [
-      // Title
       new Paragraph({
         text: `Conversation: ${conversation.title || 'Untitled'}`,
         heading: HeadingLevel.HEADING_1,
         alignment: AlignmentType.CENTER,
       }),
-      
-      // Metadata
-      new Paragraph({
-        children: [
-          new TextRun({
-            text: `Created: ${new Date(conversation.created_at).toLocaleString()}`,
-            size: 20,
-            color: "666666",
-          }),
-        ],
-      }),
-      
-      new Paragraph({
-        children: [new TextRun({ text: "", break: 1 })],
-      }),
     ];
-    
-    // Add messages
-    for (const message of conversation.messages || []) {
-      const role = message.role === 'user' ? 'User' : 'Assistant';
-      const timestamp = new Date(message.timestamp).toLocaleString();
-      
+
+    if (docxOptions.includeTimestamps !== false && conversation.created_at) {
       children.push(
-        // Message header
         new Paragraph({
           children: [
             new TextRun({
-              text: `${role} - ${timestamp}`,
-              size: 22,
-              color: "333333",
-              bold: true,
+              text: `Created: ${new Date(conversation.created_at).toLocaleString()}`,
+              size: Math.max(18, sizeHalf - 2),
+              color: '666666',
+              font,
             }),
           ],
-        }),
-        
-        // Message content
-        new Paragraph({
-          children: [
-            new TextRun({
-              text: markdownToPlainText(message.content),
-              size: 24,
-            }),
-          ],
-        }),
-        
-        // Spacing
-        new Paragraph({
-          children: [new TextRun({ text: "", break: 1 })],
         }),
       );
     }
-    
-    const doc = new Document({
-      sections: [{
-        properties: {},
-        children,
-      }],
-    });
-    
-    const buffer = await Packer.toBuffer(doc);
-    const blob = new Blob([buffer], { 
-      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' 
-    });
-    
+
+    children.push(
+      new Paragraph({
+        children: [new TextRun({ text: '', font, size: sizeHalf })],
+      }),
+    );
+
+    let usesLists = false;
+    for (const message of conversation.messages || []) {
+      const role =
+        message.role === 'user'
+          ? 'User'
+          : message.role === 'assistant'
+            ? 'Assistant'
+            : String(message.role || 'message');
+      const ts = message.timestamp ? new Date(message.timestamp).toLocaleString() : '';
+
+      children.push(
+        new Paragraph({
+          children: [
+            new TextRun({
+              text: ts ? `${role} — ${ts}` : role,
+              size: Math.min(26, sizeHalf + 2),
+              color: '333333',
+              bold: true,
+              font,
+            }),
+          ],
+        }),
+      );
+
+      const parsed = markdownToDocxChildren(message.content || '', docxOptions);
+      if (parsed.usesLists) usesLists = true;
+      children.push(...parsed.children);
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: '', font, size: sizeHalf })],
+        }),
+      );
+    }
+
+    const doc = buildDocxDocument(children, usesLists, docxOptions);
+    const blob = await Packer.toBlob(doc);
+
     const timestamp = new Date().toISOString().split('T')[0];
     const filename = `conversation-${timestamp}.docx`;
-    
-    const url = window.URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    window.URL.revokeObjectURL(url);
-    
+    this._triggerBlobDownload(blob, filename);
+
     return { success: true, filename };
   };
 
@@ -2249,6 +2296,90 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
     document.body.removeChild(link);
     window.URL.revokeObjectURL(url);
     return { success: true, filename };
+  };
+
+  /**
+   * Export markdown document as DOCX in the browser (body without YAML fence; title from frontmatter or filename).
+   */
+  exportMarkdownAsDOCX = async (markdownContent, docxOptions = {}) => {
+    try {
+      const parsed = parseFrontmatter(markdownContent || '');
+      const frontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
+      const bodyMd =
+        parsed.body != null && String(parsed.body).length > 0
+          ? parsed.body
+          : markdownContent || '';
+      const titleRaw =
+        frontmatter.title ||
+        frontmatter.Title ||
+        docxOptions.filename ||
+        'document';
+      const documentTitle = String(titleRaw).replace(/\.[^.]+$/, '');
+      const font = docxOptions.fontFamily || 'Calibri';
+      const sizeHalf = Math.round((docxOptions.fontSizePt ?? 11) * 2);
+
+      const headerChildren = [
+        new Paragraph({
+          text: documentTitle,
+          heading: HeadingLevel.HEADING_1,
+          alignment: AlignmentType.CENTER,
+        }),
+      ];
+
+      if (docxOptions.includeTimestamps !== false) {
+        headerChildren.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [
+              new TextRun({
+                text: `Exported ${new Date().toLocaleString()}`,
+                size: Math.max(16, sizeHalf - 2),
+                color: '666666',
+                font,
+              }),
+            ],
+          }),
+        );
+      }
+
+      if (docxOptions.includeMetadata) {
+        const author = frontmatter.author || frontmatter.Author || '';
+        const metaLine = [author && `Author: ${author}`].filter(Boolean).join('');
+        if (metaLine) {
+          headerChildren.push(
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              children: [
+                new TextRun({
+                  text: metaLine,
+                  size: Math.max(16, sizeHalf - 2),
+                  color: '666666',
+                  font,
+                }),
+              ],
+            }),
+          );
+        }
+      }
+
+      headerChildren.push(
+        new Paragraph({
+          children: [new TextRun({ text: '', font, size: sizeHalf })],
+        }),
+      );
+
+      const { children: bodyChildren, usesLists } = markdownToDocxChildren(bodyMd, docxOptions);
+      const allChildren = [...headerChildren, ...bodyChildren];
+      const doc = buildDocxDocument(allChildren, usesLists, docxOptions);
+      const blob = await Packer.toBlob(doc);
+      const safeBase = documentTitle.replace(/[/\\?%*:|"<>]/g, '-').trim().slice(0, 120) || 'document';
+      const filename = `${safeBase}.docx`;
+      this._triggerBlobDownload(blob, filename);
+      return { success: true, filename };
+    } catch (error) {
+      console.error('Failed to export markdown as DOCX:', error);
+      throw new Error(`Failed to export DOCX: ${error.message}`);
+    }
   };
 
   /**

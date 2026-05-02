@@ -11,6 +11,7 @@ import {
 import dayjs from 'dayjs';
 import { useRouter } from 'expo-router';
 import { getUserRooms, type Room, type RoomParticipant } from '../../../src/api/messaging';
+import { ScreenShell } from '../../../src/components/ScreenShell';
 import { useAuth } from '../../../src/context/AuthContext';
 
 function roomTitle(room: Room): string {
@@ -70,13 +71,16 @@ export default function MessagesListScreen() {
 
   if (loading && rooms.length === 0) {
     return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" />
-      </View>
+      <ScreenShell>
+        <View style={styles.center}>
+          <ActivityIndicator size="large" />
+        </View>
+      </ScreenShell>
     );
   }
 
   return (
+    <ScreenShell>
     <FlatList
       data={rooms}
       keyExtractor={(item) => item.room_id}
@@ -106,6 +110,7 @@ export default function MessagesListScreen() {
         );
       }}
     />
+    </ScreenShell>
   );
 }
 

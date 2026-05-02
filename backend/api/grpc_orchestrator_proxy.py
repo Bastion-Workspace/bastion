@@ -194,14 +194,29 @@ async def stream_from_grpc_orchestrator(
                     conversation_service = ConversationService()
                     conversation_service.set_current_user(user_id)
 
-                    await conversation_service.add_message(
+                    saved_user = await conversation_service.add_message(
                         conversation_id=conversation_id,
                         user_id=user_id,
                         role="user",
                         content=query,
                         metadata={"orchestrator_system": True, "streaming": True},
                     )
-                    logger.info("Saved user message to conversation %s", conversation_id)
+                    persisted_user_message_id = (saved_user or {}).get("message_id")
+                    if persisted_user_message_id:
+                        logger.info(
+                            "Saved user message to conversation %s message_id=%s",
+                            conversation_id,
+                            persisted_user_message_id,
+                        )
+                        yield format_sse_message(
+                            {
+                                "type": "user_message_persisted",
+                                "message_id": persisted_user_message_id,
+                                "conversation_id": conversation_id,
+                            }
+                        )
+                    else:
+                        logger.info("Saved user message to conversation %s", conversation_id)
 
                     # Check if title was updated (first message triggers title generation)
                     # The add_message method updates the title if it was "New Conversation"
@@ -219,6 +234,7 @@ async def stream_from_grpc_orchestrator(
             accumulated_response = ""
             metadata_received = {}
             user_cancelled = False
+            persisted_user_message_id: Optional[str] = None
             queue: asyncio.Queue = asyncio.Queue(maxsize=128)
 
             async def _grpc_pump():
@@ -397,9 +413,33 @@ async def stream_from_grpc_orchestrator(
                 chunk_count,
                 user_cancelled,
             )
+
+            if user_cancelled and persisted_user_message_id and conversation_id and user_id:
+                try:
+                    from services.conversation_service import ConversationService
+
+                    _del_cs = ConversationService()
+                    _del_cs.set_current_user(user_id)
+                    deleted = await _del_cs.delete_conversation_message(
+                        conversation_id, user_id, persisted_user_message_id
+                    )
+                    if deleted:
+                        logger.info(
+                            "Removed cancelled stream user message %s from conversation %s",
+                            persisted_user_message_id,
+                            conversation_id,
+                        )
+                    else:
+                        logger.warning(
+                            "Could not delete cancelled user message %s (conversation %s)",
+                            persisted_user_message_id,
+                            conversation_id,
+                        )
+                except Exception as del_err:
+                    logger.warning("Failed to delete cancelled user message: %s", del_err)
             
             # Save assistant response to conversation AFTER streaming completes
-            if accumulated_response and not skip_persistence:
+            if accumulated_response and not skip_persistence and not user_cancelled:
                 try:
                     from utils.message_sanitizer import strip_tool_actions_prefix
                     accumulated_response = strip_tool_actions_prefix(accumulated_response)
@@ -422,9 +462,6 @@ async def stream_from_grpc_orchestrator(
                         "chunk_count": chunk_count,
                         **safe_meta,
                     }
-                    if user_cancelled:
-                        metadata["stream_cancelled"] = True
-
                     message_branch_id = None
                     if is_branch_resend and branch_message_id and str(branch_message_id).strip():
                         ref_row = await conversation_service.get_message_by_id(

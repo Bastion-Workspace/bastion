@@ -9,6 +9,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { quickSendToDefaultAgent } from '../api/quickSend';
 import { transcribeAudio } from '../api/stt';
 import { useVoiceShortcut } from './VoiceShortcutContext';
@@ -37,6 +38,7 @@ export function useVoiceModalController(): {
   const modalVisibleRef = useRef(false);
   const lastHandledVoiceRequestRef = useRef(0);
   const { voiceOpenRequestId } = useVoiceShortcut();
+  const insets = useSafeAreaInsets();
 
   useEffect(() => {
     phaseRef.current = phase;
@@ -223,7 +225,13 @@ export function useVoiceModalController(): {
         }
       }}
     >
-      <View style={styles.modalRoot} pointerEvents="box-none">
+      <View
+        style={[
+          styles.modalRoot,
+          { paddingTop: 24 + insets.top, paddingBottom: 24 + insets.bottom },
+        ]}
+        pointerEvents="box-none"
+      >
         <Pressable
           style={styles.modalBackdropFill}
           onPress={() => {
@@ -311,7 +319,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    paddingHorizontal: 24,
   },
   modalBackdropFill: {
     ...StyleSheet.absoluteFillObject,

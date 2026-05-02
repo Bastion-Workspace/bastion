@@ -43,6 +43,8 @@ const ChatInputArea = () => {
     setQuery,
     sendMessage,
     isLoading,
+    hasPendingMessage,
+    clearPendingMessage,
     currentConversationId,
     clearChat,
     createNewConversation,
@@ -159,6 +161,19 @@ const ChatInputArea = () => {
     }
   );
 
+  const { data: modelRolesForSendHint } = useQuery(
+    'userModelRoles',
+    () => apiService.getUserModelRoles(),
+    {
+      staleTime: 60000,
+      enabled: !!user?.user_id && !authLoading,
+    }
+  );
+  const sendWhileStreamingHint =
+    modelRolesForSendHint?.send_while_streaming_behavior === 'stop_and_send'
+      ? 'Stop current reply and send now'
+      : 'Queue message until the current reply finishes';
+
   // Keep local input in sync when context query changes externally (e.g., clear, conversation switch)
   useEffect(() => {
     setInputValue(query || '');
@@ -190,12 +205,18 @@ const ChatInputArea = () => {
     if (!trimmed && selectedFiles.length === 0) return;
     const sendOpts = mentionSendOptionsForText(trimmed);
 
+    setInputValue('');
+    lastInsertedMentionRef.current = null;
+
+    let sendOutcome = { clearComposer: false };
+
     // If we have files, we need to send message first to get message_id, then upload files
     if (selectedFiles.length > 0 && currentConversationId) {
       try {
         // Send message first (even if empty, to get message_id)
         const messageContent = trimmed || '📎 Attached files';
-        sendMessage('auto', messageContent, sendOpts);
+        sendOutcome =
+          (await sendMessage('auto', messageContent, sendOpts)) || { clearComposer: false };
         
         // Get the message_id from the response (we'll need to wait for it)
         // For now, we'll upload files after a short delay
@@ -225,17 +246,18 @@ const ChatInputArea = () => {
       }
     } else {
       // No files, send normally
-      sendMessage('auto', trimmed, sendOpts);
+      sendOutcome = (await sendMessage('auto', trimmed, sendOpts)) || { clearComposer: false };
     }
 
     lastInsertedMentionRef.current = null;
 
-    // Clear local and context input after sending
-    setInputValue('');
-    setQuery('');
-    setSelectedFiles([]);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+    if (sendOutcome.clearComposer) {
+      setInputValue('');
+      setQuery('');
+      setSelectedFiles([]);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
   
@@ -373,7 +395,7 @@ const ChatInputArea = () => {
     return parts.join(' • ');
   };
 
-  const isSendDisabled = !inputValue.trim() || isLoading;
+  const isSendDisabled = !inputValue.trim() && selectedFiles.length === 0;
 
   const startRecording = async () => {
     try {
@@ -549,6 +571,26 @@ const ChatInputArea = () => {
         </Box>
       )}
 
+      {hasPendingMessage && (
+        <Box
+          sx={{
+            mb: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 1,
+            flexWrap: 'wrap',
+          }}
+        >
+          <Chip
+            label="Message queued — sends when the current reply finishes"
+            color="primary"
+            variant="outlined"
+            onDelete={clearPendingMessage}
+          />
+        </Box>
+      )}
+
       {/* Reply Indicator */}
       {replyToMessage && (
         <Box sx={{ 
@@ -652,7 +694,6 @@ const ChatInputArea = () => {
           variant="outlined"
           size="small"
           fullWidth
-          disabled={isLoading}
           sx={{
             '& .MuiOutlinedInput-root': {
               borderRadius: 2,
@@ -714,13 +755,13 @@ const ChatInputArea = () => {
             </IconButton>
           </Tooltip>
 
-          {isLoading ? (
+          {isLoading && (
             <Tooltip title="Stop generation">
               <IconButton
                 onClick={handleCancelJob}
                 color="error"
                 size="small"
-                sx={{ 
+                sx={{
                   backgroundColor: 'error.main',
                   color: 'white',
                   '&:hover': {
@@ -731,14 +772,21 @@ const ChatInputArea = () => {
                 <Stop fontSize="small" />
               </IconButton>
             </Tooltip>
-          ) : (
-            <Tooltip title="Send message (Enter)">
+          )}
+          <Tooltip
+            title={
+              isLoading
+                ? `${sendWhileStreamingHint} (Enter)`
+                : 'Send message (Enter)'
+            }
+          >
+            <span>
               <IconButton
                 onClick={handleSendMessage}
-                disabled={!inputValue.trim() && selectedFiles.length === 0 || isLoading}
+                disabled={isSendDisabled}
                 color="primary"
                 size="small"
-                sx={{ 
+                sx={{
                   backgroundColor: sendButtonMain,
                   color: 'white',
                   border: 'none',
@@ -755,8 +803,8 @@ const ChatInputArea = () => {
               >
                 <Send fontSize="small" />
               </IconButton>
-            </Tooltip>
-          )}
+            </span>
+          </Tooltip>
         </Box>
       </Box>
 

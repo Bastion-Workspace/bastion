@@ -29,19 +29,44 @@ export function pickNavigationHrefFromEntry(en: OpdsFeedEntry): string {
   return fromLinks?.href ? String(fromLinks.href).trim() : '';
 }
 
-export function pickAcquisitionHrefFromEntry(en: OpdsFeedEntry): string {
-  if (en.acquisition_href) return String(en.acquisition_href).trim();
+export type AcquisitionPick = { href: string; format: 'epub' | 'pdf' };
+
+function pickAcquisitionLinkFromEntry(en: OpdsFeedEntry): AcquisitionPick {
+  if (en.acquisition_href) {
+    const href = String(en.acquisition_href).trim();
+    const t = String(en.acquisition_type || '').toLowerCase();
+    const format: 'epub' | 'pdf' = t === 'pdf' ? 'pdf' : 'epub';
+    return { href, format };
+  }
   const links = en.links || [];
   const acq = links.find((l) => {
     if (!l?.href) return false;
     const rel = String(l.rel || '').toLowerCase();
     const typ = String(l.type || '').toLowerCase();
+    const hrefL = String(l.href).toLowerCase();
     const isAcq =
       rel.includes('opds-spec.org/acquisition') || (rel.includes('acquisition') && rel.includes('opds'));
     if (!isAcq) return false;
-    return typ.includes('epub') || String(l.href).toLowerCase().endsWith('.epub');
+    const isEpub = typ.includes('epub') || hrefL.endsWith('.epub');
+    const isPdf = typ.includes('application/pdf') || hrefL.endsWith('.pdf');
+    return isEpub || isPdf;
   });
-  return acq?.href ? String(acq.href).trim() : '';
+  if (!acq?.href) return { href: '', format: 'epub' };
+  const href = String(acq.href).trim();
+  const typ = String(acq.type || '').toLowerCase();
+  const hrefL = href.toLowerCase();
+  const isEpub = typ.includes('epub') || hrefL.endsWith('.epub');
+  const isPdf = typ.includes('application/pdf') || hrefL.endsWith('.pdf');
+  const format: 'epub' | 'pdf' = isEpub ? 'epub' : isPdf ? 'pdf' : 'epub';
+  return { href, format };
+}
+
+export function pickAcquisitionHrefFromEntry(en: OpdsFeedEntry): string {
+  return pickAcquisitionLinkFromEntry(en).href;
+}
+
+export function pickAcquisitionFormatFromEntry(en: OpdsFeedEntry): 'epub' | 'pdf' {
+  return pickAcquisitionLinkFromEntry(en).format;
 }
 
 export function pickCoverHrefFromEntry(en: OpdsFeedEntry, baseUrl: string): string | null {

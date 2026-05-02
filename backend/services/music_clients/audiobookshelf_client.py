@@ -125,7 +125,14 @@ class AudiobookshelfClient(BaseMusicClient):
         """Build Audiobookshelf API URL"""
         base_url = f"{self.server_url}/api/{endpoint.lstrip('/')}"
         return base_url
-    
+
+    def get_cover_art_url(self, cover_art_id: str, size: int = 300) -> Optional[str]:
+        """Build authenticated URL for library item cover image (ABS /api/items/{id}/cover)."""
+        if not cover_art_id:
+            return None
+        base_url = self.server_url.rstrip("/")
+        return f"{base_url}/api/items/{cover_art_id}/cover?token={self.api_token}&width={size}"
+
     def _extract_author_from_item(self, item: Dict[str, Any]) -> str:
         """
         Extract author from an item (book) from AudioBookShelf API response
@@ -465,7 +472,7 @@ class AudiobookshelfClient(BaseMusicClient):
                                                 "id": item_id,
                                                 "title": item.get("name", "Unknown"),
                                                 "artist": "",
-                                                "cover_art_id": item.get("coverPath", ""),
+                                                "cover_art_id": item_id,
                                                 "metadata": item
                                             })
                                             books_by_id[item_id] = normalized
@@ -476,13 +483,12 @@ class AudiobookshelfClient(BaseMusicClient):
                                             detail_item = result.get("metadata", item)
                                             author = result.get("author", "")
                                             title = result.get("title", item.get("name", "Unknown"))
-                                            cover_art = result.get("cover_art", item.get("coverPath", ""))
-                                            
+
                                             normalized = self.normalize_album({
                                                 "id": item_id,
                                                 "title": title,
                                                 "artist": author or "",
-                                                "cover_art_id": cover_art,
+                                                "cover_art_id": item_id,
                                                 "metadata": detail_item  # Use detailed metadata
                                             })
                                             books_by_id[item_id] = normalized
@@ -496,7 +502,7 @@ class AudiobookshelfClient(BaseMusicClient):
                                             "id": item_id,
                                             "title": item.get("name", "Unknown"),
                                             "artist": "",
-                                            "cover_art_id": item.get("coverPath", ""),
+                                            "cover_art_id": item_id,
                                             "metadata": item
                                         })
                                         books_by_id[item_id] = normalized
@@ -690,8 +696,7 @@ class AudiobookshelfClient(BaseMusicClient):
                 # Extract book title and author from media.metadata
                 book_title = item_data.get("name", "")
                 book_author = ""
-                book_cover = item_data.get("coverPath", "")
-                
+
                 media = item_data.get("media", {})
                 if isinstance(media, dict):
                     media_metadata = media.get("metadata", {})
@@ -704,9 +709,6 @@ class AudiobookshelfClient(BaseMusicClient):
                                 book_author = authors[0].get("name", "")
                             elif isinstance(authors[0], str):
                                 book_author = authors[0]
-                    # Get cover from media if available
-                    if media.get("coverPath"):
-                        book_cover = media["coverPath"]
                 
                 # Get media files (chapters)
                 tracks = media.get("tracks", [])
@@ -742,7 +744,7 @@ class AudiobookshelfClient(BaseMusicClient):
                         "album": book_title,
                         "duration": int(duration) if duration else 0,
                         "track_number": track.get("index", idx + 1),
-                        "cover_art_id": book_cover,
+                        "cover_art_id": album_id,
                         "metadata": track
                     }, parent_id=album_id)
                     result.append(normalized)
@@ -765,15 +767,11 @@ class AudiobookshelfClient(BaseMusicClient):
                 
                 # Extract podcast name from media.metadata
                 podcast_name = item_data.get("name", "")
-                podcast_cover = item_data.get("coverPath", "")
-                
+
                 if item_data.get("media") and isinstance(item_data["media"], dict):
                     media_metadata = item_data["media"].get("metadata", {})
                     if isinstance(media_metadata, dict):
                         podcast_name = media_metadata.get("title") or media_metadata.get("name") or podcast_name
-                    # Get cover from media if available
-                    if item_data["media"].get("coverPath"):
-                        podcast_cover = item_data["media"]["coverPath"]
                 
                 # Get episodes - AudioBookShelf stores them in different locations
                 episodes = []
@@ -839,7 +837,7 @@ class AudiobookshelfClient(BaseMusicClient):
                         "album": podcast_name,
                         "duration": int(duration) if duration else 0,
                         "track_number": episode.get("index", 0),
-                        "cover_art_id": podcast_cover,
+                        "cover_art_id": playlist_id,
                         "metadata": episode_metadata,
                     }
                     if published_date:

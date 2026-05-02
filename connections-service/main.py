@@ -37,12 +37,14 @@ if _root_log_level > logging.DEBUG:
 logger = logging.getLogger(__name__)
 from service.channel_listener_manager import ChannelListenerManager
 from service.grpc_service import ConnectionsServiceImplementation
+from service.teams_webhook_server import start_teams_webhook_server
 from connections_service_pb2_grpc import add_ConnectionsServiceServicer_to_server
 
 
 class GracefulShutdown:
-    def __init__(self, server):
+    def __init__(self, server, webhook_runner=None):
         self.server = server
+        self.webhook_runner = webhook_runner
         self.shutdown_event = asyncio.Event()
 
     def signal_handler(self, signum, frame):
@@ -52,6 +54,8 @@ class GracefulShutdown:
     async def shutdown(self):
         logger.info("Stopping server...")
         await self.server.stop(grace=5)
+        if self.webhook_runner:
+            await self.webhook_runner.cleanup()
         logger.info("Server shutdown complete")
         self.shutdown_event.set()
 
@@ -121,7 +125,8 @@ async def serve():
         add_ConnectionsServiceServicer_to_server(service_impl, server)
         server.add_insecure_port(f"[::]:{settings.GRPC_PORT}")
 
-        shutdown_handler = GracefulShutdown(server)
+        webhook_runner = await start_teams_webhook_server("0.0.0.0", settings.TEAMS_WEBHOOK_PORT)
+        shutdown_handler = GracefulShutdown(server, webhook_runner)
         signal.signal(signal.SIGINT, shutdown_handler.signal_handler)
         signal.signal(signal.SIGTERM, shutdown_handler.signal_handler)
 

@@ -52,7 +52,7 @@ RUN chown -R appuser:appgroup /app
 
 USER appuser
 
-EXPOSE 50057
+EXPOSE 50057 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD python -c "import socket; s = socket.socket(); s.settimeout(5); s.connect(('127.0.0.1', 50057)); s.close()" || exit 1

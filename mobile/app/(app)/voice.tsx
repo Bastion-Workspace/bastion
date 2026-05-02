@@ -1,6 +1,7 @@
 import { useRouter } from 'expo-router';
 import { useEffect, useRef } from 'react';
 import { View } from 'react-native';
+import { ScreenShell } from '../../src/components/ScreenShell';
 import { useVoiceShortcut } from '../../src/voice/VoiceShortcutContext';
 
 /**
@@ -19,5 +20,9 @@ export default function ExternalVoiceShortcutScreen() {
     router.replace('/(app)/chat');
   }, [requestVoiceOpen, router]);
 
-  return <View style={{ flex: 1, backgroundColor: '#f5f5f5' }} />;
+  return (
+    <ScreenShell>
+      <View style={{ flex: 1, backgroundColor: '#f5f5f5' }} />
+    </ScreenShell>
+  );
 }

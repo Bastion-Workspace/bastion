@@ -37,14 +37,71 @@ def _find_links(entry: ET.Element) -> List[Dict[str, Any]]:
     return out
 
 
-def _parse_search_template(feed_el: ET.Element) -> Optional[str]:
+def _is_opds_search_link_rel(rel: str) -> bool:
+    """True if Atom link rel identifies an OpenSearch / catalog search link."""
+    if not rel or not rel.strip():
+        return False
+    parts = rel.lower().split()
+    if "search" in parts:
+        return True
+    joined = " ".join(parts)
+    if "opensearch.org/specs/opensearch/1.1" in joined:
+        return True
+    if "a9.com/-/spec/opensearch" in joined:
+        return True
+    return False
+
+
+def parse_opensearch_description_template(xml_bytes: bytes) -> Optional[str]:
+    """
+    Extract the best Atom/XML Url@template from an OpenSearch Description document.
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return None
+
+    scored: List[tuple[int, str]] = []
+    for el in root.iter():
+        local = el.tag.split("}")[-1] if "}" in el.tag else el.tag
+        if local != "Url":
+            continue
+        template = el.get("template")
+        if not template or not str(template).strip():
+            continue
+        typ = (el.get("type") or "").lower()
+        score = 0
+        if "application/atom+xml" in typ and ("opds" in typ or "catalog" in typ):
+            score = 5
+        elif "application/atom+xml" in typ:
+            score = 4
+        elif "atom" in typ and "xml" in typ:
+            score = 3
+        elif "opds" in typ:
+            score = 3
+        elif "xml" in typ:
+            score = 2
+        elif "rss" in typ:
+            score = 1
+        scored.append((score, str(template).strip()))
+    if not scored:
+        return None
+    scored.sort(key=lambda x: -x[0])
+    return scored[0][1]
+
+
+def parse_feed_atom_search_link(feed_el: ET.Element) -> tuple[Optional[str], Optional[str]]:
+    """First feed-level search link: (href, type) or (None, None)."""
     for link in feed_el.findall(f"{_ATOM}link"):
-        rel = (link.get("rel") or "").lower()
-        if "search" in rel:
-            href = link.get("href")
-            if href:
-                return href
-    return None
+        rel = link.get("rel") or ""
+        if not _is_opds_search_link_rel(rel):
+            continue
+        href = link.get("href")
+        if not href:
+            continue
+        typ = link.get("type") or ""
+        return str(href).strip(), typ.strip() or None
+    return None, None
 
 
 def parse_opds_atom(xml_bytes: bytes, base_url: str) -> Dict[str, Any]:
@@ -83,7 +140,8 @@ def parse_opds_atom(xml_bytes: bytes, base_url: str) -> Dict[str, Any]:
                 opds_count = None
 
         links = _find_links(entry)
-        acquisition = None
+        acquisition: Optional[str] = None
+        acquisition_type: Optional[str] = None
         nav_links: List[Dict[str, Any]] = []
         seen_nav_href: set[str] = set()
         for lk in links:
@@ -98,8 +156,15 @@ def parse_opds_atom(xml_bytes: bytes, base_url: str) -> Dict[str, Any]:
                 "acquisition" in rel_l and "opds" in rel_l
             )
             if is_opds_acquisition:
-                if "epub" in typ or href_s.lower().endswith(".epub"):
+                href_l = href_s.lower()
+                is_epub = "epub" in typ or href_l.endswith(".epub")
+                is_pdf = "application/pdf" in typ or href_l.endswith(".pdf")
+                if is_epub:
                     acquisition = href_s
+                    acquisition_type = "epub"
+                elif is_pdf and acquisition_type != "epub":
+                    acquisition = href_s
+                    acquisition_type = "pdf"
                 continue
             is_nav = (
                 "subsection" in rel_l
@@ -126,18 +191,20 @@ def parse_opds_atom(xml_bytes: bytes, base_url: str) -> Dict[str, Any]:
                 "number_of_items": opds_count,
                 "links": links,
                 "acquisition_href": acquisition,
+                "acquisition_type": acquisition_type,
                 "navigation_links": nav_links,
             }
         )
 
     feed_links = _find_links(feed_el)
-    search_template = _parse_search_template(feed_el)
+    search_href, search_link_type = parse_feed_atom_search_link(feed_el)
 
     return {
         "feed_title": title,
         "feed_id": feed_id,
         "base_url": base_url,
-        "search_template": search_template,
+        "search_template": search_href,
+        "search_link_type": search_link_type,
         "feed_links": feed_links,
         "entries": entries,
     }

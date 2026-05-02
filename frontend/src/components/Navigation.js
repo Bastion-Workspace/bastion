@@ -139,7 +139,7 @@ const Navigation = () => {
   const pendingApprovalsCount = pendingApprovals.length || 0;
 
   // Check if user has any media source configured
-  const { data: mediaSources } = useQuery(
+  const { data: mediaSources, isFetched: mediaSourcesFetched } = useQuery(
     'mediaSources',
     () => apiService.music.getSources(),
     {
@@ -169,13 +169,18 @@ const Navigation = () => {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- navPathKey encodes which routes exist; re-run when that set changes
   useEffect(() => {
     const valid = new Set(navItems.map((i) => i.path));
+    // Media is omitted from nav until sources load; do not strip /media from pins until we know
+    // whether the user has any media config (otherwise refresh drops a pinned Media page).
+    if (!mediaSourcesFetched) {
+      valid.add('/media');
+    }
     setPinnedPaths((prev) => {
       const next = prev.filter((p) => valid.has(p));
       if (next.length === prev.length && next.every((p, i) => p === prev[i])) return prev;
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
       return next;
     });
-  }, [navPathKey]);
+  }, [navPathKey, mediaSourcesFetched]);
 
   const handlePinnedDragEnd = (result) => {
     if (!result.destination) return;

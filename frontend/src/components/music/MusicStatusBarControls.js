@@ -17,8 +17,10 @@ import {
   VolumeUp,
   VolumeOff,
   Close,
+  Album,
 } from '@mui/icons-material';
 import { useMusic } from '../../contexts/MediaContext';
+import apiService from '../../services/apiService';
 
 const MusicStatusBarControls = () => {
   const {
@@ -46,9 +48,25 @@ const MusicStatusBarControls = () => {
   const containerRef = useRef(null);
   const [needsScrolling, setNeedsScrolling] = useState(false);
   const [scrollDistance, setScrollDistance] = useState(0);
+  const [coverLoadFailed, setCoverLoadFailed] = useState(false);
+
+  useEffect(() => {
+    setCoverLoadFailed(false);
+  }, [currentTrack?.id, currentTrack?.cover_art_id, currentTrack?.service_type]);
 
   // Calculate track title early so it can be used in useEffect
   const trackTitle = currentTrack ? `${currentTrack.title}${currentTrack.artist ? ` - ${currentTrack.artist}` : ''}` : '';
+
+  const rawCoverId =
+    currentTrack?.cover_art_id && String(currentTrack.cover_art_id).trim();
+  const coverArtUrl =
+    rawCoverId && !coverLoadFailed
+      ? apiService.music.getCoverArtUrl(
+          rawCoverId,
+          currentTrack.service_type,
+          64
+        )
+      : null;
 
   // Check if text overflows and needs scrolling
   useEffect(() => {
@@ -172,6 +190,43 @@ const MusicStatusBarControls = () => {
         </IconButton>
       </Tooltip>
 
+      {coverArtUrl ? (
+        <Box
+          component="img"
+          key={coverArtUrl}
+          src={coverArtUrl}
+          alt=""
+          loading="lazy"
+          onError={() => setCoverLoadFailed(true)}
+          sx={{ width: 36, height: 36, borderRadius: 0.5, flexShrink: 0, objectFit: 'cover' }}
+        />
+      ) : (
+        <Tooltip
+          title={
+            coverLoadFailed
+              ? 'Could not load artwork'
+              : 'No album art for this track'
+          }
+        >
+          <Box
+            sx={{
+              width: 36,
+              height: 36,
+              borderRadius: 0.5,
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              bgcolor: 'action.hover',
+              color: 'text.secondary',
+            }}
+            aria-hidden
+          >
+            <Album sx={{ fontSize: 22, opacity: 0.85 }} />
+          </Box>
+        </Tooltip>
+      )}
+
       {/* Track Info - fixed width so prev/play/next buttons stay static when title length varies */}
       <Box
         ref={containerRef}
@@ -253,8 +308,14 @@ const MusicStatusBarControls = () => {
         </IconButton>
       </Tooltip>
 
-      {/* Shuffle */}
-      <Tooltip title={shuffleMode ? 'Shuffle: On' : 'Shuffle: Off'}>
+      {/* Shuffle: when on, "Next" picks a random remaining track; play from Media also shuffles the queue */}
+      <Tooltip
+        title={
+          shuffleMode
+            ? 'Shuffle on: Next track is chosen at random from the rest of the queue. Tap to turn off and restore list order.'
+            : 'Shuffle off: Play tracks in list order. Tap to shuffle tracks after the current one.'
+        }
+      >
         <IconButton
           size="small"
           onClick={toggleShuffle}

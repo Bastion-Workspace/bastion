@@ -11,6 +11,22 @@ import VideoPlayerDialog from '../components/video/VideoPlayerDialog';
 
 const VideoContext = createContext(null);
 
+const WEB_DEVICE_PROFILE = {
+  MaxStreamingBitrate: 140_000_000,
+  DirectPlayProfiles: [
+    {
+      Type: 'Video',
+      Container: 'mp4,webm,mov',
+      VideoCodec: 'h264,vp9,av1',
+      AudioCodec: 'aac,mp3,opus,flac',
+    },
+  ],
+  TranscodingProfiles: [
+    { Type: 'Video', Container: 'ts', VideoCodec: 'h264', AudioCodec: 'aac', Protocol: 'hls' },
+  ],
+  SubtitleProfiles: [{ Format: 'vtt', Method: 'External' }],
+};
+
 export const useVideo = () => {
   const ctx = useContext(VideoContext);
   if (!ctx) {
@@ -23,7 +39,6 @@ function itemId(item) {
   return item?.Id || item?.id;
 }
 
-/** Default audio stream index + codec from Emby MediaSource (PascalCase or camelCase). */
 function defaultAudioFromMediaSource(ms) {
   const streams = ms?.MediaStreams || ms?.mediaStreams || [];
   const audioStreams = streams.filter((s) => (s.Type || s.type) === 'Audio');
@@ -43,10 +58,6 @@ function defaultAudioFromMediaSource(ms) {
   };
 }
 
-/**
- * Codecs commonly muxed in MP4 that Chromium/Safari often cannot decode in <video> direct stream.
- * Prefer HLS transcode (AAC) when Emby offers it.
- */
 function browserLikelyDecodesMp4Audio(codec) {
   if (codec == null || codec === '') return true;
   const c = String(codec).toLowerCase();
@@ -64,6 +75,32 @@ function browserLikelyDecodesMp4Audio(codec) {
   return true;
 }
 
+function defaultVideoFromMediaSource(ms) {
+  const streams = ms?.MediaStreams || ms?.mediaStreams || [];
+  const videoStreams = streams.filter((s) => (s.Type || s.type) === 'Video');
+  if (videoStreams.length === 0) {
+    return { index: null, codec: null };
+  }
+  const defIdx = ms?.DefaultVideoStreamIndex ?? ms?.defaultVideoStreamIndex;
+  const chosen =
+    defIdx != null
+      ? videoStreams.find((s) => (s.Index ?? s.index) === defIdx) || videoStreams[0]
+      : videoStreams[0];
+  const idx = chosen?.Index ?? chosen?.index;
+  const codec = chosen?.Codec ?? chosen?.codec ?? null;
+  return {
+    index: idx != null && Number.isFinite(Number(idx)) ? Number(idx) : null,
+    codec: codec != null ? String(codec) : null,
+  };
+}
+
+function browserCanPlayVideoCodec(codec) {
+  if (codec == null || codec === '') return true;
+  const c = String(codec).toLowerCase();
+  if (c === 'hevc' || c === 'h265') return false;
+  return true;
+}
+
 function pickSourceAndMode(playbackInfo) {
   const sources = playbackInfo?.MediaSources || [];
   const ms = sources.find((s) => s.IsDefault) || sources[0];
@@ -78,8 +115,10 @@ function pickSourceAndMode(playbackInfo) {
   const trans = (ms.TranscodingUrl || ms?.transcodingUrl || '').toLowerCase();
   const hasHls = trans.includes('m3u8');
   const { index: audioStreamIndex, codec: audioCodec } = defaultAudioFromMediaSource(ms);
+  const { codec: videoCodec } = defaultVideoFromMediaSource(ms);
   const directAudioOk = browserLikelyDecodesMp4Audio(audioCodec);
-  const useHls = hasHls && (ms.SupportsDirectPlay !== true || !directAudioOk);
+  const directVideoOk = browserCanPlayVideoCodec(videoCodec);
+  const useHls = hasHls && (ms.SupportsDirectPlay !== true || !directAudioOk || !directVideoOk);
   return {
     mediaSourceId: ms.Id,
     playSessionId: sessionId,
@@ -87,6 +126,7 @@ function pickSourceAndMode(playbackInfo) {
     mediaSource: ms,
     audioStreamIndex,
     audioCodec,
+    videoCodec,
   };
 }
 
@@ -152,7 +192,9 @@ export const VideoProvider = ({ children }) => {
           rawItem?.Name && rawItem?.Type
             ? rawItem
             : await apiService.emby.getItemDetail(id);
-        const pi = await apiService.emby.getPlaybackInfo(itemId(detail));
+        const pi = await apiService.emby.getPlaybackInfo(itemId(detail), {
+          device_profile: WEB_DEVICE_PROFILE,
+        });
         const chosen = pickSourceAndMode(pi);
         if (!chosen) {
           setError('No playable media source');
@@ -166,12 +208,17 @@ export const VideoProvider = ({ children }) => {
         setItem(detail);
         setPick(chosen);
         setOpen(true);
+        const playMethod = chosen.useHls
+          ? 'Transcode'
+          : chosen.mediaSource?.SupportsDirectPlay === true
+            ? 'DirectPlay'
+            : 'DirectStream';
         await apiService.emby.reportPlaybackStart({
           ItemId: itemId(detail),
           MediaSourceId: chosen.mediaSourceId,
           PlaySessionId: chosen.playSessionId,
           PositionTicks: 0,
-          PlayMethod: chosen.useHls ? 'Transcode' : 'DirectStream',
+          PlayMethod,
           IsPaused: false,
           ...(chosen.audioStreamIndex != null
             ? { AudioStreamIndex: chosen.audioStreamIndex }

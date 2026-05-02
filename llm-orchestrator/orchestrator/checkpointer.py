@@ -176,3 +176,20 @@ async def get_async_postgres_saver() -> Union[AsyncPostgresSaver, MemorySaver]:
     checkpointer = await get_postgres_checkpointer()
     return checkpointer.checkpointer
 
+
+async def clear_checkpoint_thread(thread_id: str) -> None:
+    """
+    Delete all checkpoint state for a thread_id (e.g. after a cancelled run).
+
+    MemorySaver fallback has no adelete_thread; partial in-memory state is process-local.
+    """
+    if not thread_id or not str(thread_id).strip():
+        return
+    try:
+        saver = await get_async_postgres_saver()
+        if saver is not None and hasattr(saver, "adelete_thread"):
+            await saver.adelete_thread(str(thread_id))
+            logger.info("Cleared LangGraph checkpoint for thread_id=%s", thread_id)
+    except Exception as e:
+        logger.warning("Failed to clear checkpoint thread %s: %s", thread_id, e)
+

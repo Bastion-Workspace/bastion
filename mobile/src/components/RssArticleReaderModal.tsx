@@ -1,9 +1,12 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Linking,
   Modal,
+  PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -14,12 +17,49 @@ import WebView from 'react-native-webview';
 import { getRssArticle, type RssArticle } from '../api/rss';
 import { absolutizeMessageMediaRefs, getApiBaseUrl } from '../api/config';
 import { getColors, type AppColors } from '../theme/colors';
+import { useRssPrefs, type RssArticleFontFamily, type RssReaderTheme } from '../hooks/useRssPrefs';
 
 type Props = {
   visible: boolean;
   article: RssArticle | null;
   onClose: () => void;
+  hasPrev?: boolean;
+  hasNext?: boolean;
+  onPrevArticle?: () => void;
+  onNextArticle?: () => void;
 };
+
+const RSS_FONT_STACKS: Record<RssArticleFontFamily, string> = {
+  sans: "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif",
+  serif: "Georgia,'Times New Roman',serif",
+  mono: "'Courier New',Courier,monospace",
+};
+
+function rssArticlePalette(theme: RssReaderTheme, systemIsDark: boolean): AppColors {
+  if (theme === 'auto') {
+    return getColors(systemIsDark ? 'dark' : 'light');
+  }
+  if (theme === 'light') {
+    return getColors('light');
+  }
+  if (theme === 'dark') {
+    return getColors('dark');
+  }
+  return {
+    background: '#f4ecd8',
+    surface: '#efe6d4',
+    surfaceMuted: '#ebe0c8',
+    text: '#3e3020',
+    textSecondary: '#6d5c4d',
+    border: '#d4c4a8',
+    link: '#6d4c1a',
+    danger: '#a52',
+    chipBg: '#e8dcc4',
+    chipBgActive: '#6d4c1a',
+    chipText: '#5c4a38',
+    chipTextActive: '#fff',
+  };
+}
 
 function looksLikeHtml(s: string): boolean {
   const t = s.trim().toLowerCase();
@@ -43,53 +83,159 @@ function escapeHtmlText(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-function wrapHtmlDocument(innerBody: string, palette: AppColors): string {
+function wrapHtmlDocument(
+  innerBody: string,
+  palette: AppColors,
+  fontSizePx: number,
+  fontFamilyCss: string
+): string {
   const base = (getApiBaseUrl() || '').replace(/\/$/, '');
   const baseTag = base ? `<base href="${escapeHtmlText(base)}/"/>` : '';
   const { background, text, textSecondary, link, border, surfaceMuted } = palette;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>${baseTag}<style>
 html,body{background-color:${background};margin:0;}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:16px;line-height:1.45;color:${text};padding:12px;}
+body{font-family:${fontFamilyCss};font-size:${fontSizePx}px;line-height:1.45;color:${text};padding:12px;}
 img,video{max-width:100%;height:auto;}
 pre{white-space:pre-wrap;font-family:inherit;overflow-x:auto;background-color:${surfaceMuted};border:1px solid ${border};padding:8px;border-radius:6px;}
 a{color:${link};}
 blockquote{margin:12px 0;padding:8px 12px;border-left:3px solid ${border};color:${textSecondary};}
-code{font-size:0.95em;background-color:${surfaceMuted};padding:2px 5px;border-radius:4px;}
+code{font-size:0.95em;background-color:${surfaceMuted};padding:2px 5px;border-radius:6px;}
 </style></head><body>${innerBody}</body></html>`;
 }
 
-function buildArticleHtml(a: RssArticle, palette: AppColors): string {
+function buildArticleHtml(
+  a: RssArticle,
+  palette: AppColors,
+  fontSizePx: number,
+  fontFamilyCss: string
+): string {
+  const wrap = (inner: string) => wrapHtmlDocument(inner, palette, fontSizePx, fontFamilyCss);
   const htmlRaw = (a.full_content_html || '').trim();
   if (htmlRaw) {
-    return absolutizeMessageMediaRefs(wrapHtmlDocument(htmlRaw, palette));
+    return absolutizeMessageMediaRefs(wrap(htmlRaw));
   }
   const plain = (a.full_content || '').trim();
   if (plain) {
-    return wrapHtmlDocument(`<pre>${escapeHtmlText(plain)}</pre>`, palette);
+    return wrap(`<pre>${escapeHtmlText(plain)}</pre>`);
   }
   const desc = (a.description || '').trim();
   if (desc && looksLikeHtml(desc)) {
-    return absolutizeMessageMediaRefs(wrapHtmlDocument(desc, palette));
+    return absolutizeMessageMediaRefs(wrap(desc));
   }
   if (desc) {
-    return wrapHtmlDocument(`<p>${escapeHtmlText(desc)}</p>`, palette);
+    return wrap(`<p>${escapeHtmlText(desc)}</p>`);
   }
   return '';
 }
 
-export function RssArticleReaderModal({ visible, article, onClose }: Props) {
+export function RssArticleReaderModal({
+  visible,
+  article,
+  onClose,
+  hasPrev = false,
+  hasNext = false,
+  onPrevArticle,
+  onNextArticle,
+}: Props) {
   const insets = useSafeAreaInsets();
-  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
-  const colors = useMemo(() => getColors(scheme), [scheme]);
+  const systemIsDark = useColorScheme() === 'dark';
+  const {
+    articleFontSize: fontSize,
+    setArticleFontSize,
+    articleFontFamily: fontFamily,
+    setArticleFontFamily,
+    articleTheme: rssTheme,
+    setArticleTheme,
+  } = useRssPrefs();
   const [detail, setDetail] = useState<RssArticle | null>(null);
   const [loading, setLoading] = useState(false);
+  const [chromeOpen, setChromeOpen] = useState(false);
+
+  const colors = useMemo(() => rssArticlePalette(rssTheme, systemIsDark), [rssTheme, systemIsDark]);
+
+  const navZones = Boolean(onPrevArticle || onNextArticle);
+
+  const gestureThresholds = useMemo(
+    () => ({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: (_: unknown, gs: { dx: number; dy: number }) =>
+        Math.abs(gs.dx) > 6 || Math.abs(gs.dy) > 6,
+      onPanResponderTerminationRequest: () => false,
+    }),
+    []
+  );
+
+  const leftZonePan = useMemo(
+    () =>
+      PanResponder.create({
+        ...gestureThresholds,
+        onPanResponderRelease: (_, gs) => {
+          if (Math.abs(gs.dx) < 12 && Math.abs(gs.dy) < 12) {
+            if (hasPrev) onPrevArticle?.();
+            return;
+          }
+          if (gs.dy > 40 && gs.dy > Math.abs(gs.dx) * 1.8) {
+            setChromeOpen(true);
+          }
+        },
+      }),
+    [gestureThresholds, hasPrev, onPrevArticle]
+  );
+
+  const middleZonePan = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_e, gs) => gs.dy > 10 && gs.dy > Math.abs(gs.dx) * 0.55,
+        onStartShouldSetPanResponder: () => false,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderRelease: (_e, gs) => {
+          if (gs.dy > 40 && gs.dy > Math.abs(gs.dx) * 1.8) {
+            setChromeOpen(true);
+          }
+        },
+      }),
+    []
+  );
+
+  const rightZonePan = useMemo(
+    () =>
+      PanResponder.create({
+        ...gestureThresholds,
+        onPanResponderRelease: (_, gs) => {
+          if (Math.abs(gs.dx) < 12 && Math.abs(gs.dy) < 12) {
+            if (hasNext) onNextArticle?.();
+            return;
+          }
+          if (gs.dy > 40 && gs.dy > Math.abs(gs.dx) * 1.8) {
+            setChromeOpen(true);
+          }
+        },
+      }),
+    [gestureThresholds, hasNext, onNextArticle]
+  );
+
+  const chromeBackdropPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderRelease: (_, gs) => {
+          if (gs.dy < -40 || (Math.abs(gs.dx) < 12 && Math.abs(gs.dy) < 12)) {
+            setChromeOpen(false);
+          }
+        },
+      }),
+    []
+  );
 
   useEffect(() => {
     if (!visible || !article) {
       setDetail(null);
       setLoading(false);
+      setChromeOpen(false);
       return;
     }
+    setChromeOpen(false);
     let cancelled = false;
     setLoading(true);
     setDetail(null);
@@ -115,9 +261,10 @@ export function RssArticleReaderModal({ visible, article, onClose }: Props) {
   }, [visible, article?.article_id]);
 
   const display = detail ?? article;
+  const fontStack = RSS_FONT_STACKS[fontFamily];
   const htmlDoc = useMemo(
-    () => (display ? buildArticleHtml(display, colors) : ''),
-    [display, colors]
+    () => (display ? buildArticleHtml(display, colors, fontSize, fontStack) : ''),
+    [display, colors, fontSize, fontStack]
   );
 
   const openOriginal = useCallback(async () => {
@@ -127,49 +274,200 @@ export function RssArticleReaderModal({ visible, article, onClose }: Props) {
     if (ok) await Linking.openURL(url);
   }, [display?.link]);
 
+  const themeOptions: { key: RssReaderTheme; label: string }[] = [
+    { key: 'auto', label: 'Auto' },
+    { key: 'light', label: 'Light' },
+    { key: 'sepia', label: 'Sepia' },
+    { key: 'dark', label: 'Dark' },
+  ];
+
+  const fontOptions: { key: RssArticleFontFamily; label: string }[] = [
+    { key: 'sans', label: 'Sans' },
+    { key: 'serif', label: 'Serif' },
+    { key: 'mono', label: 'Mono' },
+  ];
+
   if (!article) {
     return null;
   }
 
-  return (
-    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <View style={[styles.sheet, { backgroundColor: colors.background, paddingTop: Math.max(insets.top, 8) }]}>
-        <View style={[styles.header, { borderBottomColor: colors.border }]}>
-          <Pressable onPress={onClose} style={styles.headerBtn} accessibilityRole="button">
-            <Text style={[styles.headerBtnText, { color: colors.link }]}>Close</Text>
+  const chevronTint = colors.textSecondary;
+
+  const chromePanel = (
+    <View
+      style={[
+        styles.chromePanel,
+        {
+          paddingTop: Math.max(insets.top, 8) + 4,
+          backgroundColor: colors.surface,
+          borderBottomColor: colors.border,
+        },
+      ]}
+    >
+      <View style={[styles.header, { borderBottomColor: colors.border }]}>
+        <Pressable
+          onPress={() => {
+            setChromeOpen(false);
+            onClose();
+          }}
+          style={styles.headerBtn}
+          accessibilityRole="button"
+        >
+          <Text style={[styles.headerBtnText, { color: colors.link }]}>Close</Text>
+        </Pressable>
+        <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={2} ellipsizeMode="tail">
+          {display?.title || 'Article'}
+        </Text>
+        <Pressable onPress={() => void openOriginal()} style={styles.headerBtn} accessibilityRole="link">
+          <Text style={[styles.headerBtnText, { color: colors.link }]}>Browser</Text>
+        </Pressable>
+      </View>
+      {display?.feed_name ? (
+        <Text style={[styles.feedName, { color: colors.link }]} numberOfLines={1}>
+          {display.feed_name}
+        </Text>
+      ) : null}
+      <View
+        style={[styles.settingsStrip, { borderBottomColor: colors.border, borderBottomWidth: StyleSheet.hairlineWidth }]}
+      >
+        <View style={styles.settingsRow}>
+          <Pressable
+            onPress={() => void setArticleFontSize(fontSize - 1)}
+            style={styles.fsBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Decrease article font size"
+          >
+            <Text style={[styles.fsBtnText, { color: colors.link }]}>A−</Text>
           </Pressable>
-          <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={2}>
-            {display?.title || 'Article'}
-          </Text>
-          <Pressable onPress={() => void openOriginal()} style={styles.headerBtn} accessibilityRole="link">
-            <Text style={[styles.headerBtnText, { color: colors.link }]}>Browser</Text>
+          <Text style={[styles.fsLabel, { color: colors.textSecondary }]}>{fontSize}px</Text>
+          <Pressable
+            onPress={() => void setArticleFontSize(fontSize + 1)}
+            style={styles.fsBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Increase article font size"
+          >
+            <Text style={[styles.fsBtnText, { color: colors.link }]}>A+</Text>
           </Pressable>
         </View>
-        {display?.feed_name ? (
-          <Text style={[styles.feedName, { color: colors.link }]} numberOfLines={1}>
-            {display.feed_name}
-          </Text>
-        ) : null}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipScroll}>
+          {fontOptions.map(({ key, label }) => {
+            const on = fontFamily === key;
+            return (
+              <Pressable
+                key={key}
+                onPress={() => void setArticleFontFamily(key)}
+                style={[styles.chip, { backgroundColor: on ? colors.chipBgActive : colors.chipBg }]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: on }}
+              >
+                <Text style={{ color: on ? colors.chipTextActive : colors.chipText, fontWeight: '600', fontSize: 13 }}>
+                  {label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chipScroll}>
+          {themeOptions.map(({ key, label }) => {
+            const on = rssTheme === key;
+            return (
+              <Pressable
+                key={key}
+                onPress={() => void setArticleTheme(key)}
+                style={[styles.chip, { backgroundColor: on ? colors.chipBgActive : colors.chipBg }]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: on }}
+              >
+                <Text style={{ color: on ? colors.chipTextActive : colors.chipText, fontWeight: '600', fontSize: 13 }}>
+                  {label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      </View>
+    </View>
+  );
+
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <View style={[styles.sheet, { backgroundColor: colors.background }]}>
         {loading ? (
-          <View style={styles.center}>
+          <View style={[styles.center, { paddingTop: insets.top }]}>
             <ActivityIndicator size="large" color={colors.text} />
           </View>
         ) : htmlDoc ? (
-          <WebView
-            style={[styles.web, { backgroundColor: colors.background }]}
-            originWhitelist={['*']}
-            source={{ html: htmlDoc }}
-            javaScriptEnabled={false}
-            domStorageEnabled={false}
-            setSupportMultipleWindows={false}
-          />
+          <>
+            <View style={[styles.readerShell, { paddingTop: insets.top }]}>
+              <View style={styles.readerBody}>
+                <WebView
+                  style={[styles.web, { backgroundColor: colors.background }]}
+                  originWhitelist={['*']}
+                  source={{ html: htmlDoc }}
+                  javaScriptEnabled={false}
+                  domStorageEnabled={false}
+                  setSupportMultipleWindows={false}
+                />
+                {navZones ? (
+                  <View style={styles.zoneRow} pointerEvents="box-none" accessibilityLabel="Article navigation zones">
+                    <View style={styles.zoneSide} {...leftZonePan.panHandlers} accessibilityLabel="Previous article zone">
+                      <Ionicons
+                        name="chevron-back"
+                        size={28}
+                        color={chevronTint}
+                        style={{ opacity: hasPrev ? 0.45 : 0.12 }}
+                        pointerEvents="none"
+                      />
+                    </View>
+                    <View style={styles.zoneMiddle} {...middleZonePan.panHandlers} accessibilityLabel="Swipe down for menu" />
+                    <View style={styles.zoneSide} {...rightZonePan.panHandlers} accessibilityLabel="Next article zone">
+                      <Ionicons
+                        name="chevron-forward"
+                        size={28}
+                        color={chevronTint}
+                        style={{ opacity: hasNext ? 0.45 : 0.12 }}
+                        pointerEvents="none"
+                      />
+                    </View>
+                  </View>
+                ) : (
+                  <View style={styles.fullSwipeChrome} {...middleZonePan.panHandlers} accessibilityLabel="Swipe down for menu" />
+                )}
+              </View>
+              {!chromeOpen ? (
+                <Pressable
+                  style={[styles.menuPeek, { top: Math.max(insets.top, 8) + 4 }]}
+                  onPress={() => setChromeOpen(true)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Show article menu"
+                >
+                  <Ionicons name="chevron-down" size={22} color={colors.textSecondary} />
+                </Pressable>
+              ) : null}
+            </View>
+            {chromeOpen ? (
+              <>
+                <View
+                  style={[styles.chromeBackdrop, { backgroundColor: 'rgba(0,0,0,0.35)' }]}
+                  {...chromeBackdropPan.panHandlers}
+                  accessibilityLabel="Dismiss article menu"
+                />
+                <View style={styles.chromeWrap} pointerEvents="box-none">
+                  {chromePanel}
+                </View>
+              </>
+            ) : null}
+          </>
         ) : (
-          <View style={styles.center}>
+          <View style={[styles.center, { paddingTop: insets.top }]}>
             <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
               No article body is stored on the server yet.
             </Text>
             <Pressable onPress={() => void openOriginal()} style={styles.openLink}>
               <Text style={[styles.openLinkText, { color: colors.link }]}>Open original link</Text>
+            </Pressable>
+            <Pressable onPress={onClose} style={styles.emptyClose}>
+              <Text style={[styles.emptyCloseText, { color: colors.link }]}>Close</Text>
             </Pressable>
           </View>
         )}
@@ -180,6 +478,39 @@ export function RssArticleReaderModal({ visible, article, onClose }: Props) {
 
 const styles = StyleSheet.create({
   sheet: { flex: 1 },
+  readerShell: { flex: 1, position: 'relative' },
+  fullSwipeChrome: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  menuPeek: {
+    position: 'absolute',
+    right: 12,
+    zIndex: 6,
+    padding: 10,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.12)',
+  },
+  chromeBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 8,
+  },
+  chromeWrap: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 9,
+    justifyContent: 'flex-start',
+  },
+  chromePanel: {
+    borderBottomLeftRadius: 12,
+    borderBottomRightRadius: 12,
+    paddingHorizontal: 4,
+    paddingBottom: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 6,
+    elevation: 8,
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -190,11 +521,51 @@ const styles = StyleSheet.create({
   },
   headerBtn: { paddingVertical: 8, paddingHorizontal: 10 },
   headerBtnText: { fontWeight: '600', fontSize: 15 },
-  headerTitle: { flex: 1, fontSize: 16, fontWeight: '700' },
-  feedName: { fontSize: 13, fontWeight: '600', paddingHorizontal: 16, paddingBottom: 6 },
+  headerTitle: { flex: 1, fontSize: 16, fontWeight: '700', textAlign: 'center', minWidth: 0 },
+  feedName: { fontSize: 13, fontWeight: '600', paddingHorizontal: 16, paddingBottom: 6, paddingTop: 4 },
+  settingsStrip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
+  },
+  settingsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+  },
+  fsBtn: { paddingVertical: 6, paddingHorizontal: 14 },
+  fsBtnText: { fontWeight: '700', fontSize: 18 },
+  fsLabel: { fontSize: 13, fontWeight: '600', minWidth: 44, textAlign: 'center' },
+  chipScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    marginRight: 8,
+  },
+  readerBody: { flex: 1, position: 'relative' },
   web: { flex: 1 },
+  zoneRow: {
+    ...StyleSheet.absoluteFillObject,
+    flexDirection: 'row',
+  },
+  zoneSide: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    maxWidth: '28%',
+  },
+  zoneMiddle: { flex: 1 },
   center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
   emptyText: { fontSize: 15, textAlign: 'center', marginBottom: 16 },
   openLink: { paddingVertical: 12, paddingHorizontal: 20 },
   openLinkText: { fontWeight: '700', fontSize: 16 },
+  emptyClose: { marginTop: 16, padding: 12 },
+  emptyCloseText: { fontSize: 16, fontWeight: '600' },
 });

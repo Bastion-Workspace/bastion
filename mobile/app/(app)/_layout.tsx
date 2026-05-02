@@ -1,4 +1,5 @@
-import { Redirect, Stack } from 'expo-router';
+import { Redirect, Stack, useSegments } from 'expo-router';
+import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import { AppLauncherSheet } from '../../src/components/AppLauncherSheet';
 import { BottomDock } from '../../src/components/BottomDock';
@@ -6,18 +7,28 @@ import { FullPlayerModal } from '../../src/components/media/FullPlayerModal';
 import { MiniPlayer } from '../../src/components/media/MiniPlayer';
 import { AppLauncherProvider } from '../../src/context/AppLauncherContext';
 import { useAuth } from '../../src/context/AuthContext';
-import { MediaPlayerProvider, useMediaPlayer } from '../../src/context/MediaPlayerContext';
-import { MINI_PLAYER_STRIP_HEIGHT } from '../../src/constants/dock';
+import { MediaPlayerProvider } from '../../src/context/MediaPlayerContext';
 import { VoiceModalProvider } from '../../src/voice/VoiceModalContext';
 import { VoiceShortcutProvider } from '../../src/voice/VoiceShortcutContext';
+import { saveLastAppRoute, segmentsToPersistedHref } from '../../src/session/lastAppRouteStore';
+
+function LastRouteRecorder() {
+  const segments = useSegments();
+  useEffect(() => {
+    const href = segmentsToPersistedHref(segments);
+    if (href) {
+      void saveLastAppRoute(href);
+    }
+  }, [segments]);
+  return null;
+}
 
 function AppShellWithPlayer() {
-  const { hasActiveSession } = useMediaPlayer();
   return (
     <View style={styles.root}>
-      <View style={[styles.stackWrap, hasActiveSession ? { paddingBottom: MINI_PLAYER_STRIP_HEIGHT } : undefined]}>
+      <LastRouteRecorder />
+      <View style={styles.stackWrap}>
         <Stack
-          initialRouteName="chat"
           screenOptions={{
             headerShown: true,
             headerBackTitle: 'Back',

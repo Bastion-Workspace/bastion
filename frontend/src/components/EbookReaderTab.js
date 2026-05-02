@@ -4,7 +4,6 @@ import {
   Typography,
   Button,
   IconButton,
-  Slider,
   Select,
   MenuItem,
   FormControl,
@@ -12,14 +11,7 @@ import {
   Tooltip,
   Paper,
 } from '@mui/material';
-import {
-  ContentCopy,
-  Fullscreen,
-  FullscreenExit,
-  MenuBook,
-  ChevronLeft,
-  ChevronRight,
-} from '@mui/icons-material';
+import { Fullscreen, FullscreenExit } from '@mui/icons-material';
 import ePub from 'epubjs';
 import ebooksService from '../services/ebooksService';
 import {
@@ -27,9 +19,9 @@ import {
   KOREADER_PARTIAL_MD5_REF_HEX,
   buildKoreaderPartialMd5GoldenArrayBuffer,
 } from '../utils/koreaderPartialMd5';
-import { useChatSidebar } from '../contexts/ChatSidebarContext';
 import { devLog } from '../utils/devConsole';
 import { ebookCachePut, ebookCacheGet, ebookCacheEnforceQuota } from '../services/ebookIndexedDb';
+import PdfBytesViewer from './PdfBytesViewer';
 
 const DEVICE_KEY = 'bastion_kosync_device_id';
 
@@ -54,6 +46,36 @@ const DEFAULT_PREFS = {
   theme: 'light',
   margin: 0.08,
 };
+
+/** Preset body sizes for EPUB reader (px); persisted as `fontSize` in reader_prefs. */
+const FONT_SIZE_PRESETS = [
+  { label: 'X-Small', px: 12 },
+  { label: 'Small', px: 14 },
+  { label: 'Medium', px: 18 },
+  { label: 'Large', px: 22 },
+  { label: 'X-Large', px: 28 },
+];
+
+function snapFontSizeToPresetPx(px) {
+  const n = Number(px);
+  const base = Number.isFinite(n) ? n : DEFAULT_PREFS.fontSize;
+  let bestPx = FONT_SIZE_PRESETS[2].px;
+  let bestDist = Infinity;
+  for (const { px: presetPx } of FONT_SIZE_PRESETS) {
+    const d = Math.abs(presetPx - base);
+    if (d < bestDist) {
+      bestDist = d;
+      bestPx = presetPx;
+    }
+  }
+  return bestPx;
+}
+
+function normalizeReaderPrefs(raw) {
+  const merged = { ...DEFAULT_PREFS, ...raw };
+  merged.fontSize = snapFontSizeToPresetPx(merged.fontSize);
+  return merged;
+}
 
 function getOrCreateDeviceId() {
   try {
@@ -89,14 +111,72 @@ function applyReaderTheme(rendition, readerPrefs) {
 
 const READER_MAX_WIDTH_PX = 1180;
 
+/** No default focus ring on pointer use; keyboard users still get :focus-visible. */
+const readerTapZoneFocusSx = {
+  outline: 'none',
+  boxShadow: 'none',
+  border: 0,
+  '&:focus': { outline: 'none', boxShadow: 'none' },
+  '&:focus:not(:focus-visible)': { outline: 'none', boxShadow: 'none' },
+  '&:active': { outline: 'none', boxShadow: 'none' },
+  '&:focus-visible': {
+    outline: '2px solid',
+    outlineColor: 'primary.main',
+    outlineOffset: 2,
+  },
+  '&::-moz-focus-inner': { border: 0 },
+};
+
+/** Best-effort OPF/DC creator for recently-opened list (epubjs package shape varies). */
+function extractEpubAuthor(book) {
+  try {
+    const meta = book?.package?.metadata || book?.packaging?.metadata;
+    if (!meta) return null;
+    const c = meta.creator || meta['dc:creator'] || meta.author;
+    if (Array.isArray(c)) {
+      const parts = [];
+      for (const x of c) {
+        if (typeof x === 'string' && x.trim()) parts.push(x.trim());
+        else if (x && typeof x === 'object') {
+          const t = x['#text'] || x.name || x.value;
+          if (t && String(t).trim()) parts.push(String(t).trim());
+        }
+      }
+      return parts.length ? parts.join(', ') : null;
+    }
+    if (typeof c === 'string' && c.trim()) return c.trim();
+    if (c && typeof c === 'object') {
+      const t = c['#text'] || c.name || c.value;
+      return t && String(t).trim() ? String(t).trim() : null;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function inferEbookFormat(acquisitionUrl, explicit) {
+  if (explicit === 'pdf' || explicit === 'epub') return explicit;
+  try {
+    const u = new URL(String(acquisitionUrl || ''));
+    if (u.pathname.toLowerCase().endsWith('.pdf')) return 'pdf';
+  } catch (_) {
+    /* ignore */
+  }
+  const s = String(acquisitionUrl || '').toLowerCase();
+  if (s.includes('.pdf')) return 'pdf';
+  return 'epub';
+}
+
 export default function EbookReaderTab({
   catalogId,
   acquisitionUrl,
   title,
   digest: initialDigest,
-  documentsFileTreeCollapsed = false,
-  documentsIsMobile = false,
+  ebookFormat,
+  ebookAuthor: initialAuthor,
 }) {
+  const format = useMemo(() => inferEbookFormat(acquisitionUrl, ebookFormat), [acquisitionUrl, ebookFormat]);
   const hostRef = useRef(null);
   const renditionRef = useRef(null);
   const bookRef = useRef(null);
@@ -113,13 +193,7 @@ export default function EbookReaderTab({
   const keyboardNavRef = useRef(null);
   const [pageLocationLabel, setPageLocationLabel] = useState('—');
   const [readerReady, setReaderReady] = useState(false);
-  const { isCollapsed: chatSidebarCollapsed } = useChatSidebar();
-
-  const overlayInsetsPx = useMemo(() => {
-    const left = documentsFileTreeCollapsed ? (documentsIsMobile ? 52 : 44) : 10;
-    const right = chatSidebarCollapsed ? 72 : 12;
-    return { left, right };
-  }, [documentsFileTreeCollapsed, documentsIsMobile, chatSidebarCollapsed]);
+  const [pdfBytes, setPdfBytes] = useState(null);
 
   useEffect(() => {
     try {
@@ -132,14 +206,8 @@ export default function EbookReaderTab({
     }
   }, []);
 
-  const copyDigest = useCallback(async () => {
-    if (!digest) return;
-    try {
-      await navigator.clipboard.writeText(digest);
-    } catch (_) {}
-  }, [digest]);
-
   const pushProgress = useCallback(async (percentage, cfi, docDigest) => {
+    if (format === 'pdf') return;
     const d = docDigest || digest;
     if (!d || !kosyncConfiguredRef.current) return;
     try {
@@ -151,7 +219,7 @@ export default function EbookReaderTab({
         device_id: getOrCreateDeviceId(),
       });
     } catch (_) {}
-  }, [digest]);
+  }, [digest, format]);
 
   const schedulePush = useCallback(
     (percentage, cfi, docDigest) => {
@@ -177,6 +245,7 @@ export default function EbookReaderTab({
       bookRef.current?.destroy();
     } catch (_) {}
     bookRef.current = null;
+    setPdfBytes(null);
 
     (async () => {
       try {
@@ -185,7 +254,7 @@ export default function EbookReaderTab({
         setError('');
         const settings = await ebooksService.getSettings();
         if (!active) return;
-        const mergedPrefs = { ...DEFAULT_PREFS, ...(settings?.reader_prefs || {}) };
+        const mergedPrefs = normalizeReaderPrefs(settings?.reader_prefs || {});
         setPrefs(mergedPrefs);
         kosyncConfiguredRef.current = Boolean(settings?.kosync?.configured);
 
@@ -222,29 +291,47 @@ export default function EbookReaderTab({
         await ebookCacheEnforceQuota(8);
 
         const recent = settings?.recently_opened || [];
-        const item = {
-          digest: d,
-          title: title || 'Book',
-          catalog_id: catalogId,
-          acquisition_url: acquisitionUrl,
-          opened_at: new Date().toISOString(),
+        const pushRecent = async (authorText) => {
+          const author = authorText && String(authorText).trim() ? String(authorText).trim() : undefined;
+          const item = {
+            digest: d,
+            title: title || 'Book',
+            catalog_id: catalogId,
+            acquisition_url: acquisitionUrl,
+            opened_at: new Date().toISOString(),
+            acquisition_format: format === 'pdf' ? 'pdf' : 'epub',
+            ...(author ? { author } : {}),
+          };
+          const mergedRecent = [
+            item,
+            ...recent.filter(
+              (r) =>
+                r.digest !== d &&
+                !(String(r.catalog_id) === String(catalogId) && r.acquisition_url === acquisitionUrl)
+            ),
+          ].slice(0, 40);
+          await ebooksService.putSettings({ recently_opened: mergedRecent });
         };
-        const mergedRecent = [
-          item,
-          ...recent.filter(
-            (r) =>
-              r.digest !== d &&
-              !(String(r.catalog_id) === String(catalogId) && r.acquisition_url === acquisitionUrl)
-          ),
-        ].slice(0, 40);
-        await ebooksService.putSettings({ recently_opened: mergedRecent });
 
         if (!active) return;
+
+        if (format === 'pdf') {
+          await pushRecent(initialAuthor);
+          if (!active) return;
+          setPdfBytes(rawBytes);
+          setStatus('');
+          return;
+        }
+
         setStatus('Opening book…');
         const book = ePub();
         bookRef.current = book;
         await book.open(rawBytes);
         await book.ready;
+        if (!active) return;
+
+        const resolvedAuthor = (initialAuthor && String(initialAuthor).trim()) || extractEpubAuthor(book) || undefined;
+        await pushRecent(resolvedAuthor);
         if (!active) return;
 
         await new Promise((r) => {
@@ -267,14 +354,18 @@ export default function EbookReaderTab({
         applyReaderTheme(rendition, mergedPrefs);
 
         setStatus('Indexing pages…');
-        await book.locations.generate(1600);
+        await book.locations.generate(1024);
         if (!active) return;
 
         if (kosyncConfiguredRef.current) {
           try {
             const remote = await ebooksService.getProgress(d);
-            if (remote?.percentage != null && remote?.progress) {
-              await rendition.display(remote.progress);
+            const prog = remote?.progress;
+            if (typeof prog === 'string' && prog.startsWith('epubcfi(')) {
+              await rendition.display(prog);
+            } else if (typeof remote?.percentage === 'number' && remote.percentage > 0) {
+              const cfi = book.locations.cfiFromPercentage(remote.percentage);
+              await rendition.display(cfi || undefined);
             } else {
               await rendition.display();
             }
@@ -385,12 +476,36 @@ export default function EbookReaderTab({
         blobUrlRef.current = null;
       }
     };
-  }, [catalogId, acquisitionUrl, title, initialDigest, schedulePush]);
+  }, [catalogId, acquisitionUrl, title, initialDigest, initialAuthor, schedulePush, format]);
 
   useEffect(() => {
     const r = renditionRef.current;
     if (r) applyReaderTheme(r, prefs);
   }, [prefs.fontSize, prefs.fontFamily, prefs.lineHeight, prefs.theme]);
+
+  /** epubjs measures the host once; reflow when the reader pane size changes (e.g. chrome hidden). */
+  useEffect(() => {
+    if (format !== 'epub' || !readerReady) return;
+    const el = hostRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const resizeRendition = () => {
+      const r = renditionRef.current;
+      if (!r) return;
+      try {
+        const w = el.clientWidth;
+        const h = el.clientHeight;
+        if (w > 0 && h > 0) r.resize(w, h);
+      } catch (_) {
+        /* ignore */
+      }
+    };
+    resizeRendition();
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(resizeRendition);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [format, readerReady]);
 
   const scheduleReaderPrefsPersist = useCallback((readerPrefsSnapshot) => {
     if (prefsSaveTimerRef.current) clearTimeout(prefsSaveTimerRef.current);
@@ -442,115 +557,128 @@ export default function EbookReaderTab({
             flexShrink: 0,
             px: 1.5,
             py: 1.25,
-            pt: 2,
+            overflow: 'visible',
             display: 'flex',
-            alignItems: 'flex-end',
-            gap: 1.25,
-            flexWrap: 'wrap',
-            rowGap: 1.5,
+            flexDirection: 'column',
+            gap: 2.5,
           }}
         >
-          <MenuBook fontSize="small" color="primary" sx={{ mb: 0.5 }} />
-          <Box sx={{ flex: 1, minWidth: 140, mb: 0.75 }}>
-            <Typography variant="subtitle2" noWrap>
-              {title}
-            </Typography>
-            {digest ? (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mt: 0.25 }}>
-                <Tooltip
-                  title={
-                    'KoSync document id (partial MD5 of this EPUB’s bytes). Must match KOReader for the same file. ' +
-                    `Regression check: 10KiB test pattern → ${KOREADER_PARTIAL_MD5_REF_HEX}.`
-                  }
-                >
-                  <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace', fontSize: 10 }}>
-                    {digest}
-                  </Typography>
-                </Tooltip>
-                <Tooltip title="Copy sync id">
-                  <IconButton size="small" aria-label="Copy sync id" onClick={() => void copyDigest()} sx={{ p: 0.25 }}>
-                    <ContentCopy sx={{ fontSize: 14 }} />
-                  </IconButton>
-                </Tooltip>
-              </Box>
-            ) : null}
+          <Typography
+            variant="subtitle1"
+            component="h2"
+            sx={{
+              fontWeight: 600,
+              wordBreak: 'break-word',
+              overflowWrap: 'anywhere',
+              lineHeight: 1.35,
+              pr: 0.5,
+              pb: 0.25,
+            }}
+          >
+            {title}
+          </Typography>
+          <Box
+            sx={{
+              display: 'flex',
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 1.25,
+              flexWrap: 'nowrap',
+              overflowX: 'auto',
+              overflowY: 'visible',
+              pt: 0.75,
+              pb: 0.25,
+              width: '100%',
+              minHeight: 52,
+            }}
+          >
+            {format === 'epub' ? (
+              <>
+                <FormControl size="small" sx={{ minWidth: 100, flexShrink: 0 }}>
+                  <InputLabel id="ebook-reader-theme-label">Theme</InputLabel>
+                  <Select
+                    labelId="ebook-reader-theme-label"
+                    label="Theme"
+                    value={prefs.theme}
+                    onChange={(e) => {
+                      const theme = e.target.value;
+                      setPrefs((p) => {
+                        const next = { ...p, theme };
+                        scheduleReaderPrefsPersist(next);
+                        return next;
+                      });
+                    }}
+                  >
+                    <MenuItem value="light">Light</MenuItem>
+                    <MenuItem value="sepia">Sepia</MenuItem>
+                    <MenuItem value="dark">Dark</MenuItem>
+                  </Select>
+                </FormControl>
+                <FormControl size="small" sx={{ minWidth: 130, flexShrink: 0 }}>
+                  <InputLabel id="ebook-reader-font-label">Font</InputLabel>
+                  <Select
+                    labelId="ebook-reader-font-label"
+                    label="Font"
+                    value={prefs.fontFamily}
+                    onChange={(e) => {
+                      const fontFamily = e.target.value;
+                      setPrefs((p) => {
+                        const next = { ...p, fontFamily };
+                        scheduleReaderPrefsPersist(next);
+                        return next;
+                      });
+                    }}
+                  >
+                    <MenuItem value="Georgia, serif">Georgia</MenuItem>
+                    <MenuItem value="'Literata', serif">Literata</MenuItem>
+                    <MenuItem value="system-ui, sans-serif">System UI</MenuItem>
+                    <MenuItem value="'Iowan Old Style', serif">Iowan</MenuItem>
+                  </Select>
+                </FormControl>
+                <FormControl size="small" sx={{ minWidth: 118, flexShrink: 0 }}>
+                  <InputLabel id="ebook-reader-size-label">Size</InputLabel>
+                  <Select
+                    labelId="ebook-reader-size-label"
+                    label="Size"
+                    value={snapFontSizeToPresetPx(prefs.fontSize)}
+                    onChange={(e) => {
+                      const fontSize = Number(e.target.value);
+                      setPrefs((p) => {
+                        const next = { ...p, fontSize };
+                        scheduleReaderPrefsPersist(next);
+                        return next;
+                      });
+                    }}
+                  >
+                    {FONT_SIZE_PRESETS.map(({ label, px }) => (
+                      <MenuItem key={px} value={px}>
+                        {label}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </>
+            ) : (
+              <Typography variant="body2" color="text.secondary" sx={{ flexShrink: 0 }}>
+                PDF
+              </Typography>
+            )}
+            <Box sx={{ flex: '1 1 8px', minWidth: 8 }} />
+            <Tooltip title={fs ? 'Exit full screen' : 'Full screen'}>
+              <IconButton
+                size="small"
+                onClick={toggleFs}
+                sx={{ flexShrink: 0 }}
+                aria-label={fs ? 'Exit full screen' : 'Full screen'}
+              >
+                {fs ? <FullscreenExit /> : <Fullscreen />}
+              </IconButton>
+            </Tooltip>
+            <Button size="small" variant="outlined" onClick={() => setChromeOpen(false)} sx={{ flexShrink: 0 }}>
+              Hide
+            </Button>
           </Box>
-          <FormControl size="small" sx={{ minWidth: 110 }}>
-            <InputLabel id="ebook-reader-theme-label">Theme</InputLabel>
-            <Select
-              labelId="ebook-reader-theme-label"
-              label="Theme"
-              value={prefs.theme}
-              onChange={(e) => {
-                const theme = e.target.value;
-                setPrefs((p) => {
-                  const next = { ...p, theme };
-                  scheduleReaderPrefsPersist(next);
-                  return next;
-                });
-              }}
-            >
-              <MenuItem value="light">Light</MenuItem>
-              <MenuItem value="sepia">Sepia</MenuItem>
-              <MenuItem value="dark">Dark</MenuItem>
-            </Select>
-          </FormControl>
-          <FormControl size="small" sx={{ minWidth: 150 }}>
-            <InputLabel id="ebook-reader-font-label">Font</InputLabel>
-            <Select
-              labelId="ebook-reader-font-label"
-              label="Font"
-              value={prefs.fontFamily}
-              onChange={(e) => {
-                const fontFamily = e.target.value;
-                setPrefs((p) => {
-                  const next = { ...p, fontFamily };
-                  scheduleReaderPrefsPersist(next);
-                  return next;
-                });
-              }}
-            >
-              <MenuItem value="Georgia, serif">Georgia</MenuItem>
-              <MenuItem value="'Literata', serif">Literata</MenuItem>
-              <MenuItem value="system-ui, sans-serif">System UI</MenuItem>
-              <MenuItem value="'Iowan Old Style', serif">Iowan</MenuItem>
-            </Select>
-          </FormControl>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0, mb: 0.25 }}>
-            <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
-              Size
-            </Typography>
-            <Slider
-              sx={{ width: 140, py: 0.5 }}
-              size="small"
-              min={12}
-              max={28}
-              value={prefs.fontSize}
-              onChange={(_, v) => {
-                setPrefs((p) => {
-                  const next = { ...p, fontSize: v };
-                  scheduleReaderPrefsPersist(next);
-                  return next;
-                });
-              }}
-            />
-          </Box>
-          <Tooltip title={fs ? 'Exit full screen' : 'Full screen'}>
-            <IconButton size="small" onClick={toggleFs}>
-              {fs ? <FullscreenExit /> : <Fullscreen />}
-            </IconButton>
-          </Tooltip>
-          <Button size="small" onClick={() => setChromeOpen(false)}>
-            Hide
-          </Button>
         </Paper>
-      )}
-      {!chromeOpen && (
-        <Box sx={{ position: 'absolute', top: 4, right: 4, zIndex: 3 }}>
-          <Button size="small" variant="contained" onClick={() => setChromeOpen(true)}>
-            Show controls
-          </Button>
-        </Box>
       )}
       {error && (
         <Box p={2}>
@@ -587,63 +715,124 @@ export default function EbookReaderTab({
             isolation: 'isolate',
           }}
         >
-          <Box
-            ref={hostRef}
-            sx={{
-              position: 'absolute',
-              inset: 0,
-              overflow: 'hidden',
-            }}
-          />
-        {!error && (
+          {format === 'pdf' && pdfBytes ? (
+            <PdfBytesViewer
+              rawBytes={pdfBytes}
+              onPageLabelChange={setPageLocationLabel}
+              onReadyChange={setReaderReady}
+            />
+          ) : (
+            <Box
+              ref={hostRef}
+              sx={{
+                position: 'absolute',
+                inset: 0,
+                overflow: 'hidden',
+              }}
+            />
+          )}
+        {!chromeOpen && (
+          <Tooltip title="Tap or click top center — show reader controls" placement="bottom">
+            <Box
+              component="button"
+              type="button"
+              aria-label="Show reader controls"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => setChromeOpen(true)}
+              sx={{
+                ...readerTapZoneFocusSx,
+                position: 'absolute',
+                top: 0,
+                left: '50%',
+                transform: 'translateX(-50%)',
+                width: { xs: 'min(72%, 280px)', sm: 'min(50%, 320px)' },
+                height: { xs: 52, sm: 48 },
+                zIndex: 6,
+                p: 0,
+                m: 0,
+                cursor: 'pointer',
+                background: 'transparent',
+                WebkitTapHighlightColor: 'transparent',
+                touchAction: 'manipulation',
+                borderBottomLeftRadius: 8,
+                borderBottomRightRadius: 8,
+                '&:hover': {
+                  backgroundImage: (theme) =>
+                    theme.palette.mode === 'dark'
+                      ? 'linear-gradient(180deg, rgba(255,255,255,0.08) 0%, transparent 100%)'
+                      : 'linear-gradient(180deg, rgba(0,0,0,0.06) 0%, transparent 100%)',
+                },
+              }}
+            />
+          </Tooltip>
+        )}
+        {!error && format === 'epub' && (
           <>
-            <Tooltip title="Previous page (←)">
-              <span>
-                <IconButton
-                  size="large"
-                  aria-label="Previous page"
-                  onClick={() => void renditionRef.current?.prev()}
-                  disabled={!readerReady}
-                  sx={{
-                    position: 'absolute',
-                    left: overlayInsetsPx.left,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    zIndex: 5,
-                    color: '#fff',
-                    bgcolor: 'rgba(0,0,0,0.45)',
-                    backdropFilter: 'blur(6px)',
-                    '&:hover': { bgcolor: 'rgba(0,0,0,0.58)' },
-                    '&.Mui-disabled': { color: 'rgba(255,255,255,0.45)', bgcolor: 'rgba(0,0,0,0.25)' },
-                  }}
-                >
-                  <ChevronLeft fontSize="inherit" />
-                </IconButton>
-              </span>
+            <Tooltip title="Tap or click left edge — previous page (←)" placement="right">
+              <Box
+                component="button"
+                type="button"
+                aria-label="Previous page"
+                disabled={!readerReady}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => void renditionRef.current?.prev()}
+                sx={{
+                  ...readerTapZoneFocusSx,
+                  position: 'absolute',
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: { xs: 'min(28%, 112px)', sm: 'min(22%, 140px)' },
+                  minWidth: 44,
+                  zIndex: 5,
+                  p: 0,
+                  m: 0,
+                  cursor: readerReady ? 'pointer' : 'default',
+                  background: 'transparent',
+                  WebkitTapHighlightColor: 'transparent',
+                  touchAction: 'manipulation',
+                  '&:hover:not(:disabled)': {
+                    backgroundImage: (theme) =>
+                      theme.palette.mode === 'dark'
+                        ? 'linear-gradient(90deg, rgba(255,255,255,0.07) 0%, transparent 85%)'
+                        : 'linear-gradient(90deg, rgba(0,0,0,0.05) 0%, transparent 85%)',
+                  },
+                  '&:disabled': { opacity: 0, pointerEvents: 'none' },
+                }}
+              />
             </Tooltip>
-            <Tooltip title="Next page (→)">
-              <span>
-                <IconButton
-                  size="large"
-                  aria-label="Next page"
-                  onClick={() => void renditionRef.current?.next()}
-                  disabled={!readerReady}
-                  sx={{
-                    position: 'absolute',
-                    right: overlayInsetsPx.right,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    zIndex: 5,
-                    color: '#fff',
-                    bgcolor: 'rgba(0,0,0,0.45)',
-                    backdropFilter: 'blur(6px)',
-                    '&:hover': { bgcolor: 'rgba(0,0,0,0.58)' },
-                    '&.Mui-disabled': { color: 'rgba(255,255,255,0.45)', bgcolor: 'rgba(0,0,0,0.25)' },
-                  }}
-                >
-                  <ChevronRight fontSize="inherit" />
-                </IconButton>
-              </span>
+            <Tooltip title="Tap or click right edge — next page (→)" placement="left">
+              <Box
+                component="button"
+                type="button"
+                aria-label="Next page"
+                disabled={!readerReady}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => void renditionRef.current?.next()}
+                sx={{
+                  ...readerTapZoneFocusSx,
+                  position: 'absolute',
+                  right: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: { xs: 'min(28%, 112px)', sm: 'min(22%, 140px)' },
+                  minWidth: 44,
+                  zIndex: 5,
+                  p: 0,
+                  m: 0,
+                  cursor: readerReady ? 'pointer' : 'default',
+                  background: 'transparent',
+                  WebkitTapHighlightColor: 'transparent',
+                  touchAction: 'manipulation',
+                  '&:hover:not(:disabled)': {
+                    backgroundImage: (theme) =>
+                      theme.palette.mode === 'dark'
+                        ? 'linear-gradient(270deg, rgba(255,255,255,0.07) 0%, transparent 85%)'
+                        : 'linear-gradient(270deg, rgba(0,0,0,0.05) 0%, transparent 85%)',
+                  },
+                  '&:disabled': { opacity: 0, pointerEvents: 'none' },
+                }}
+              />
             </Tooltip>
             <Typography
               variant="caption"
@@ -660,7 +849,8 @@ export default function EbookReaderTab({
                 bgcolor: 'rgba(0,0,0,0.45)',
                 backdropFilter: 'blur(6px)',
                 pointerEvents: 'none',
-                maxWidth: `calc(100% - ${overlayInsetsPx.left + overlayInsetsPx.right + 24}px)`,
+                maxWidth: 'min(92%, 520px)',
+                textAlign: 'center',
               }}
             >
               {pageLocationLabel}

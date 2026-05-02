@@ -11,13 +11,21 @@ import * as FileSystem from 'expo-file-system';
 import TrackPlayer, {
   AppKilledPlaybackBehavior,
   Capability,
+  Event,
   State,
   useActiveTrack,
   usePlaybackState,
   type Track,
 } from 'react-native-track-player';
 import type { MusicTrack } from '../api/media';
-import { getStreamProxyUrl } from '../api/media';
+import { getCoverArtUrl, getStreamProxyUrl } from '../api/media';
+import { reportEmbyPlaybackStopped } from '../api/emby';
+import {
+  beginEmbyPlaybackForItem,
+  embySessionRef,
+  reportEmbyProgressFromPlayer,
+  stopEmbyPlaybackIfActive,
+} from '../media/embySession';
 import { getLocalPath } from '../utils/mediaDownloadStore';
 
 const POSITIONS_REL = 'media/positions.json';
@@ -62,11 +70,13 @@ export type PlayQueueMeta = {
   parentId?: string | null;
 };
 
-function normalizePlaybackState(raw: State | { state: State } | object | undefined): State {
+function normalizePlaybackState(raw: State | { state: State | undefined } | object | undefined): State {
   if (raw == null) return State.None;
-  if (typeof raw === 'number') return raw as State;
-  if (typeof raw === 'object' && 'state' in raw && typeof (raw as { state: State }).state === 'number') {
-    return (raw as { state: State }).state;
+  if (typeof raw === 'string' || typeof raw === 'number') return raw as State;
+  if (typeof raw === 'object' && 'state' in raw) {
+    const s = (raw as { state: State | undefined }).state;
+    if (s == null) return State.None;
+    return s;
   }
   return State.None;
 }
@@ -88,6 +98,8 @@ type MediaPlayerContextValue = {
   fullPlayerVisible: boolean;
   setFullPlayerVisible: (v: boolean) => void;
   playbackState: State;
+  shuffleEnabled: boolean;
+  toggleShuffle: () => void;
 };
 
 const MediaPlayerContext = createContext<MediaPlayerContextValue | null>(null);
@@ -95,11 +107,16 @@ const MediaPlayerContext = createContext<MediaPlayerContextValue | null>(null);
 export function MediaPlayerProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [fullPlayerVisible, setFullPlayerVisible] = useState(false);
+  const [shuffleEnabled, setShuffleEnabled] = useState(false);
   const [playMeta, setPlayMeta] = useState<PlayQueueMeta>({});
+  const playMetaRef = useRef<PlayQueueMeta>({});
   const positionsRef = useRef<Record<string, number>>({});
+  const lastEmbyProgressAtRef = useRef(0);
   const activeTrack = useActiveTrack();
   const rawState = usePlaybackState();
-  const playbackState = normalizePlaybackState(rawState as State | { state: State });
+  const playbackState = normalizePlaybackState(rawState as State | { state: State | undefined });
+
+  playMetaRef.current = playMeta;
 
   useEffect(() => {
     let cancelled = false;
@@ -136,6 +153,38 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     if (!ready) return;
+    const sub = TrackPlayer.addEventListener(Event.PlaybackActiveTrackChanged, async (ev) => {
+      if (playMetaRef.current.serviceType !== 'emby') return;
+      const lastId = ev.lastTrack?.id != null ? String(ev.lastTrack.id) : undefined;
+      const newId = ev.track?.id != null ? String(ev.track.id) : undefined;
+      const session = embySessionRef.current;
+      if (lastId && session && session.itemId === lastId && newId && newId !== lastId) {
+        embySessionRef.current = null;
+        try {
+          await reportEmbyPlaybackStopped({
+            ItemId: lastId,
+            MediaSourceId: session.mediaSourceId,
+            PlaySessionId: session.playSessionId,
+            PositionTicks: Math.floor(Math.max(0, ev.lastPosition) * 10_000_000),
+          });
+        } catch {
+          // ignore
+        }
+      }
+      if (newId && playMetaRef.current.serviceType === 'emby') {
+        void beginEmbyPlaybackForItem(newId, 0);
+      }
+      if (!newId && playMetaRef.current.serviceType === 'emby') {
+        embySessionRef.current = null;
+      }
+    });
+    return () => {
+      sub.remove();
+    };
+  }, [ready]);
+
+  useEffect(() => {
+    if (!ready) return;
     if (playbackState !== State.Playing) return;
     const id = setInterval(async () => {
       try {
@@ -145,6 +194,13 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
           positionsRef.current[track.id] = progress.position;
           await writePositionsFile(positionsRef.current);
         }
+        if (playMetaRef.current.serviceType === 'emby' && embySessionRef.current) {
+          const now = Date.now();
+          if (now - lastEmbyProgressAtRef.current >= 10_000) {
+            lastEmbyProgressAtRef.current = now;
+            void reportEmbyProgressFromPlayer(false);
+          }
+        }
       } catch {
         // ignore
       }
@@ -153,7 +209,12 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
   }, [ready, playbackState]);
 
   const replaceQueueAndPlay = useCallback(async (tracks: MusicTrack[], startIndex: number, meta: PlayQueueMeta) => {
+    if (playMetaRef.current.serviceType === 'emby') {
+      await stopEmbyPlaybackIfActive();
+    }
+    setShuffleEnabled(false);
     setPlayMeta(meta);
+    playMetaRef.current = meta;
     await TrackPlayer.reset();
     const queue = await Promise.all(
       tracks.map(async (t) => {
@@ -164,6 +225,12 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
             serviceType: meta.serviceType ?? t.service_type ?? undefined,
             parentId: meta.parentId ?? undefined,
           }));
+        const artwork = t.cover_art_id
+          ? await getCoverArtUrl(t.cover_art_id, {
+              serviceType: meta.serviceType ?? t.service_type ?? undefined,
+              size: 300,
+            })
+          : undefined;
         return {
           id: t.id,
           url,
@@ -171,7 +238,9 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
           artist: t.artist ?? undefined,
           album: t.album ?? undefined,
           duration: t.duration ?? undefined,
-        };
+          artwork,
+          cover_art_id: t.cover_art_id ?? undefined,
+        } as Track;
       })
     );
     await TrackPlayer.add(queue);
@@ -186,10 +255,16 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
         }
       }
       await TrackPlayer.play();
+      if (meta.serviceType === 'emby' && queue[idx]?.id != null) {
+        void beginEmbyPlaybackForItem(String(queue[idx].id), 0);
+      }
     }
   }, []);
 
   const pause = useCallback(async () => {
+    if (playMetaRef.current.serviceType === 'emby' && embySessionRef.current) {
+      void reportEmbyProgressFromPlayer(true);
+    }
     await TrackPlayer.pause();
   }, []);
 
@@ -210,8 +285,38 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const stop = useCallback(async () => {
+    if (playMetaRef.current.serviceType === 'emby') {
+      await stopEmbyPlaybackIfActive();
+    }
     await TrackPlayer.reset();
     setPlayMeta({});
+    playMetaRef.current = {};
+    setShuffleEnabled(false);
+  }, []);
+
+  const toggleShuffle = useCallback(() => {
+    setShuffleEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        void (async () => {
+          try {
+            const q = await TrackPlayer.getQueue();
+            const idx = (await TrackPlayer.getActiveTrackIndex()) ?? 0;
+            const upcoming = q.slice(idx + 1);
+            const shuffled = [...upcoming];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+            }
+            await TrackPlayer.removeUpcomingTracks();
+            if (shuffled.length) await TrackPlayer.add(shuffled);
+          } catch {
+            // ignore
+          }
+        })();
+      }
+      return next;
+    });
   }, []);
 
   const value = useMemo<MediaPlayerContextValue>(
@@ -230,6 +335,8 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
       fullPlayerVisible,
       setFullPlayerVisible,
       playbackState,
+      shuffleEnabled,
+      toggleShuffle,
     }),
     [
       ready,
@@ -244,6 +351,8 @@ export function MediaPlayerProvider({ children }: { children: React.ReactNode })
       stop,
       fullPlayerVisible,
       playbackState,
+      shuffleEnabled,
+      toggleShuffle,
     ]
   );
 

@@ -15,7 +15,9 @@ import {
   getAlbumsByArtist,
   getTracks,
   type MusicAlbum,
+  type MusicLibraryResponse,
   type MusicTrack,
+  type MusicTracksResponse,
 } from '../../../src/api/media';
 import { isApiError } from '../../../src/api/client';
 import { getColors } from '../../../src/theme/colors';
@@ -23,6 +25,21 @@ import { useMediaPlayer } from '../../../src/context/MediaPlayerContext';
 import { TrackItem } from '../../../src/components/media/TrackItem';
 import { consumeMediaSearchTracksSeed } from '../../../src/session/mediaSearchSeed';
 import { downloadTrack } from '../../../src/utils/mediaDownloadStore';
+import { getCachedEntry, setCachedEntry, TTL_TRACKS_MS } from '../../../src/utils/mediaListCache';
+
+function sortPodcastEpisodesNewestFirst(list: MusicTrack[]): MusicTrack[] {
+  return [...list].sort((a, b) => {
+    const ma = a.metadata as Record<string, unknown> | undefined;
+    const mb = b.metadata as Record<string, unknown> | undefined;
+    const ta = String(ma?.published_date ?? ma?.publishedAt ?? '');
+    const tb = String(mb?.published_date ?? mb?.publishedAt ?? '');
+    const da = ta ? new Date(ta).getTime() : NaN;
+    const db = tb ? new Date(tb).getTime() : NaN;
+    const na = Number.isFinite(da) ? da : 0;
+    const nb = Number.isFinite(db) ? db : 0;
+    return nb - na;
+  });
+}
 
 export default function MediaDetailScreen() {
   const router = useRouter();
@@ -41,6 +58,7 @@ export default function MediaDetailScreen() {
   const detailType = String(params.type ?? 'album');
   const title = String(params.title ?? 'Media');
   const serviceType = params.serviceType ? String(params.serviceType) : null;
+  const isAbs = serviceType === 'audiobookshelf';
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -62,21 +80,42 @@ export default function MediaDetailScreen() {
         return;
       }
       if (detailType === 'artist') {
+        const cacheKey = `library_artist_${parentId}_${serviceType ?? 'default'}`;
+        const cached = await getCachedEntry<MusicLibraryResponse>(cacheKey, TTL_TRACKS_MS);
+        if (cached) {
+          setArtistAlbums(cached.data.albums ?? []);
+          setTracks([]);
+          setLoading(false);
+          if (!cached.stale) return;
+        }
         const lib = await getAlbumsByArtist(parentId, serviceType);
         setArtistAlbums(lib.albums ?? []);
         setTracks([]);
+        await setCachedEntry(cacheKey, lib);
         return;
       }
       const pt = detailType === 'playlist' ? 'playlist' : 'album';
+      const cacheKey = `tracks_${pt}_${parentId}_${serviceType ?? 'default'}`;
+      const cached = await getCachedEntry<MusicTracksResponse>(cacheKey, TTL_TRACKS_MS);
+      if (cached) {
+        let t = cached.data.tracks ?? [];
+        if (isAbs && pt === 'playlist') t = sortPodcastEpisodesNewestFirst(t);
+        setTracks(t);
+        setLoading(false);
+        if (!cached.stale) return;
+      }
       const res = await getTracks(parentId, pt, serviceType);
-      setTracks(res.tracks ?? []);
+      let list = res.tracks ?? [];
+      if (isAbs && pt === 'playlist') list = sortPodcastEpisodesNewestFirst(list);
+      setTracks(list);
+      await setCachedEntry(cacheKey, { ...res, tracks: list });
     } catch (e) {
       setError(isApiError(e) ? `Failed to load (${e.status})` : 'Failed to load');
       setTracks([]);
     } finally {
       setLoading(false);
     }
-  }, [detailType, parentId, serviceType]);
+  }, [detailType, parentId, serviceType, isAbs]);
 
   useEffect(() => {
     void load();
@@ -104,6 +143,19 @@ export default function MediaDetailScreen() {
     [replaceQueueAndPlay, serviceType, parentId, detailType]
   );
 
+  const shuffleAll = useCallback(async () => {
+    if (!tracks.length) return;
+    const shuffled = [...tracks];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+    await replaceQueueAndPlay(shuffled, 0, {
+      serviceType,
+      parentId: detailType === 'album' || detailType === 'playlist' ? parentId : null,
+    });
+  }, [tracks, replaceQueueAndPlay, serviceType, parentId, detailType]);
+
   const downloadAll = useCallback(async () => {
     for (const t of tracks) {
       try {
@@ -120,7 +172,7 @@ export default function MediaDetailScreen() {
   if (detailType === 'artist') {
     return (
       <View style={[styles.root, { backgroundColor: c.background }]}>
-        <Text style={[styles.h2, { color: c.textSecondary }]}>Albums</Text>
+        <Text style={[styles.h2, { color: c.textSecondary }]}>{isAbs ? 'Books' : 'Albums'}</Text>
         <FlatList
           data={artistAlbums}
           keyExtractor={(item) => item.id}
@@ -129,7 +181,9 @@ export default function MediaDetailScreen() {
             loading ? (
               <ActivityIndicator color={c.textSecondary} style={{ marginTop: 24 }} />
             ) : (
-              <Text style={[styles.empty, { color: c.textSecondary }]}>No albums for this artist.</Text>
+              <Text style={[styles.empty, { color: c.textSecondary }]}>
+                {isAbs ? 'No books for this author.' : 'No albums for this artist.'}
+              </Text>
             )
           }
           renderItem={({ item }) => (
@@ -166,8 +220,20 @@ export default function MediaDetailScreen() {
     );
   }
 
+  const trackSectionHeading =
+    detailType === 'search'
+      ? null
+      : detailType === 'playlist' && isAbs
+        ? 'Episodes'
+        : detailType === 'album' && isAbs
+          ? 'Chapters'
+          : 'Tracks';
+
   return (
     <View style={[styles.root, { backgroundColor: c.background }]}>
+      {trackSectionHeading ? (
+        <Text style={[styles.h2, { color: c.textSecondary }]}>{trackSectionHeading}</Text>
+      ) : null}
       <View style={[styles.toolbar, { borderBottomColor: c.border }]}>
         <Pressable
           style={[styles.tbBtn, { backgroundColor: c.chipBg }]}
@@ -176,6 +242,14 @@ export default function MediaDetailScreen() {
         >
           <Ionicons name="play" size={18} color={c.text} />
           <Text style={[styles.tbTxt, { color: c.text }]}>Play all</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.tbBtn, { backgroundColor: c.chipBg }]}
+          onPress={() => void shuffleAll()}
+          disabled={!tracks.length}
+        >
+          <Ionicons name="shuffle" size={18} color={c.text} />
+          <Text style={[styles.tbTxt, { color: c.text }]}>Shuffle all</Text>
         </Pressable>
         <Pressable
           style={[styles.tbBtn, { backgroundColor: c.chipBg }]}
@@ -206,7 +280,13 @@ export default function MediaDetailScreen() {
             />
           )}
           ListEmptyComponent={
-            <Text style={[styles.empty, { color: c.textSecondary }]}>No tracks.</Text>
+            <Text style={[styles.empty, { color: c.textSecondary }]}>
+              {detailType === 'playlist' && isAbs
+                ? 'No episodes.'
+                : detailType === 'album' && isAbs
+                  ? 'No chapters.'
+                  : 'No tracks.'}
+            </Text>
           }
         />
       )}
@@ -226,6 +306,7 @@ const styles = StyleSheet.create({
   },
   toolbar: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
     paddingHorizontal: 12,
     paddingVertical: 10,

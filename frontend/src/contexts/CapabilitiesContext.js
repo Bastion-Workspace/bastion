@@ -1,13 +1,14 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import apiService from '../services/apiService';
-import { useAuth } from './AuthContext';
+import { useAuthOptional } from './AuthContext';
 
 const CapabilitiesContext = createContext({});
 
 export const useCapabilities = () => useContext(CapabilitiesContext);
 
 export const CapabilitiesProvider = ({ children }) => {
-  const { user } = useAuth();
+  const auth = useAuthOptional();
+  const user = auth?.user ?? null;
   const [caps, setCaps] = useState({});
   const isAdmin = (user?.role || '').toLowerCase() === 'admin';
 

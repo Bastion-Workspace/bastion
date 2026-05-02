@@ -70,9 +70,34 @@ export type MediaSourceListResponse = {
   sources: MusicServiceConfigResponse[];
 };
 
+/** Same rules as the Media library screen: configured and active sources only. */
+export function filterActiveConfiguredSources(
+  sources: MusicServiceConfigResponse[] | undefined | null
+): MusicServiceConfigResponse[] {
+  return (sources || []).filter((s) => s.has_config !== false && s.is_active !== false);
+}
+
 function q(serviceType?: string | null): string {
   if (!serviceType) return '';
   return `?service_type=${encodeURIComponent(serviceType)}`;
+}
+
+/**
+ * Cover-art URL with JWT in query (for list thumbnails without per-row async token fetch).
+ */
+export function buildCoverArtUrlSync(
+  coverArtId: string,
+  baseUrl: string,
+  token: string,
+  options?: { serviceType?: string | null; size?: number }
+): string {
+  const params = new URLSearchParams();
+  params.set('token', token);
+  if (options?.serviceType) params.set('service_type', options.serviceType);
+  if (options?.size != null) params.set('size', String(options.size));
+  const qs = params.toString();
+  const root = baseUrl.replace(/\/$/, '');
+  return `${root}/api/music/cover-art/${encodeURIComponent(coverArtId)}?${qs}`;
 }
 
 export async function getMediaSources(): Promise<MediaSourceListResponse> {
@@ -166,4 +191,21 @@ export async function getStreamProxyUrl(
   if (options?.parentId) params.set('parent_id', options.parentId);
   const qs = params.toString();
   return `${base}/api/music/stream-proxy/${encodeURIComponent(trackId)}${qs ? `?${qs}` : ''}`;
+}
+
+/**
+ * Absolute URL for cover-art proxy with JWT query param (RNTP artwork / Image).
+ */
+export async function getCoverArtUrl(
+  coverArtId: string,
+  options?: { serviceType?: string | null; size?: number }
+): Promise<string> {
+  const base = assertApiBaseUrl();
+  const token = await getStoredToken();
+  const params = new URLSearchParams();
+  if (token) params.set('token', token);
+  if (options?.serviceType) params.set('service_type', options.serviceType);
+  if (options?.size != null) params.set('size', String(options.size));
+  const qs = params.toString();
+  return `${base}/api/music/cover-art/${encodeURIComponent(coverArtId)}${qs ? `?${qs}` : ''}`;
 }

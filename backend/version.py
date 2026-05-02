@@ -18,7 +18,7 @@ def get_version() -> str:
             return version
     else:
         # Fallback if VERSION file doesn't exist
-        return "0.70.9"
+        return "0.70.12"
 
 __version__ = get_version()
 

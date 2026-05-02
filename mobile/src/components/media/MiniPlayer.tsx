@@ -1,5 +1,7 @@
 import { useMemo } from 'react';
-import { Image, Pressable, StyleSheet, Text, View, useColorScheme } from 'react-native';
+import { Image } from 'expo-image';
+import { useSegments } from 'expo-router';
+import { Pressable, StyleSheet, Text, View, useColorScheme } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { State } from 'react-native-track-player';
 import { MINI_PLAYER_STRIP_HEIGHT } from '../../constants/dock';
@@ -7,6 +9,7 @@ import { useMediaPlayer } from '../../context/MediaPlayerContext';
 import { getColors } from '../../theme/colors';
 
 export function MiniPlayer() {
+  const segments = useSegments();
   const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
   const c = useMemo(() => getColors(scheme), [scheme]);
   const {
@@ -18,6 +21,10 @@ export function MiniPlayer() {
     skipToNext,
     setFullPlayerVisible,
   } = useMediaPlayer();
+
+  if (segments.includes('video')) {
+    return null;
+  }
 
   if (!hasActiveSession || !activeTrack) {
     return null;
@@ -34,7 +41,12 @@ export function MiniPlayer() {
       accessibilityLabel="Open now playing"
     >
       {art ? (
-        <Image source={{ uri: art }} style={styles.art} />
+        <Image
+          source={{ uri: art }}
+          style={styles.art}
+          contentFit="cover"
+          cachePolicy="disk"
+        />
       ) : (
         <View style={[styles.artPlaceholder, { backgroundColor: c.chipBg }]}>
           <Ionicons name="musical-notes" size={22} color={c.textSecondary} />

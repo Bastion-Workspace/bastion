@@ -5,6 +5,7 @@ import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import { QueryClient, QueryClientProvider } from 'react-query';
 import { ThemeProvider as CustomThemeProvider, useTheme } from './contexts/ThemeContext';
+import { AuthProvider } from './contexts/AuthContext';
 import { createAppTheme } from './theme/themeConfig';
 import './styles/global.css';
 import App from './App';
@@ -61,8 +62,10 @@ root.render(
     <CustomThemeProvider>
       <DynamicThemeProvider>
         <BrowserRouter>
-          <ViewportFix />
-          <App />
+          <AuthProvider queryClient={queryClient}>
+            <ViewportFix />
+            <App />
+          </AuthProvider>
         </BrowserRouter>
       </DynamicThemeProvider>
     </CustomThemeProvider>

@@ -38,6 +38,8 @@ function serializeTrack(track) {
     artist: track.artist,
     album: track.album,
     artwork: track.artwork,
+    cover_art_id:
+      (track.cover_art_id && String(track.cover_art_id).trim()) || null,
     service_type: track.service_type || null,
     parent_id: track.metadata?.parent_id || track.parent_id || null
   };
@@ -787,13 +789,19 @@ export const MusicProvider = ({ children }) => {
 
     // Update metadata when track changes
     if (currentTrack) {
+      const coverId =
+        currentTrack.cover_art_id &&
+        String(currentTrack.cover_art_id).trim();
+      const artworkUrl = coverId
+        ? apiService.music.getCoverArtUrl(coverId, currentTrack.service_type, 512)
+        : currentTrack.artwork || null;
       navigator.mediaSession.metadata = new MediaMetadata({
         title: currentTrack.title || 'Unknown Track',
         artist: currentTrack.artist || 'Unknown Artist',
         album: currentTrack.album || 'Unknown Album',
-        artwork: currentTrack.artwork ? [
-          { src: currentTrack.artwork, sizes: '512x512', type: 'image/jpeg' }
-        ] : []
+        artwork: artworkUrl
+          ? [{ src: artworkUrl, sizes: '512x512', type: 'image/jpeg' }]
+          : []
       });
     } else {
       navigator.mediaSession.metadata = null;

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This repository uses GitHub Actions to build and push Docker images to GitHub Container Registry (`ghcr.io`) when you push a **version tag** matching `v*` (for example `v0.70.0` or `v0.70.9-dev`). You can also run the workflow manually from **Actions → Build and Push Docker Images → Run workflow** (optional **version** input; if omitted, the `VERSION` file on the selected branch is used).
+This repository uses GitHub Actions to build and push Docker images to GitHub Container Registry (`ghcr.io`) when you push a **version tag** matching `v*` (for example `v0.70.0` or `v0.70.12-dev`). You can also run the workflow manually from **Actions → Build and Push Docker Images → Run workflow** (optional **version** input; if omitted, the `VERSION` file on the selected branch is used).
 
 ## Main vs dev release channels
 
@@ -10,13 +10,13 @@ Releases are **tag-driven** and aligned with two branches:
 
 | Branch | Version examples (in `VERSION` / tag) | GHCR image prefix | Intended visibility |
 |--------|----------------------------------------|-------------------|---------------------|
-| **`main`** | `0.70.9` (no `-dev` suffix) | `ghcr.io/<owner>/bastion-<service>:…` | **Public** anonymous pulls |
-| **`dev`** | `0.70.9-dev` (suffix **`-dev`**) | `ghcr.io/<owner>/bastion-dev-<service>:…` | **Private** (org members / auth) |
+| **`main`** | `0.70.12` (no `-dev` suffix) | `ghcr.io/<owner>/bastion-<service>:…` | **Public** anonymous pulls |
+| **`dev`** | `0.70.12-dev` (suffix **`-dev`**) | `ghcr.io/<owner>/bastion-dev-<service>:…` | **Private** (org members / auth) |
 
 The workflow **checks** that:
 
 - **Production** tags (`v0.70.0`, etc.) point at a commit that is on **`origin/main`**.
-- **Development** tags (`v0.70.9-dev`, etc.) point at a commit that is on **`origin/dev`**.
+- **Development** tags (`v0.70.12-dev`, etc.) point at a commit that is on **`origin/dev`**.
 - **Manual runs** use **`main`** for production versions and **`dev`** for `-dev` versions (per `VERSION` / input).
 
 ### Why two image prefixes (`bastion-` vs `bastion-dev-`)?
@@ -57,14 +57,14 @@ Version numbers are tracked in the `VERSION` file at the repository root. This f
 
 ### Version format
 
-- **Production**: `0.70.9` → tag **`v0.70.9`** (no `-dev` in the version string).
-- **Development**: `0.70.9-dev` → tag **`v0.70.9-dev`** (suffix **`-dev`** marks the dev channel).
+- **Production**: `0.70.12` → tag **`v0.70.12`** (no `-dev` in the version string).
+- **Development**: `0.70.12-dev` → tag **`v0.70.12-dev`** (suffix **`-dev`** marks the dev channel).
 
 ## Image Tagging Strategy
 
 When a tag is pushed, each image receives multiple tags:
 
-1. **Version tag**: Exact version from the tag (e.g. `0.70.9-dev` or `0.70.9`).
+1. **Version tag**: Exact version from the tag (e.g. `0.70.12-dev` or `0.70.12`).
 2. **Latest tag**: `latest-dev` for dev versions, `latest` for production.
 3. **SHA tag**: Short git SHA (e.g. `sha-abc1234`).
 4. **Branch tag**: `dev` or `main` (label only; channel is determined by the version suffix).
@@ -94,16 +94,16 @@ The workflow builds and pushes first-party images from `docker-compose.yml`, inc
 
 ## Image Naming Convention
 
-**Production** (example org `myorg`, version `0.70.9`):
+**Production** (example org `myorg`, version `0.70.12`):
 
-- `ghcr.io/myorg/bastion-backend:0.70.9`
+- `ghcr.io/myorg/bastion-backend:0.70.12`
 - `ghcr.io/myorg/bastion-backend:latest`
 - `ghcr.io/myorg/bastion-backend:sha-abc1234`
 - `ghcr.io/myorg/bastion-backend:main`
 
-**Development** (version `0.70.9-dev`):
+**Development** (version `0.70.12-dev`):
 
-- `ghcr.io/myorg/bastion-dev-backend:0.70.9-dev`
+- `ghcr.io/myorg/bastion-dev-backend:0.70.12-dev`
 - `ghcr.io/myorg/bastion-dev-backend:latest-dev`
 - `ghcr.io/myorg/bastion-dev-backend:sha-abc1234`
 - `ghcr.io/myorg/bastion-dev-backend:dev`
@@ -114,13 +114,13 @@ The workflow builds and pushes first-party images from `docker-compose.yml`, inc
 
 ### Development release (from `dev`)
 
-1. Update `VERSION` on `dev`, e.g. `0.70.9-dev`.
+1. Update `VERSION` on `dev`, e.g. `0.70.12-dev`.
 2. Commit and push to **`dev`**.
 3. Tag and push (note the **`v`** prefix and **`-dev`** in the tag name):
 
    ```bash
-   git tag v0.70.9-dev
-   git push origin v0.70.9-dev
+   git tag v0.70.12-dev
+   git push origin v0.70.12-dev
    ```
 
 Images are published under **`bastion-dev-*`** and should remain **private** at the org level.
@@ -128,12 +128,12 @@ Images are published under **`bastion-dev-*`** and should remain **private** at 
 ### Production release (from `main`)
 
 1. Merge `dev` → **`main`** when ready.
-2. Set `VERSION` to a **non-`-dev`** version (e.g. `0.70.9`) on `main` if needed.
+2. Set `VERSION` to a **non-`-dev`** version (e.g. `0.70.12`) on `main` if needed.
 3. Tag and push:
 
    ```bash
-   git tag v0.70.9
-   git push origin v0.70.9
+   git tag v0.70.12
+   git push origin v0.70.12
    ```
 
 Images are published under **`bastion-*`**. Set GHCR package visibility to **public** for these packages (once per package) so anonymous `docker pull` works for operators.
@@ -162,7 +162,7 @@ The workflow uses `GITHUB_TOKEN` with:
 
 ### Workflow Not Triggering
 
-- Tag must start with `v` (e.g. `v0.70.9-dev`, not `0.70.9-dev` alone on the remote).
+- Tag must start with `v` (e.g. `v0.70.12-dev`, not `0.70.12-dev` alone on the remote).
 - Confirm the tag was pushed to the remote.
 
 ### “Production image tags must point at a commit on origin/main” (or dev variant)
@@ -187,7 +187,7 @@ Override `image:` to the GHCR reference you need, for example:
 ```yaml
 services:
   backend:
-    image: ghcr.io/myorg/bastion-dev-backend:0.70.9-dev
+    image: ghcr.io/myorg/bastion-dev-backend:0.70.12-dev
 ```
 
 or for production:
@@ -195,7 +195,7 @@ or for production:
 ```yaml
 services:
   backend:
-    image: ghcr.io/myorg/bastion-backend:0.70.9
+    image: ghcr.io/myorg/bastion-backend:0.70.12
 ```
 
 Replace `myorg` with your GitHub org or user (lowercase).

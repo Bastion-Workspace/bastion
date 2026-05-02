@@ -4,7 +4,7 @@ Unified file editing tools for Agent Factory.
 patch_file: batched semantic edits (insert_after_heading, replace, delete, append).
 Edits are sent to the backend; resolution to positions happens just-in-time there.
 append_to_file: sugar for appending content; delegates to patch_file.
-Both always create DB proposals for user approval.
+When pipeline metadata includes ``auto_apply`` (playbook step + unattended trigger), applies directly via document-service without a proposal.
 """
 
 import json
@@ -386,6 +386,51 @@ async def patch_file_tool(
 
     effective_agent = (_pipeline_metadata or {}).get("agent_profile_name") or agent_name
     summary_text = summary or f"Patch file: {len(semantic_ops)} edit(s)"
+    auto_apply = bool((_pipeline_metadata or {}).get("auto_apply"))
+
+    if auto_apply:
+        response = await client.apply_operations_directly(
+            document_id=document_id,
+            operations=semantic_ops,
+            user_id=user_id,
+            agent_name=effective_agent,
+            playbook_auto_apply=True,
+        )
+        if response.get("success"):
+            applied = int(response.get("applied_count") or 0)
+            logger.info(
+                "patch_file: auto_apply applied doc=%s operations=%s applied_count=%s",
+                document_id,
+                len(semantic_ops),
+                applied,
+            )
+            fmt = (
+                f"Applied {applied} edit(s) directly to document {document_id} (auto_apply)."
+            )
+            if skipped:
+                fmt += f" Skipped: {'; '.join(skipped)}"
+            return {
+                "success": True,
+                "proposal_id": None,
+                "document_id": document_id,
+                "operations_applied": applied,
+                "skipped_edits": skipped,
+                "message": response.get("message"),
+                "error": None,
+                "formatted": fmt,
+            }
+        return {
+            "success": False,
+            "proposal_id": None,
+            "document_id": document_id,
+            "operations_applied": 0,
+            "skipped_edits": skipped,
+            "message": response.get("message"),
+            "error": response.get("error"),
+            "formatted": response.get(
+                "error", response.get("message", "Auto-apply failed.")
+            ),
+        }
 
     response = await client.propose_document_edit(
         document_id=document_id,

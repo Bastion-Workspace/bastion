@@ -11,6 +11,7 @@ class Settings:
 
     SERVICE_NAME: str = os.getenv("SERVICE_NAME", "connections-service")
     GRPC_PORT: int = int(os.getenv("GRPC_PORT", "50057"))
+    TEAMS_WEBHOOK_PORT: int = int(os.getenv("TEAMS_WEBHOOK_PORT", "8080"))
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     PARALLEL_WORKERS: int = int(os.getenv("PARALLEL_WORKERS", "4"))
 

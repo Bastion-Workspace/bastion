@@ -975,7 +975,34 @@ class ConversationService:
                 conversation_id,
             )
             return dict(row) if row else None
-    
+
+    async def delete_conversation_message(
+        self, conversation_id: str, user_id: str, message_id: str
+    ) -> bool:
+        """Delete one message row after verifying conversation ownership."""
+        if not message_id or not conversation_id:
+            return False
+        lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(
+            conversation_id, user_id
+        )
+        if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
+            return False
+        pool = await self.lifecycle_manager._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)", user_id
+            )
+            row = await conn.fetchrow(
+                """
+                DELETE FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+                RETURNING message_id
+                """,
+                message_id,
+                conversation_id,
+            )
+            return row is not None
+
     async def get_conversation(self, conversation_id: str, user_id: str) -> Dict[str, Any]:
         """Get conversation with complete lifecycle information"""
         try:

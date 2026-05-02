@@ -711,26 +711,27 @@ async def apply_operations_directly(
     document_id: str,
     operations: List[Dict[str, Any]],
     user_id: str = "system",
-    agent_name: str = "unknown"
+    agent_name: str = "unknown",
+    playbook_auto_apply: bool = False,
 ) -> Dict[str, Any]:
     """
     Apply operations directly to a document file without creating a proposal.
     
-    **SECURITY**: Only allowed for specific trusted agent names (see ALLOWED_AGENTS).
-    This is a restricted operation - use with caution!
+    **SECURITY**: Only allowed for specific trusted agent names (see ALLOWED_AGENTS),
+    or when playbook_auto_apply is True (orchestrator: playbook step auto_apply + unattended trigger).
     
     Args:
         document_id: Document ID to edit
         operations: List of EditorOperation dicts to apply
         user_id: User ID (required - must match document owner)
         agent_name: Name of agent requesting this operation (for security check)
+        playbook_auto_apply: When True, skip trusted-agent allowlist and resolve semantic ops first.
     
     Returns:
         Dict with success, document_id, applied_count, and message
     """
-    # Security check: Only allow specific agents
     ALLOWED_AGENTS = ["project_content_manager"]
-    if agent_name not in ALLOWED_AGENTS:
+    if not playbook_auto_apply and agent_name not in ALLOWED_AGENTS:
         return {
             "success": False,
             "error": "Agent not authorized",
@@ -829,46 +830,94 @@ async def apply_operations_directly(
 
         fm_end = get_frontmatter_end(current_content)
 
-        # Apply operations (same logic as apply_document_edit_proposal)
-        # Sort operations by start position (highest first to keep offsets stable)
-        sorted_ops = sorted(operations, key=lambda op: op.get("start", 0), reverse=True)
-
         new_content = current_content
-        for op in sorted_ops:
-            op_type = op.get("op_type", "replace_range")
-            start = op.get("start", 0)
-            end = op.get("end", start)
-            text = op.get("text", "")
+        applied_count = 0
+        sorted_ops: List[Dict[str, Any]] = []
 
-            if op_type == "delete_range":
-                start = max(start, fm_end)
-                end = max(end, fm_end)
-                if start >= end:
-                    logger.warning("Skipping delete_range that targets frontmatter zone")
-                    continue
-                new_content = new_content[:start] + new_content[end:]
-            elif op_type == "replace_range":
-                start = max(start, fm_end)
-                end = max(end, fm_end)
-                if start >= end:
-                    logger.warning("Skipping replace_range that targets frontmatter zone")
-                    continue
-                new_content = new_content[:start] + text + new_content[end:]
-            elif op_type == "insert_after_heading":
-                anchor_text = op.get("anchor_text", "")
-                if anchor_text:
-                    anchor_pos = new_content.find(anchor_text, fm_end)
-                    if anchor_pos != -1:
-                        line_end = new_content.find("\n", anchor_pos + len(anchor_text))
-                        if line_end == -1:
-                            line_end = len(new_content)
-                        insert_pos = line_end + 1
-                        new_content = new_content[:insert_pos] + text + new_content[insert_pos:]
+        if playbook_auto_apply:
+            from utils.editor_operations_resolver import resolve_operations
+
+            raw_ops = _normalize_operations(operations)
+            resolved_ops = resolve_operations(current_content, raw_ops, frontmatter_end=fm_end)
+            n = min(len(raw_ops), len(resolved_ops))
+            if len(raw_ops) != len(resolved_ops):
+                logger.warning(
+                    "playbook_auto_apply: raw/resolved length mismatch (%s vs %s); using min length %s",
+                    len(raw_ops),
+                    len(resolved_ops),
+                    n,
+                )
+            indexed_candidates = []
+            for i in range(n):
+                op = resolved_ops[i]
+                if op.get("confidence", 0) > 0 and op.get("start", -1) >= 0:
+                    indexed_candidates.append((i, op))
+            indexed_candidates.sort(key=lambda x: x[1].get("start", 0), reverse=True)
+            for _raw_idx, op in indexed_candidates:
+                op_type = op.get("op_type", "replace_range")
+                start = op.get("start", 0)
+                end = op.get("end", start)
+                text = op.get("text", "")
+                try:
+                    if op_type == "delete_range":
+                        if 0 <= start < end <= len(new_content):
+                            new_content = new_content[:start] + new_content[end:]
+                            applied_count += 1
+                    elif op_type == "replace_range":
+                        if 0 <= start < end <= len(new_content):
+                            new_content = new_content[:start] + text + new_content[end:]
+                            applied_count += 1
+                    elif op_type in ("insert_after_heading", "insert_after"):
+                        if 0 <= start <= len(new_content):
+                            new_content = new_content[:start] + text + new_content[start:]
+                            applied_count += 1
+                except Exception as apply_err:
+                    logger.warning("playbook_auto_apply: failed applying op: %s", apply_err)
+            if applied_count == 0:
+                return {
+                    "success": False,
+                    "error": "No operations resolved",
+                    "message": "playbook_auto_apply: no operations could be resolved with confidence",
+                }
+            sorted_ops = [op for _, op in indexed_candidates]
+        else:
+            sorted_ops = sorted(operations, key=lambda op: op.get("start", 0), reverse=True)
+            for op in sorted_ops:
+                op_type = op.get("op_type", "replace_range")
+                start = op.get("start", 0)
+                end = op.get("end", start)
+                text = op.get("text", "")
+
+                if op_type == "delete_range":
+                    start = max(start, fm_end)
+                    end = max(end, fm_end)
+                    if start >= end:
+                        logger.warning("Skipping delete_range that targets frontmatter zone")
+                        continue
+                    new_content = new_content[:start] + new_content[end:]
+                elif op_type == "replace_range":
+                    start = max(start, fm_end)
+                    end = max(end, fm_end)
+                    if start >= end:
+                        logger.warning("Skipping replace_range that targets frontmatter zone")
+                        continue
+                    new_content = new_content[:start] + text + new_content[end:]
+                elif op_type == "insert_after_heading":
+                    anchor_text = op.get("anchor_text", "")
+                    if anchor_text:
+                        anchor_pos = new_content.find(anchor_text, fm_end)
+                        if anchor_pos != -1:
+                            line_end = new_content.find("\n", anchor_pos + len(anchor_text))
+                            if line_end == -1:
+                                line_end = len(new_content)
+                            insert_pos = line_end + 1
+                            new_content = new_content[:insert_pos] + text + new_content[insert_pos:]
+                        else:
+                            logger.warning("Anchor text not found for insert_after_heading: %s", anchor_text)
                     else:
-                        logger.warning("Anchor text not found for insert_after_heading: %s", anchor_text)
-                else:
-                    new_content = new_content + text
-        
+                        new_content = new_content + text
+            applied_count = len(sorted_ops)
+
         # Snapshot current content before overwrite (version history)
         try:
             from services.document_version_service import snapshot_before_write
@@ -877,7 +926,12 @@ async def apply_operations_directly(
             logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
         
         await dsf.write_text(user_id, file_path, new_content)
-        logger.info(f"✅ Applied operations directly: {file_path} ({len(new_content)} chars, {len(sorted_ops)} operations)")
+        logger.info(
+            "Applied operations directly: %s (%s chars, %s operations)",
+            file_path,
+            len(new_content),
+            applied_count,
+        )
         
         # Update file size in database
         await document_service.document_repository.update_file_size(
@@ -896,8 +950,8 @@ async def apply_operations_directly(
             return {
                 "success": True,
                 "document_id": document_id,
-                "applied_count": len(sorted_ops),
-                "message": f"Applied {len(sorted_ops)} operation(s) directly to document - exempt from vectorization"
+                "applied_count": applied_count,
+                "message": f"Applied {applied_count} operation(s) directly to document - exempt from vectorization"
             }
         
         # Re-embed the document
@@ -939,8 +993,8 @@ async def apply_operations_directly(
         return {
             "success": True,
             "document_id": document_id,
-            "applied_count": len(sorted_ops),
-            "message": f"Applied {len(sorted_ops)} operation(s) directly to document"
+            "applied_count": applied_count,
+            "message": f"Applied {applied_count} operation(s) directly to document"
         }
         
     except Exception as e:

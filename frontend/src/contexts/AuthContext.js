@@ -12,6 +12,9 @@ export const useAuth = () => {
   return context;
 };
 
+/** Same as useContext(AuthContext); returns null outside AuthProvider (no throw). For providers that must not crash the tree if context is missing. */
+export const useAuthOptional = () => useContext(AuthContext);
+
 export const AuthProvider = ({ children, queryClient }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);

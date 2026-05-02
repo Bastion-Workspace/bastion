@@ -15,7 +15,7 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 ## Summary
 
 - **A**: 42
-- **B**: 27
+- **B**: 29
 - **C**: 18
 - **R**: 81
 
@@ -191,6 +191,8 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 | `165_code_workspace_rls.sql` | B | included via \ir from 02-09 wrapper |
 | `166_notification_router.sql` | A | tables in 01: mobile_push_tokens, notification_log |
 | `167_device_capabilities_policy.sql` | B | included via \ir from 02-09 wrapper |
+| `168_music_cover_cache_index.sql` | B | included via \ir from 02-09 wrapper |
+| `169_music_cover_art_id_text.sql` | B | included via \ir from 02-09 wrapper |
 
 ## Wrapper `\ir` targets (02-09)
 
@@ -221,3 +223,5 @@ Regenerate: `python backend/scripts/generate_greenfield_coverage.py`
 - `164_user_shell_policy.sql`
 - `165_code_workspace_rls.sql`
 - `167_device_capabilities_policy.sql`
+- `168_music_cover_cache_index.sql`
+- `169_music_cover_art_id_text.sql`

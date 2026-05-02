@@ -496,7 +496,7 @@ services:
         - BUILDKIT_INLINE_CACHE=1
         - VITE_API_URL=${VITE_API_URL:-}
         - VITE_APP_NAME=${VITE_APP_NAME:-Bastion}
-        - VITE_VERSION=${VITE_VERSION:-0.70.9}
+        - VITE_VERSION=${VITE_VERSION:-0.70.12}
         - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
         - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
         - VITE_MAP_DARK_STYLE=${VITE_MAP_DARK_STYLE:-}
@@ -513,7 +513,7 @@ services:
       - "0.0.0.0:3051:80"
     environment:
       - VITE_APP_NAME=Bastion
-      - VITE_VERSION=0.70.9
+      - VITE_VERSION=0.70.12
       - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
       - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
     volumes:
@@ -545,7 +545,7 @@ services:
     environment:
       - VITE_API_URL=${VITE_API_URL:-}
       - VITE_APP_NAME=${VITE_APP_NAME:-Bastion}
-      - VITE_VERSION=${VITE_VERSION:-0.70.9}
+      - VITE_VERSION=${VITE_VERSION:-0.70.12}
       - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
       - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
       - VITE_MAP_DARK_STYLE=${VITE_MAP_DARK_STYLE:-}
@@ -808,7 +808,7 @@ services:
     environment:
       - SERVICE_NAME=image-vision-service
       - GRPC_PORT=50056
-      - SERVICE_VERSION=0.70.9
+      - SERVICE_VERSION=0.70.12
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEVICE=${IMAGE_VISION_DEVICE:-auto}
       - MAX_WORKERS=4
