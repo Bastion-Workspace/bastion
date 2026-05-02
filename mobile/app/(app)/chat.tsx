@@ -32,7 +32,14 @@ import { useModalSheetBottomPadding } from '../../src/components/ScreenShell';
 
 dayjs.extend(relativeTime);
 
-type Row = { id: string; role: string; content: string; statusText?: string };
+type Row = {
+  id: string;
+  role: string;
+  content: string;
+  statusText?: string;
+  /** True while the orchestrator stream for this assistant message is in flight. */
+  streaming?: boolean;
+};
 
 const DOC_SNIPPET_MAX = 12_000;
 
@@ -302,7 +309,10 @@ export default function BastionChatScreen() {
 
     setRows((prev) => [...prev, { id: `local-${Date.now()}`, role: 'user', content: q }]);
     const assistantId = `asst-${Date.now()}`;
-    setRows((prev) => [...prev, { id: assistantId, role: 'assistant', content: '' }]);
+    setRows((prev) => [
+      ...prev,
+      { id: assistantId, role: 'assistant', content: '', streaming: true },
+    ]);
     setStreaming(true);
     abortRef.current?.abort();
     abortRef.current = new AbortController();
@@ -318,9 +328,18 @@ export default function BastionChatScreen() {
         editor_preference: activeEditorPayload ? 'prefer' : undefined,
         signal: abortRef.current.signal,
         onChunk: (chunk) => {
+          if (chunk.type === 'run_started') {
+            setRows((prev) =>
+              prev.map((r) =>
+                r.id === assistantId
+                  ? { ...r, statusText: r.statusText?.trim() ? r.statusText : 'Starting…' }
+                  : r
+              )
+            );
+          }
           if (chunk.type === 'status') {
             const msg = String(chunk.message || chunk.content || '').trim();
-            if (msg && !acc) {
+            if (msg) {
               setRows((prev) =>
                 prev.map((r) => (r.id === assistantId ? { ...r, statusText: msg } : r))
               );
@@ -329,21 +348,40 @@ export default function BastionChatScreen() {
           if (chunk.type === 'content' && typeof chunk.content === 'string') {
             acc += chunk.content;
             setRows((prev) =>
+              prev.map((r) => (r.id === assistantId ? { ...r, content: acc } : r))
+            );
+          }
+          if (chunk.type === 'complete') {
+            const c =
+              typeof chunk.content === 'string' && chunk.content.trim() ? chunk.content : '';
+            if (c.length >= acc.length) {
+              acc = c;
+            }
+            setRows((prev) =>
               prev.map((r) =>
-                r.id === assistantId ? { ...r, content: acc, statusText: undefined } : r
+                r.id === assistantId
+                  ? { ...r, content: acc || r.content, streaming: false, statusText: undefined }
+                  : r
               )
             );
           }
-          if (
-            chunk.type === 'complete' &&
-            typeof chunk.content === 'string' &&
-            chunk.content &&
-            !acc
-          ) {
-            acc = chunk.content;
+          if (chunk.type === 'error') {
+            const err =
+              String(
+                (chunk as { message?: string; content?: string }).message ||
+                  (chunk as { content?: string }).content ||
+                  ''
+              ).trim() || 'Something went wrong';
             setRows((prev) =>
               prev.map((r) =>
-                r.id === assistantId ? { ...r, content: acc, statusText: undefined } : r
+                r.id === assistantId
+                  ? {
+                      ...r,
+                      content: r.content?.trim() ? r.content : err,
+                      statusText: undefined,
+                      streaming: false,
+                    }
+                  : r
               )
             );
           }
@@ -353,12 +391,22 @@ export default function BastionChatScreen() {
       setRows((prev) =>
         prev.map((r) =>
           r.id === assistantId
-            ? { ...r, content: r.content || '(Stream failed)', statusText: undefined }
+            ? {
+                ...r,
+                content: r.content || '(Stream failed)',
+                statusText: undefined,
+                streaming: false,
+              }
             : r
         )
       );
     } finally {
       setStreaming(false);
+      setRows((prev) =>
+        prev.map((r) =>
+          r.id === assistantId ? { ...r, streaming: false, statusText: undefined } : r
+        )
+      );
       if (cid && !acc) void loadMessages(cid);
     }
   }
@@ -425,16 +473,32 @@ export default function BastionChatScreen() {
             style={[
               styles.bubble,
               item.role === 'user' ? styles.bubbleUser : styles.bubbleAsst,
+              item.role === 'assistant' && item.streaming ? styles.bubbleAsstPending : null,
             ]}
           >
             {item.role === 'assistant' ? (
-              item.content.trim() ? (
-                <Markdown style={assistantMarkdownStyles}>{item.content}</Markdown>
-              ) : item.statusText ? (
-                <Text style={styles.statusText}>{item.statusText}</Text>
-              ) : (
-                <Text style={assistantMarkdownStyles.body}>{'\u00a0'}</Text>
-              )
+              <>
+                {item.content.trim() ? (
+                  <Markdown style={assistantMarkdownStyles}>{item.content}</Markdown>
+                ) : item.statusText ? (
+                  <Text style={styles.statusText}>{item.statusText}</Text>
+                ) : item.streaming ? (
+                  <View style={styles.pendingRow}>
+                    <ActivityIndicator size="small" color="#888" />
+                    <Text style={styles.pendingLabel}>Working…</Text>
+                  </View>
+                ) : (
+                  <Text style={assistantMarkdownStyles.body}>{'\u00a0'}</Text>
+                )}
+                {item.streaming && item.content.trim() && item.statusText ? (
+                  <View style={styles.inlineStatusRow}>
+                    <ActivityIndicator size="small" color="#888" />
+                    <Text style={styles.statusTextInline} numberOfLines={3}>
+                      {item.statusText}
+                    </Text>
+                  </View>
+                ) : null}
+              </>
             ) : (
               <Text style={[styles.msg, styles.msgUser]}>{item.content}</Text>
             )}
@@ -577,9 +641,27 @@ const styles = StyleSheet.create({
   },
   bubbleUser: { alignSelf: 'flex-end', backgroundColor: '#1a1a2e' },
   bubbleAsst: { alignSelf: 'flex-start', backgroundColor: '#fff', borderWidth: 1, borderColor: '#ddd' },
+  bubbleAsstPending: { minWidth: 160, minHeight: 48, justifyContent: 'center' },
   msg: { fontSize: 15, color: '#111' },
   msgUser: { color: '#fff' },
   statusText: { fontSize: 14, color: '#888', fontStyle: 'italic' },
+  pendingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 4,
+  },
+  pendingLabel: { fontSize: 14, color: '#666' },
+  inlineStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#e0e0e0',
+  },
+  statusTextInline: { flex: 1, fontSize: 13, color: '#666', fontStyle: 'italic' },
   composer: { flexDirection: 'row', padding: 8, alignItems: 'flex-end', borderTopWidth: 1, borderColor: '#ddd', gap: 8 },
   headerModelBtn: {
     flexDirection: 'row',

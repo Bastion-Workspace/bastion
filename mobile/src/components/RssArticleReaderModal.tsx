@@ -228,6 +228,23 @@ export function RssArticleReaderModal({
     []
   );
 
+  /** Swipe down on the controls sheet to dismiss (same idea as dragging a sheet closed). */
+  const chromePanelPan = useMemo(
+    () =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onMoveShouldSetPanResponder: (_e, gs) =>
+          gs.dy > 10 && gs.dy > Math.abs(gs.dx) * 0.55,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderRelease: (_e, gs) => {
+          if (gs.dy > 44 && gs.dy > Math.abs(gs.dx) * 1.2) {
+            setChromeOpen(false);
+          }
+        },
+      }),
+    []
+  );
+
   useEffect(() => {
     if (!visible || !article) {
       setDetail(null);
@@ -295,6 +312,7 @@ export function RssArticleReaderModal({
 
   const chromePanel = (
     <View
+      {...chromePanelPan.panHandlers}
       style={[
         styles.chromePanel,
         {
@@ -312,8 +330,9 @@ export function RssArticleReaderModal({
           }}
           style={styles.headerBtn}
           accessibilityRole="button"
+          accessibilityLabel="Back to article list"
         >
-          <Text style={[styles.headerBtnText, { color: colors.link }]}>Close</Text>
+          <Ionicons name="chevron-back" size={28} color={colors.link} />
         </Pressable>
         <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={2} ellipsizeMode="tail">
           {display?.title || 'Article'}
@@ -466,8 +485,13 @@ export function RssArticleReaderModal({
             <Pressable onPress={() => void openOriginal()} style={styles.openLink}>
               <Text style={[styles.openLinkText, { color: colors.link }]}>Open original link</Text>
             </Pressable>
-            <Pressable onPress={onClose} style={styles.emptyClose}>
-              <Text style={[styles.emptyCloseText, { color: colors.link }]}>Close</Text>
+            <Pressable
+              onPress={onClose}
+              style={styles.emptyClose}
+              accessibilityRole="button"
+              accessibilityLabel="Back to article list"
+            >
+              <Ionicons name="chevron-back" size={28} color={colors.link} />
             </Pressable>
           </View>
         )}
@@ -567,5 +591,4 @@ const styles = StyleSheet.create({
   openLink: { paddingVertical: 12, paddingHorizontal: 20 },
   openLinkText: { fontWeight: '700', fontSize: 16 },
   emptyClose: { marginTop: 16, padding: 12 },
-  emptyCloseText: { fontSize: 16, fontWeight: '600' },
 });

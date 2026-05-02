@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fix: **Bastion Mobile** — appearance preference: sync read from SecureStore and `Appearance.setColorScheme` before first paint; valid storage key (`app.appearancePreference`); write failures propagate; `NavigationThemeBridge` gates on `hydrated`.
 
+## [0.70.13] - 2026-05-02
+
+- Update: **Bastion Mobile** — chat shows a working indicator, server status lines while streaming (including after tokens start), and a wider pending assistant bubble; RSS article chrome uses a back chevron and swipe-down on the controls sheet to dismiss.
+
 ## [0.70.12] - 2026-05-01
 
 - Feature: **Agent Factory playbooks** — optional per-step `auto_apply` (boolean): on unattended runs (`scheduled`, `folder_watch`, team dispatch, etc.), `patch_file` applies edits directly via document-service instead of creating a proposal; `ApplyOperationsDirectlyRequest` adds `playbook_auto_apply`; folder-watch Celery dispatch sets `trigger_type: folder_watch`.
