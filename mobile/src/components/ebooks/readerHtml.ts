@@ -31,7 +31,7 @@ window.__epubB64 = ${JSON.stringify(epubBase64)};
   var book = null;
   var rendition = null;
   var themeKey = 'light';
-  var fontSize = 18;
+  var fontSize = 20;
   var fontFamily = 'Georgia, serif';
 
   function send(o) {
@@ -91,15 +91,35 @@ window.__epubB64 = ${JSON.stringify(epubBase64)};
       dark: { body: { background: '#1e1e1e', color: '#e6e6e6' } }
     };
     var t = themes[themeKey] || themes.light;
-    rendition.themes.default(
-      Object.assign({}, t, {
-        p: {
-          'font-family': fontFamily,
-          'font-size': fontSize + 'px !important',
-          'line-height': '1.45 !important'
-        }
-      })
-    );
+    var bodyStyles = Object.assign({}, t.body, {
+      '-webkit-font-smoothing': 'none',
+      'font-smooth': 'never',
+      'font-weight': '600'
+    });
+    var readerText = {
+      'font-family': fontFamily,
+      'font-size': fontSize + 'px !important',
+      'line-height': '1.65 !important',
+      'letter-spacing': '0.015em !important',
+      'font-weight': '600 !important',
+      '-webkit-font-smoothing': 'none !important',
+      'font-smooth': 'never !important'
+    };
+    rendition.themes.default({
+      body: bodyStyles,
+      p: readerText,
+      li: readerText,
+      td: readerText,
+      th: readerText,
+      blockquote: readerText,
+      'h1,h2,h3,h4,h5,h6': {
+        'font-family': fontFamily + ' !important',
+        'font-weight': '700 !important',
+        'line-height': '1.3 !important',
+        '-webkit-font-smoothing': 'none !important',
+        'font-smooth': 'never !important'
+      }
+    });
   }
 
   window.receiveCmd = function (cmd) {
@@ -223,7 +243,7 @@ var __epubRelUrl = ${JSON.stringify(epubRelativeUrl)};
   var book = null;
   var rendition = null;
   var themeKey = 'light';
-  var fontSize = 18;
+  var fontSize = 20;
   var fontFamily = 'Georgia, serif';
 
   function send(o) {
@@ -283,15 +303,35 @@ var __epubRelUrl = ${JSON.stringify(epubRelativeUrl)};
       dark: { body: { background: '#1e1e1e', color: '#e6e6e6' } }
     };
     var t = themes[themeKey] || themes.light;
-    rendition.themes.default(
-      Object.assign({}, t, {
-        p: {
-          'font-family': fontFamily,
-          'font-size': fontSize + 'px !important',
-          'line-height': '1.45 !important'
-        }
-      })
-    );
+    var bodyStyles = Object.assign({}, t.body, {
+      '-webkit-font-smoothing': 'none',
+      'font-smooth': 'never',
+      'font-weight': '600'
+    });
+    var readerText = {
+      'font-family': fontFamily,
+      'font-size': fontSize + 'px !important',
+      'line-height': '1.65 !important',
+      'letter-spacing': '0.015em !important',
+      'font-weight': '600 !important',
+      '-webkit-font-smoothing': 'none !important',
+      'font-smooth': 'never !important'
+    };
+    rendition.themes.default({
+      body: bodyStyles,
+      p: readerText,
+      li: readerText,
+      td: readerText,
+      th: readerText,
+      blockquote: readerText,
+      'h1,h2,h3,h4,h5,h6': {
+        'font-family': fontFamily + ' !important',
+        'font-weight': '700 !important',
+        'line-height': '1.3 !important',
+        '-webkit-font-smoothing': 'none !important',
+        'font-smooth': 'never !important'
+      }
+    });
   }
 
   window.receiveCmd = function (cmd) {

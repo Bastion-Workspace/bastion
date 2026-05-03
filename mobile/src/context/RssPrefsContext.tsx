@@ -31,15 +31,17 @@ type Ctx = {
 const RssPrefsContext = createContext<Ctx | null>(null);
 
 const FONT_MIN = 12;
-const FONT_MAX = 24;
+const FONT_MAX = 32;
 
 function clampFontSize(n: number): number {
   return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(n)));
 }
 
 function parseFontFamily(raw: string | null): RssArticleFontFamily {
-  if (raw === 'serif' || raw === 'mono') return raw;
-  return 'sans';
+  if (raw === 'mono') return 'mono';
+  if (raw === 'serif') return 'serif';
+  if (raw === 'sans') return 'sans';
+  return 'serif';
 }
 
 function parseArticleTheme(raw: string | null): RssReaderTheme {
@@ -50,8 +52,8 @@ function parseArticleTheme(raw: string | null): RssReaderTheme {
 export function RssPrefsProvider({ children }: { children: ReactNode }) {
   const [source, setSourceState] = useState<string>(RSS_SOURCE_ALL);
   const [autoMarkRead, setAutoMarkReadState] = useState(false);
-  const [articleFontSize, setArticleFontSizeState] = useState(16);
-  const [articleFontFamily, setArticleFontFamilyState] = useState<RssArticleFontFamily>('sans');
+  const [articleFontSize, setArticleFontSizeState] = useState(20);
+  const [articleFontFamily, setArticleFontFamilyState] = useState<RssArticleFontFamily>('serif');
   const [articleTheme, setArticleThemeState] = useState<RssReaderTheme>('auto');
   const [hydrated, setHydrated] = useState(false);
 

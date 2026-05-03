@@ -46,7 +46,7 @@ import {
 } from '../../../src/session/lastEbookParamsStore';
 
 const DEFAULT_PREFS = {
-  fontSize: 18,
+  fontSize: 20,
   theme: 'light' as ReaderTheme,
   /** Stack matches web reader where possible; missing faces fall back per platform. */
   fontFamily: 'Georgia, serif',

@@ -94,7 +94,8 @@ function wrapHtmlDocument(
   const { background, text, textSecondary, link, border, surfaceMuted } = palette;
   return `<!DOCTYPE html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>${baseTag}<style>
 html,body{background-color:${background};margin:0;}
-body{font-family:${fontFamilyCss};font-size:${fontSizePx}px;line-height:1.45;color:${text};padding:12px;}
+html{-webkit-font-smoothing:none;font-smooth:never;}
+body{font-family:${fontFamilyCss};font-size:${fontSizePx}px;line-height:1.65;letter-spacing:0.015em;font-weight:600;color:${text};padding:16px;-webkit-font-smoothing:none;font-smooth:never;}
 img,video{max-width:100%;height:auto;}
 pre{white-space:pre-wrap;font-family:inherit;overflow-x:auto;background-color:${surfaceMuted};border:1px solid ${border};padding:8px;border-radius:6px;}
 a{color:${link};}

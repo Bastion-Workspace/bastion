@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: **Bastion Mobile** — RSS and EPUB readers: semibold body text, no font smoothing, wider line height and tracking for e-ink; RSS defaults (serif, 20px) and max font size 32px; EPUB defaults 20px.
+
 ## [0.70.14] - 2026-05-02
 
 - Feature: **eBooks (web, mobile, BBS)** — Directional KoSync: per-device local reading position; when cloud is meaningfully behind local, web and mobile open at local with a dismissible banner to jump to sync; BBS uses one prompt only when session and sync chapters differ by 2+.
